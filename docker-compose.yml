@@ -1,0 +1,33 @@
+services:
+  server:
+    build:
+      context: ./server
+    container_name: modelmirror-server
+    env_file:
+      - ./server/.env
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health', timeout=3).read()",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  client:
+    build:
+      context: ./client
+    container_name: modelmirror-client
+    depends_on:
+      server:
+        condition: service_healthy
+    ports:
+      - "5173:80"
+    restart: unless-stopped

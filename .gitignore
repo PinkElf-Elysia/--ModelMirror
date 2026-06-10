@@ -1,0 +1,47 @@
+# Dependencies
+node_modules/
+client/node_modules/
+server/venv/
+server/.venv/
+
+# Build outputs
+dist/
+client/dist/
+build/
+.vite/
+
+# Environment and secrets
+.env
+*.env.local
+client/.env
+server/.env
+
+# Logs and runtime output
+*.log
+*.err
+client/*.log
+server/*.log
+client/dev-server.err
+server/server.err
+server/uvicorn.err.log
+server/uvicorn.out.log
+
+# Python cache
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Dify / Docker persistent data
+docker-data/
+volumes/
+
+# Temporary generated assets
+.tmp-*/
+.tmp-*
+artifacts/

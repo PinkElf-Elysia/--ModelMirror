@@ -1,0 +1,590 @@
+import {
+  addEdge,
+  Background,
+  BackgroundVariant,
+  Controls,
+  MiniMap,
+  ReactFlow,
+  ReactFlowProvider,
+  useEdgesState,
+  useNodesState,
+  useReactFlow,
+  type Connection,
+  type NodeChange,
+  type EdgeChange,
+} from "@xyflow/react";
+import "@xyflow/react/dist/style.css";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { models } from "../../data/models";
+import {
+  type CodeOperation,
+  type ConditionOperator,
+  type WorkflowDefinition,
+  type WorkflowEdge,
+  type WorkflowNode,
+  type WorkflowNodeData,
+  type WorkflowNodeKind,
+} from "../../types/workflow";
+import NodePalette from "./NodePalette";
+import WorkflowNodeCard from "./WorkflowNodeCard";
+import WorkflowRun from "./WorkflowRun";
+
+const nodeTypes = {
+  workflowNode: WorkflowNodeCard,
+};
+
+const storagePrefix = "modelmirror-workflow:";
+
+function createNodeData(kind: WorkflowNodeKind): WorkflowNodeData {
+  if (kind === "input") {
+    return {
+      kind,
+      title: "接待处输入",
+      description: "收集用户给流水线的原始任务。",
+      variableName: "user_input",
+    };
+  }
+
+  if (kind === "llm") {
+    return {
+      kind,
+      title: "模型工位",
+      description: "调用模型，把上游变量加工成新结果。",
+      modelId: "deepseek/deepseek-chat",
+      prompt: "请基于以下输入给出清晰回答：\n\n{{user_input}}",
+      outputVariable: "llm_output",
+    };
+  }
+
+  if (kind === "condition") {
+    return {
+      kind,
+      title: "分流判断",
+      description: "根据变量内容决定走“是”或“否”。",
+      conditionVariable: "user_input",
+      conditionOperator: "contains",
+      conditionValue: "代码",
+    };
+  }
+
+  if (kind === "code") {
+    return {
+      kind,
+      title: "安全加工",
+      description: "只执行预置字符串操作，不运行任意代码。",
+      codeOperation: "upper",
+      codeInputVariable: "llm_output",
+      codeOutputVariable: "code_output",
+      replaceFrom: "",
+      replaceTo: "",
+      concatValue: "",
+    };
+  }
+
+  return {
+    kind,
+    title: "最终交付",
+    description: "把指定变量作为工作流结果交付。",
+    outputVariable: "llm_output",
+  };
+}
+
+function createNode(kind: WorkflowNodeKind, x: number, y: number): WorkflowNode {
+  return {
+    id: `${kind}-${Date.now()}-${Math.random().toString(16).slice(2, 7)}`,
+    type: "workflowNode",
+    position: { x, y },
+    data: createNodeData(kind),
+  };
+}
+
+function initialDefinition(workflowId: string): WorkflowDefinition {
+  const inputNode: WorkflowNode = {
+    id: "input-1",
+    type: "workflowNode",
+    position: { x: 0, y: 80 },
+    data: createNodeData("input"),
+  };
+  const llmNode: WorkflowNode = {
+    id: "llm-1",
+    type: "workflowNode",
+    position: { x: 340, y: 80 },
+    data: createNodeData("llm"),
+  };
+  const outputNode: WorkflowNode = {
+    id: "output-1",
+    type: "workflowNode",
+    position: { x: 700, y: 80 },
+    data: createNodeData("output"),
+  };
+
+  return {
+    id: workflowId,
+    title: "新建 AI 流水线",
+    nodes: [inputNode, llmNode, outputNode],
+    edges: [
+      {
+        id: "edge-input-llm",
+        source: inputNode.id,
+        target: llmNode.id,
+      },
+      {
+        id: "edge-llm-output",
+        source: llmNode.id,
+        target: outputNode.id,
+      },
+    ],
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+function loadDefinition(workflowId: string) {
+  const raw = window.localStorage.getItem(`${storagePrefix}${workflowId}`);
+  if (!raw) return initialDefinition(workflowId);
+
+  try {
+    return JSON.parse(raw) as WorkflowDefinition;
+  } catch {
+    return initialDefinition(workflowId);
+  }
+}
+
+function Field({
+  label,
+  children,
+}: {
+  label: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <label className="block">
+      <span className="text-xs font-semibold text-slate-300">{label}</span>
+      <div className="mt-2">{children}</div>
+    </label>
+  );
+}
+
+function textInputClass() {
+  return "w-full rounded-lg border border-white/10 bg-white/[0.055] px-3 py-2 text-sm text-white outline-none transition placeholder:text-slate-500 focus:border-brand-300/50 focus:ring-4 focus:ring-brand-300/10";
+}
+
+interface NodeConfigProps {
+  node: WorkflowNode | null;
+  onChange: (nodeId: string, data: Partial<WorkflowNodeData>) => void;
+}
+
+function NodeConfig({ node, onChange }: NodeConfigProps) {
+  if (!node) {
+    return (
+      <div className="rounded-lg border border-dashed border-white/15 bg-white/[0.035] px-4 py-8 text-center text-sm leading-6 text-slate-400">
+        点击画布上的工位牌，即可编辑节点配置。
+      </div>
+    );
+  }
+
+  const data = node.data;
+  const update = (patch: Partial<WorkflowNodeData>) => onChange(node.id, patch);
+
+  return (
+    <div className="space-y-4">
+      <Field label="工位名称">
+        <input
+          className={textInputClass()}
+          onChange={(event) => update({ title: event.target.value })}
+          value={data.title}
+        />
+      </Field>
+
+      <Field label="说明">
+        <textarea
+          className={`${textInputClass()} min-h-20 resize-none leading-6`}
+          onChange={(event) => update({ description: event.target.value })}
+          value={data.description}
+        />
+      </Field>
+
+      {data.kind === "input" ? (
+        <Field label="输入变量名">
+          <input
+            className={textInputClass()}
+            onChange={(event) => update({ variableName: event.target.value })}
+            value={data.variableName ?? ""}
+          />
+        </Field>
+      ) : null}
+
+      {data.kind === "llm" ? (
+        <>
+          <Field label="调用模型">
+            <select
+              className={textInputClass()}
+              onChange={(event) => update({ modelId: event.target.value })}
+              value={data.modelId ?? "deepseek/deepseek-chat"}
+            >
+              {models.map((model) => (
+                <option
+                  className="bg-slate-950 text-white"
+                  key={model.id}
+                  value={model.id}
+                >
+                  {model.name}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <Field label="提示词（支持 {{变量}}）">
+            <textarea
+              className={`${textInputClass()} min-h-36 resize-none leading-6`}
+              onChange={(event) => update({ prompt: event.target.value })}
+              value={data.prompt ?? ""}
+            />
+          </Field>
+          <Field label="输出变量名">
+            <input
+              className={textInputClass()}
+              onChange={(event) => update({ outputVariable: event.target.value })}
+              value={data.outputVariable ?? ""}
+            />
+          </Field>
+        </>
+      ) : null}
+
+      {data.kind === "condition" ? (
+        <>
+          <Field label="判断变量">
+            <input
+              className={textInputClass()}
+              onChange={(event) =>
+                update({ conditionVariable: event.target.value })
+              }
+              value={data.conditionVariable ?? ""}
+            />
+          </Field>
+          <Field label="判断方式">
+            <select
+              className={textInputClass()}
+              onChange={(event) =>
+                update({
+                  conditionOperator: event.target.value as ConditionOperator,
+                })
+              }
+              value={data.conditionOperator ?? "contains"}
+            >
+              <option className="bg-slate-950" value="contains">
+                包含
+              </option>
+              <option className="bg-slate-950" value="equals">
+                等于
+              </option>
+            </select>
+          </Field>
+          <Field label="比较值">
+            <input
+              className={textInputClass()}
+              onChange={(event) => update({ conditionValue: event.target.value })}
+              value={data.conditionValue ?? ""}
+            />
+          </Field>
+        </>
+      ) : null}
+
+      {data.kind === "code" ? (
+        <>
+          <div className="rounded-lg border border-amber-300/25 bg-amber-300/10 px-3 py-2 text-xs leading-5 text-amber-50">
+            安全提示：MVP 不执行任意代码，仅提供 upper、lower、replace、concat 四种字符串操作。
+          </div>
+          <Field label="内置操作">
+            <select
+              className={textInputClass()}
+              onChange={(event) =>
+                update({ codeOperation: event.target.value as CodeOperation })
+              }
+              value={data.codeOperation ?? "upper"}
+            >
+              <option className="bg-slate-950" value="upper">
+                转大写
+              </option>
+              <option className="bg-slate-950" value="lower">
+                转小写
+              </option>
+              <option className="bg-slate-950" value="replace">
+                替换
+              </option>
+              <option className="bg-slate-950" value="concat">
+                拼接
+              </option>
+            </select>
+          </Field>
+          <Field label="输入变量">
+            <input
+              className={textInputClass()}
+              onChange={(event) =>
+                update({ codeInputVariable: event.target.value })
+              }
+              value={data.codeInputVariable ?? ""}
+            />
+          </Field>
+          <Field label="输出变量">
+            <input
+              className={textInputClass()}
+              onChange={(event) =>
+                update({ codeOutputVariable: event.target.value })
+              }
+              value={data.codeOutputVariable ?? ""}
+            />
+          </Field>
+          {data.codeOperation === "replace" ? (
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="把">
+                <input
+                  className={textInputClass()}
+                  onChange={(event) => update({ replaceFrom: event.target.value })}
+                  value={data.replaceFrom ?? ""}
+                />
+              </Field>
+              <Field label="替换为">
+                <input
+                  className={textInputClass()}
+                  onChange={(event) => update({ replaceTo: event.target.value })}
+                  value={data.replaceTo ?? ""}
+                />
+              </Field>
+            </div>
+          ) : null}
+          {data.codeOperation === "concat" ? (
+            <Field label="追加内容">
+              <input
+                className={textInputClass()}
+                onChange={(event) => update({ concatValue: event.target.value })}
+                value={data.concatValue ?? ""}
+              />
+            </Field>
+          ) : null}
+        </>
+      ) : null}
+
+      {data.kind === "output" ? (
+        <Field label="最终输出变量">
+          <input
+            className={textInputClass()}
+            onChange={(event) => update({ outputVariable: event.target.value })}
+            value={data.outputVariable ?? ""}
+          />
+        </Field>
+      ) : null}
+    </div>
+  );
+}
+
+interface WorkflowCanvasProps {
+  workflowId: string;
+}
+
+function WorkflowCanvas({ workflowId }: WorkflowCanvasProps) {
+  const loadedDefinition = useMemo(() => loadDefinition(workflowId), [workflowId]);
+  const [title, setTitle] = useState(loadedDefinition.title);
+  const [nodes, setNodes, onNodesChange] = useNodesState<WorkflowNode>(
+    loadedDefinition.nodes,
+  );
+  const [edges, setEdges, onEdgesChange] = useEdgesState<WorkflowEdge>(
+    loadedDefinition.edges,
+  );
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [saveNotice, setSaveNotice] = useState("");
+  const { screenToFlowPosition } = useReactFlow();
+
+  const definition = useMemo<WorkflowDefinition>(
+    () => ({
+      id: workflowId,
+      title,
+      nodes,
+      edges,
+      updatedAt: new Date().toISOString(),
+    }),
+    [edges, nodes, title, workflowId],
+  );
+
+  const selectedNode = useMemo(
+    () => nodes.find((node) => node.id === selectedNodeId) ?? null,
+    [nodes, selectedNodeId],
+  );
+
+  const handleConnect = useCallback(
+    (connection: Connection) => {
+      setEdges((currentEdges) =>
+        addEdge(
+          {
+            ...connection,
+            animated: true,
+            className: "modelmirror-workflow-edge",
+          },
+          currentEdges,
+        ),
+      );
+    },
+    [setEdges],
+  );
+
+  const handleNodesChange = useCallback(
+    (changes: NodeChange<WorkflowNode>[]) => {
+      onNodesChange(changes);
+    },
+    [onNodesChange],
+  );
+
+  const handleEdgesChange = useCallback(
+    (changes: EdgeChange<WorkflowEdge>[]) => {
+      onEdgesChange(changes);
+    },
+    [onEdgesChange],
+  );
+
+  function updateNodeData(nodeId: string, patch: Partial<WorkflowNodeData>) {
+    setNodes((currentNodes) =>
+      currentNodes.map((node) =>
+        node.id === nodeId
+          ? {
+              ...node,
+              data: {
+                ...node.data,
+                ...patch,
+              },
+            }
+          : node,
+      ),
+    );
+  }
+
+  function saveWorkflow() {
+    const savedDefinition = {
+      ...definition,
+      updatedAt: new Date().toISOString(),
+    };
+    window.localStorage.setItem(
+      `${storagePrefix}${workflowId}`,
+      JSON.stringify(savedDefinition),
+    );
+    setSaveNotice("已保存到本地草稿箱");
+    window.setTimeout(() => setSaveNotice(""), 1800);
+  }
+
+  function onDrop(event: React.DragEvent<HTMLDivElement>) {
+    event.preventDefault();
+    const kind = event.dataTransfer.getData(
+      "application/modelmirror-node",
+    ) as WorkflowNodeKind;
+    if (!kind) return;
+
+    const position = screenToFlowPosition({
+      x: event.clientX,
+      y: event.clientY,
+    });
+    const nextNode = createNode(kind, position.x, position.y);
+    setNodes((currentNodes) => [...currentNodes, nextNode]);
+    setSelectedNodeId(nextNode.id);
+  }
+
+  useEffect(() => {
+    setSelectedNodeId((current) =>
+      current && nodes.some((node) => node.id === current) ? current : null,
+    );
+  }, [nodes]);
+
+  return (
+    <div className="grid min-h-[calc(100vh-8rem)] gap-5 xl:grid-cols-[260px_minmax(0,1fr)_360px]">
+      <aside className="surface-panel rounded-lg p-4">
+        <p className="text-sm font-semibold text-white">工位库</p>
+        <p className="mt-1 text-xs leading-5 text-slate-400">
+          拖拽节点到画布，像安排招聘会工位一样搭建 AI 流水线。
+        </p>
+        <div className="mt-4">
+          <NodePalette />
+        </div>
+      </aside>
+
+      <section className="min-w-0 overflow-hidden rounded-lg border border-white/10 bg-ink-950/80 shadow-prism">
+        <div className="flex flex-col gap-3 border-b border-white/10 bg-surface-900/90 p-4 lg:flex-row lg:items-center lg:justify-between">
+          <div className="min-w-0">
+            <input
+              className="w-full bg-transparent text-xl font-semibold text-white outline-none"
+              onChange={(event) => setTitle(event.target.value)}
+              value={title}
+            />
+            <p className="mt-1 text-sm text-slate-400">
+              线性 + 条件分支 MVP，支持本地保存和后端流式试运行。
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            {saveNotice ? (
+              <span className="rounded-full border border-emerald-300/25 bg-emerald-300/10 px-3 py-1.5 text-xs font-semibold text-emerald-100">
+                {saveNotice}
+              </span>
+            ) : null}
+            <button
+              className="rounded-full border border-white/10 bg-white/[0.06] px-4 py-2 text-sm font-semibold text-slate-100 transition hover:border-hire-300/40 hover:bg-hire-300/10 hover:text-hire-100"
+              onClick={saveWorkflow}
+              type="button"
+            >
+              保存草稿
+            </button>
+          </div>
+        </div>
+
+        <div
+          className="h-[640px] min-h-[520px]"
+          onDragOver={(event) => {
+            event.preventDefault();
+            event.dataTransfer.dropEffect = "move";
+          }}
+          onDrop={onDrop}
+        >
+          <ReactFlow
+            edges={edges}
+            fitView
+            nodeTypes={nodeTypes}
+            nodes={nodes}
+            onConnect={handleConnect}
+            onEdgesChange={handleEdgesChange}
+            onNodeClick={(_, node) => setSelectedNodeId(node.id)}
+            onNodesChange={handleNodesChange}
+          >
+            <Background
+              color="rgba(253, 186, 116, 0.22)"
+              gap={24}
+              variant={BackgroundVariant.Dots}
+            />
+            <Controls />
+            <MiniMap
+              maskColor="rgba(6, 9, 22, 0.68)"
+              nodeColor={() => "rgba(251, 146, 60, 0.9)"}
+              pannable
+              zoomable
+            />
+          </ReactFlow>
+        </div>
+      </section>
+
+      <aside className="grid min-h-0 gap-5 xl:grid-rows-[minmax(0,1fr)_minmax(360px,0.95fr)]">
+        <section className="surface-panel min-h-0 overflow-y-auto rounded-lg p-4">
+          <p className="text-sm font-semibold text-white">工位配置</p>
+          <p className="mt-1 text-xs leading-5 text-slate-400">
+            节点配置会立即写入画布，下次运行直接生效。
+          </p>
+          <div className="mt-4">
+            <NodeConfig node={selectedNode} onChange={updateNodeData} />
+          </div>
+        </section>
+
+        <WorkflowRun definition={definition} />
+      </aside>
+    </div>
+  );
+}
+
+export default function WorkflowEditor({ workflowId }: WorkflowCanvasProps) {
+  return (
+    <ReactFlowProvider>
+      <WorkflowCanvas workflowId={workflowId} />
+    </ReactFlowProvider>
+  );
+}

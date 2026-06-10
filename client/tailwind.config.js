@@ -1,0 +1,112 @@
+/** @type {import('tailwindcss').Config} */
+export default {
+  content: [
+    "./index.html",
+    "./src/**/*.{ts,tsx}",
+    "!./src/data/agents.ts",
+  ],
+  theme: {
+    extend: {
+      colors: {
+        prism: {
+          cyan: "#24d9ff",
+          blue: "#4f8cff",
+          violet: "#7c3aed",
+          ink: "#030611",
+          line: "rgba(255,255,255,0.10)",
+        },
+        hire: {
+          50: "#fff7ed",
+          100: "#ffedd5",
+          200: "#fed7aa",
+          300: "#fdba74",
+          400: "#fb923c",
+          500: "#f97316",
+          600: "#ea580c",
+          700: "#c2410c",
+          800: "#9a3412",
+          900: "#7c2d12",
+          950: "#431407",
+        },
+        brand: {
+          50: "#ecfeff",
+          100: "#cffafe",
+          200: "#a5f3fc",
+          300: "#67e8f9",
+          400: "#22d3ee",
+          500: "#06b6d4",
+          600: "#0891b2",
+          700: "#0e7490",
+          800: "#155e75",
+          900: "#164e63",
+          950: "#083344",
+        },
+        accent: {
+          50: "#f5f3ff",
+          100: "#ede9fe",
+          200: "#ddd6fe",
+          300: "#c4b5fd",
+          400: "#a78bfa",
+          500: "#8b5cf6",
+          600: "#7c3aed",
+          700: "#6d28d9",
+          800: "#5b21b6",
+          900: "#4c1d95",
+          950: "#2e1065",
+        },
+        ink: {
+          950: "#060916",
+          900: "#0b1020",
+          850: "#111827",
+          800: "#162033",
+          700: "#263248",
+        },
+        surface: {
+          950: "#070a14",
+          900: "#0d1324",
+          850: "#111a2e",
+          800: "#172238",
+          700: "#20304a",
+        },
+      },
+      boxShadow: {
+        glow: "0 0 0 1px rgb(34 211 238 / 0.18), 0 18px 48px rgb(6 182 212 / 0.14)",
+        lift: "0 12px 28px rgb(2 6 23 / 0.26)",
+        panel: "0 1px 0 rgb(255 255 255 / 0.04) inset, 0 18px 44px rgb(2 6 23 / 0.24)",
+        prism: "0 0 0 1px rgb(255 255 255 / 0.09), 0 16px 32px rgb(2 6 23 / 0.34)",
+        neon: "0 0 0 1px rgb(34 211 238 / 0.28), 0 0 26px rgb(34 211 238 / 0.18)",
+        dock: "0 18px 48px rgb(2 6 23 / 0.52), 0 0 0 1px rgb(255 255 255 / 0.10)",
+      },
+      keyframes: {
+        "soft-rise": {
+          "0%": { opacity: "0", transform: "translateY(14px)" },
+          "100%": { opacity: "1", transform: "translateY(0)" },
+        },
+        "slow-pan": {
+          "0%": { transform: "translate3d(-1.5%, -1%, 0)" },
+          "50%": { transform: "translate3d(1.5%, 1%, 0)" },
+          "100%": { transform: "translate3d(-1.5%, -1%, 0)" },
+        },
+        "pulse-line": {
+          "0%, 100%": { opacity: "0.35" },
+          "50%": { opacity: "0.78" },
+        },
+      },
+      animation: {
+        "soft-rise": "soft-rise 420ms cubic-bezier(0.16, 1, 0.3, 1) both",
+        "slow-pan": "slow-pan 12s cubic-bezier(0.16, 1, 0.3, 1) infinite",
+        "pulse-line": "pulse-line 2.4s ease-in-out infinite",
+      },
+      fontFamily: {
+        sans: [
+          "Inter",
+          "ui-sans-serif",
+          "system-ui",
+          "Segoe UI",
+          "sans-serif",
+        ],
+      },
+    },
+  },
+  plugins: [],
+};

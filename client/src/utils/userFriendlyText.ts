@@ -1,0 +1,194 @@
+import { type Model } from "../data/models";
+
+const providerDisplayNameMap: Record<string, string> = {
+  "~anthropic": "Anthropic",
+  "~google": "Google",
+  "~moonshotai": "Moonshot AI",
+  "~openai": "OpenAI",
+  ai21: "AI21",
+  aionlabs: "AionLabs",
+  alibaba: "阿里巴巴",
+  allenai: "AllenAI",
+  amazon: "Amazon",
+  anthropic: "Anthropic",
+  "anthracite-org": "Anthracite",
+  "arcee ai": "Arcee AI",
+  baai: "BAAI",
+  baidu: "百度",
+  "black forest labs": "Black Forest Labs",
+  bytedance: "字节跳动",
+  "bytedance seed": "字节 Seed",
+  cohere: "Cohere",
+  "deep cogito": "Deep Cogito",
+  deepseek: "深度求索",
+  essentialai: "EssentialAI",
+  google: "Google",
+  gryphe: "Gryphe",
+  ibm: "IBM",
+  inception: "Inception",
+  inclusionai: "InclusionAI",
+  inflection: "Inflection",
+  intfloat: "Intfloat",
+  kling: "可灵",
+  kwaipilot: "Kwaipilot",
+  liquidai: "LiquidAI",
+  mancer: "Mancer",
+  meta: "Meta",
+  microsoft: "Microsoft",
+  minimax: "MiniMax",
+  mistral: "Mistral",
+  "mistral ai": "Mistral AI",
+  "moonshot ai": "月之暗面",
+  morph: "Morph",
+  "nex agi": "Nex AGI",
+  nous: "Nous Research",
+  "nous research": "Nous Research",
+  nvidia: "NVIDIA",
+  openai: "OpenAI",
+  perceptron: "Perceptron",
+  perplexity: "Perplexity",
+  poolside: "Poolside",
+  "prime intellect": "Prime Intellect",
+  qwen: "通义千问",
+  recraft: "Recraft",
+  rekaai: "Reka AI",
+  relace: "Relace",
+  sao10k: "Sao10K",
+  "sentence transformers": "Sentence Transformers",
+  sesame: "Sesame",
+  sourceful: "Sourceful",
+  stepfun: "阶跃星辰",
+  switchpoint: "Switchpoint",
+  tencent: "腾讯",
+  thedrummer: "TheDrummer",
+  thenlper: "Thenlper",
+  undi95: "Undi95",
+  upstage: "Upstage",
+  venice: "Venice",
+  writer: "Writer",
+  xai: "xAI",
+  xiaomi: "小米",
+  "z.ai": "Z.ai",
+  zyphra: "Zyphra",
+  其他: "其他",
+  模镜: "模镜",
+};
+
+const capabilityPlainText: Record<string, string> = {
+  text: "文字处理",
+  image: "看懂图片和文字",
+  code: "写代码、查 bug",
+  tool: "调用工具办事",
+  audio: "语音对话",
+  video: "理解视频内容",
+  reasoning: "复杂推理",
+};
+
+const categoryPlainText: Record<string, string> = {
+  analysis: "资料分析",
+  audio: "音频处理",
+  chat: "日常聊天",
+  coding: "编程开发",
+  embeddings: "资料检索",
+  image_generation: "图片生成",
+  long_context: "长文档阅读",
+  low_cost: "批量低成本任务",
+  math: "数学推导",
+  multimodal: "图文混合任务",
+  reasoning: "复杂问题拆解",
+  rerank: "搜索结果排序",
+  roleplay: "角色扮演",
+  safety: "内容安全审核",
+  speech: "语音合成",
+  transcription: "语音转文字",
+  translation: "翻译润色",
+  video: "视频理解",
+  vision: "看图分析",
+};
+
+function titleCaseProvider(value: string) {
+  return value
+    .split(/[-_\s]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function normalizeProviderKey(value: string) {
+  return value.trim().replace(/^~/, "~").toLowerCase();
+}
+
+export function getProviderDisplayName(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed) return "未知单位";
+
+  const direct = providerDisplayNameMap[trimmed];
+  if (direct) return direct;
+
+  const normalized = providerDisplayNameMap[normalizeProviderKey(trimmed)];
+  if (normalized) return normalized;
+
+  return titleCaseProvider(trimmed.replace(/^~/, ""));
+}
+
+export function deriveProviderFromModel(model: Model) {
+  if (model.model_author && model.model_author !== "模镜") {
+    return getProviderDisplayName(model.model_author);
+  }
+
+  if (model.provider && model.provider !== "其他") {
+    return getProviderDisplayName(model.provider);
+  }
+
+  const idProvider = model.id.split("/")[0] ?? "";
+  return getProviderDisplayName(idProvider);
+}
+
+export function providerFilterMatches(model: Model, selectedProvider: string) {
+  if (selectedProvider === "all") return true;
+
+  const candidates = [
+    model.provider,
+    model.model_author,
+    deriveProviderFromModel(model),
+    getProviderDisplayName(model.provider),
+    getProviderDisplayName(model.model_author),
+  ];
+
+  return candidates.some(
+    (candidate) =>
+      candidate === selectedProvider ||
+      getProviderDisplayName(candidate) === selectedProvider,
+  );
+}
+
+function formatContextWorkload(contextLength: number) {
+  if (contextLength >= 1_000_000) {
+    return `${Math.round(contextLength / 1_000_000)}M token`;
+  }
+
+  return `${Math.max(1, Math.round(contextLength / 1000))}K token`;
+}
+
+export function getFriendlyCapabilityLabel(value: string) {
+  return capabilityPlainText[value] ?? value;
+}
+
+export function getFriendlyCategoryLabel(value: string) {
+  return categoryPlainText[value] ?? value;
+}
+
+export function buildFriendlyTalentIntro(model: Model) {
+  const provider = deriveProviderFromModel(model);
+  const skills = model.capabilities
+    .slice(0, 3)
+    .map(getFriendlyCapabilityLabel)
+    .join("、");
+  const scenes = model.categories
+    .slice(0, 3)
+    .map(getFriendlyCategoryLabel)
+    .join("、");
+  const workload = formatContextWorkload(model.context_length);
+
+  return `我来自 ${provider}，擅长${skills || "通用 AI 工作"}。适合接下${scenes || "日常问答和资料处理"}这类活儿，一次能记住约 ${workload} 的上下文。`;
+}
