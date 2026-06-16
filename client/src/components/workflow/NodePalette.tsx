@@ -69,6 +69,12 @@ const paletteItems: PaletteItem[] = [
     description: "从受限本地路径提取文本，供后续节点使用。",
   },
   {
+    kind: "human_intervention",
+    icon: "👤",
+    title: "人工介入",
+    description: "暂停流水线，等待用户补充文本后再继续执行。",
+  },
+  {
     kind: "http_request",
     icon: "🌐",
     title: "HTTP 请求",

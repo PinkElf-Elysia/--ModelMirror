@@ -120,6 +120,44 @@ curl -N -X POST http://localhost:8000/api/workflow/run ^
 
 响应：SSE 事件，包括 `node_start`、`node_end`、`workflow_end`、`error`。
 
+运行流第一条 SSE 事件为 `workflow_meta`，包含 `task_id`。遇到 `human_intervention` 节点时，运行器发送 `human_intervention_pending` 并暂停，直到收到 resume 请求。
+
+### POST `/api/workflow/run/{task_id}/resume`
+
+继续处于人工介入等待状态的 classic 工作流任务。
+
+```bash
+curl -X POST http://localhost:8000/api/workflow/run/<task_id>/resume ^
+  -H "Content-Type: application/json" ^
+  -d "{\"node_id\":\"human\",\"input_text\":\"确认继续\"}"
+```
+
+响应示例：
+
+```json
+{"ok":true,"task_id":"...","node_id":"human"}
+```
+
+### GET `/api/workflow/run/{task_id}/status`
+
+查询 classic 工作流任务是否正在等待人工输入。任务只保存在内存中，默认 TTL 为 30 分钟。
+
+```bash
+curl http://localhost:8000/api/workflow/run/<task_id>/status
+```
+
+响应示例：
+
+```json
+{
+  "task_id": "...",
+  "paused": true,
+  "paused_node_id": "human",
+  "created_at": 1780000000.0,
+  "ttl_seconds_left": 1790.0
+}
+```
+
 ### GET `/api/workflow-native/templates`
 
 自研工作流 native 实验线的模板接口。当前返回一个三节点线性样例，供 `/workflow-native` 做静态校验演示。
@@ -132,7 +170,7 @@ curl http://localhost:8000/api/workflow-native/templates
 
 自研工作流 native 静态图校验接口。该接口不执行模型、代码、Tool 或 RAG，只校验节点、连线、变量引用和拓扑顺序。图校验失败时 HTTP 仍返回 `200`，通过 `valid=false` 和 `issues` 表达问题。
 
-当前支持的 native 节点：`input`、`llm`、`condition`、`code`、`variable_assign`、`template_transform`、`variable_aggregator`、`parameter_extractor`、`knowledge_retrieval`、`document_extractor`、`http_request`、`list_operation`、`iteration`、`output`。
+当前支持的 native 节点：`input`、`llm`、`condition`、`code`、`variable_assign`、`template_transform`、`variable_aggregator`、`parameter_extractor`、`knowledge_retrieval`、`document_extractor`、`human_intervention`、`http_request`、`list_operation`、`iteration`、`output`。
 
 合法三节点样例：
 

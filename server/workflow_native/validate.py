@@ -35,6 +35,9 @@ NODE_KIND_ALIASES = {
     "knowledge-retrieval": "knowledge_retrieval",
     "document_extractor": "document_extractor",
     "document-extractor": "document_extractor",
+    "human_intervention": "human_intervention",
+    "human-intervention": "human_intervention",
+    "human-in-the-loop": "human_intervention",
     "http_request": "http_request",
     "http-request": "http_request",
     "list_operation": "list_operation",
@@ -58,6 +61,7 @@ SUPPORTED_NODE_KINDS = {
     "parameter_extractor",
     "knowledge_retrieval",
     "document_extractor",
+    "human_intervention",
     "http_request",
     "list_operation",
     "iteration",
@@ -437,6 +441,34 @@ def validate_node_configuration(
                 )
             )
 
+    if kind == "human_intervention":
+        prompt = str(data.get("prompt") or "").strip()
+        if not prompt:
+            issues.append(
+                ValidationIssue(
+                    code="missing_prompt",
+                    message="Human intervention node needs data.prompt.",
+                    node_id=node.id,
+                )
+            )
+        output_variable = str(data.get("outputVariable") or "").strip()
+        if not output_variable:
+            issues.append(
+                ValidationIssue(
+                    code="missing_output_variable",
+                    message="Human intervention node needs data.outputVariable.",
+                    node_id=node.id,
+                )
+            )
+        elif not is_variable_name(output_variable):
+            issues.append(
+                ValidationIssue(
+                    code="invalid_human_intervention_output_variable",
+                    message="Human intervention outputVariable must be an identifier.",
+                    node_id=node.id,
+                )
+            )
+
     if kind == "http_request":
         if not str(data.get("url") or "").strip():
             issues.append(
@@ -628,6 +660,7 @@ def collect_declared_variables(
             "parameter_extractor",
             "knowledge_retrieval",
             "document_extractor",
+            "human_intervention",
             "http_request",
             "list_operation",
             "iteration",
@@ -769,6 +802,18 @@ def validate_variable_references(
                     node_id=node.id,
                 )
             )
+
+    if kind == "human_intervention":
+        prompt = str(data.get("prompt") or "")
+        for variable in sorted(extract_template_variables(prompt)):
+            if variable not in available_variables:
+                issues.append(
+                    ValidationIssue(
+                        code="missing_template_variable",
+                        message=f"Human intervention prompt references undefined variable '{variable}'.",
+                        node_id=node.id,
+                    )
+                )
 
     if kind == "list_operation":
         input_variable = str(data.get("inputVariable") or "").strip()

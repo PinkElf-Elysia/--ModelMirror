@@ -16,6 +16,7 @@ NativeNodeKind = Literal[
     "parameter_extractor",
     "knowledge_retrieval",
     "document_extractor",
+    "human_intervention",
     "http_request",
     "list_operation",
     "iteration",

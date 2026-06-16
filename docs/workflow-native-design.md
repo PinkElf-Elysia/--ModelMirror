@@ -2,7 +2,7 @@
 
 workflow-native 是模镜自研工作流引擎的渐进式实验线。它不会替换当前稳定的 `/workflow` Dify iframe 入口，也不会改动 `/rag`。当前阶段提供静态图校验能力，并在 classic 运行器中试点少量本地节点执行，让团队先把数据模型、API 契约、错误模型和测试流程立起来。
 
-最后更新日期：2026-06-16  
+最后更新日期：2026-06-17  
 维护人：模镜团队
 
 ## 目标与边界
@@ -281,6 +281,101 @@ python -m pytest server/tests/ -q
 cd client
 npm.cmd run build
 ```
+
+## 2026-06-17 增量：人工介入节点
+
+`human_intervention` 已进入 workflow-native / classic 共享实验线。它对齐 Dify 的 Human-in-the-loop 概念，但保持 MVP 边界：仅支持文本输入、内存态暂停和 REST resume，不做持久化审批流、多人协作或权限系统。
+
+### 节点映射
+
+| Native 节点 | Dify 概念 | 当前差异 |
+| --- | --- | --- |
+| `human_intervention` | `human-in-the-loop` | native 运行器通过 SSE 暂停并等待 `/api/workflow/run/{task_id}/resume`，Dify 可提供更完整的人工审批和运行态管理。 |
+
+### 校验规则
+
+`human_intervention` 节点必须包含：
+
+- `prompt`：展示给用户的提示文案，支持 `{{variable}}`。
+- `outputVariable`：用户输入写入的变量名，必须是合法标识符。
+
+新增错误码：
+
+- `missing_prompt`
+- `missing_output_variable`
+- `invalid_human_intervention_output_variable`
+
+若 `prompt` 引用不存在的变量，沿用 `missing_template_variable`。
+
+### Classic 运行器事件
+
+`POST /api/workflow/run` 会在 SSE 第一条发送：
+
+```json
+{"event":"workflow_meta","task_id":"...","ttl_seconds":1800}
+```
+
+遇到 `human_intervention` 节点时，运行器发送：
+
+```json
+{
+  "event": "human_intervention_pending",
+  "task_id": "...",
+  "node_id": "human",
+  "node_title": "人工确认",
+  "node_type": "human_intervention",
+  "prompt": "请确认：...",
+  "output_variable": "human_input"
+}
+```
+
+在等待期间每 15 秒发送一次：
+
+```json
+{"event":"heartbeat","task_id":"...","node_id":"human","at":1780000000}
+```
+
+前端应消费 heartbeat，但默认不展示到运行日志。
+
+### Resume API
+
+```bash
+curl -X POST http://localhost:8000/api/workflow/run/<task_id>/resume \
+  -H "Content-Type: application/json" \
+  -d "{\"node_id\":\"human\",\"input_text\":\"确认继续\"}"
+```
+
+成功响应：
+
+```json
+{"ok":true,"task_id":"...","node_id":"human"}
+```
+
+任务不存在或 TTL 过期时返回 `404`；当前未暂停时返回 `400`；节点不匹配时返回 `409`。
+
+### Status API
+
+```bash
+curl http://localhost:8000/api/workflow/run/<task_id>/status
+```
+
+响应：
+
+```json
+{
+  "task_id": "...",
+  "paused": true,
+  "paused_node_id": "human",
+  "created_at": 1780000000.0,
+  "ttl_seconds_left": 1790.0
+}
+```
+
+### 运行态与回退
+
+- 任务状态仅存放在后端内存中，TTL 为 30 分钟。
+- 工作流结束、SSE 连接断开或 TTL 过期都会清理任务。
+- 若出现问题，可从前端隐藏 `human_intervention` 调色板条目，或在后端将 `WORKFLOW_HUMAN_INTERVENTION_ENABLED` 设为 `False` 降级。
 
 ## 回退方案
 

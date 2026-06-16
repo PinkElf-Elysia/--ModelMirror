@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import time
+import uuid
 from collections.abc import AsyncIterator
 from collections import defaultdict, deque
 from pathlib import Path
@@ -78,6 +79,8 @@ REQUESTS_PER_MINUTE = 20
 WORKFLOW_ALLOW_HTTP_OUTBOUND = False
 WORKFLOW_MAX_ITERATION_ITEMS = 50
 WORKFLOW_DOC_EXTRACTOR_ROOT = "server/rag"
+WORKFLOW_TASK_TTL_SECONDS = 1800
+WORKFLOW_HUMAN_INTERVENTION_ENABLED = True
 MAX_IMAGE_DATA_URL_BYTES = 5 * 1024 * 1024
 AGENTS_DATA_PATH = Path(__file__).parent / "data" / "agents.json"
 MAX_AGENT_PROMPT_CHARS = 6000
@@ -144,6 +147,7 @@ request_windows: dict[str, deque[float]] = defaultdict(deque)
 mcp_connect_windows: dict[str, deque[float]] = defaultdict(deque)
 mcp_manager = MCPClientManager()
 tool_registry = ToolRegistry()
+workflow_task_store: dict[str, dict[str, Any]] = {}
 
 
 class TextContentPart(BaseModel):
@@ -292,6 +296,7 @@ WorkflowNodeType = Literal[
     "parameter_extractor",
     "knowledge_retrieval",
     "document_extractor",
+    "human_intervention",
     "http_request",
     "list_operation",
     "iteration",
@@ -329,6 +334,19 @@ class WorkflowPayload(BaseModel):
 class WorkflowRunRequest(BaseModel):
     workflow: WorkflowPayload
     inputs: dict[str, str] = Field(default_factory=dict)
+
+
+class WorkflowResumeRequest(BaseModel):
+    input_text: str = Field(default="", max_length=20_000)
+    node_id: str | None = Field(default=None, max_length=128)
+
+
+class WorkflowTaskStatusResponse(BaseModel):
+    task_id: str
+    paused: bool
+    paused_node_id: str | None = None
+    created_at: float
+    ttl_seconds_left: float
 
 
 def client_ip(request: Request) -> str:
@@ -990,6 +1008,7 @@ def workflow_node_kind(node: WorkflowNodePayload) -> WorkflowNodeType:
         "parameter_extractor",
         "knowledge_retrieval",
         "document_extractor",
+        "human_intervention",
         "http_request",
         "list_operation",
         "iteration",
@@ -1008,6 +1027,38 @@ def workflow_node_title(node: WorkflowNodePayload) -> str:
 
 def sse_payload(data: dict[str, Any]) -> bytes:
     return f"data: {json.dumps(data, ensure_ascii=False)}\n\n".encode("utf-8")
+
+
+def cleanup_expired_workflow_tasks() -> None:
+    """Remove stale paused workflow runs from the in-memory task store."""
+
+    now = time.monotonic()
+    expired_task_ids = [
+        task_id
+        for task_id, task in workflow_task_store.items()
+        if now - float(task.get("created_at", now)) > float(task.get("ttl", 0))
+    ]
+    for task_id in expired_task_ids:
+        task = workflow_task_store.pop(task_id, None)
+        pause_event = task.get("pause_event") if task else None
+        if isinstance(pause_event, asyncio.Event):
+            pause_event.set()
+
+
+def get_workflow_task_or_none(task_id: str) -> dict[str, Any] | None:
+    """Return an active workflow task or clean it up if it has expired."""
+
+    task = workflow_task_store.get(task_id)
+    if task is None:
+        return None
+    now = time.monotonic()
+    if now - float(task.get("created_at", now)) > float(task.get("ttl", 0)):
+        workflow_task_store.pop(task_id, None)
+        pause_event = task.get("pause_event")
+        if isinstance(pause_event, asyncio.Event):
+            pause_event.set()
+        return None
+    return task
 
 
 def render_workflow_template(template: str, variables: dict[str, str]) -> str:
@@ -1241,14 +1292,42 @@ async def run_workflow(payload: WorkflowRunRequest, request: Request):
     if not start_node_ids and order:
         start_node_ids = [order[0]]
 
+    cleanup_expired_workflow_tasks()
+    task_id = uuid.uuid4().hex
+    initial_queue = deque(sorted(start_node_ids, key=lambda node_id: order_index[node_id]))
+    task_state: dict[str, Any] = {
+        "task_id": task_id,
+        "variables": {str(key): str(value) for key, value in payload.inputs.items()},
+        "queue": initial_queue,
+        "queued": set(initial_queue),
+        "executed": set(),
+        "nodes_by_id": nodes_by_id,
+        "outgoing": outgoing,
+        "order_index": order_index,
+        "final_output": "",
+        "pause_event": None,
+        "resume_input": None,
+        "paused_node_id": None,
+        "created_at": time.monotonic(),
+        "ttl": WORKFLOW_TASK_TTL_SECONDS,
+    }
+    workflow_task_store[task_id] = task_state
+
     async def workflow_stream():
-        variables = {str(key): str(value) for key, value in payload.inputs.items()}
-        queue = deque(sorted(start_node_ids, key=lambda node_id: order_index[node_id]))
-        queued = set(queue)
-        executed: set[str] = set()
+        variables: dict[str, str] = task_state["variables"]
+        queue: deque[str] = task_state["queue"]
+        queued: set[str] = task_state["queued"]
+        executed: set[str] = task_state["executed"]
         final_output = ""
 
         try:
+            yield sse_payload(
+                {
+                    "event": "workflow_meta",
+                    "task_id": task_id,
+                    "ttl_seconds": WORKFLOW_TASK_TTL_SECONDS,
+                }
+            )
             while queue:
                 node_id = queue.popleft()
                 node = nodes_by_id[node_id]
@@ -1789,9 +1868,68 @@ async def run_workflow(payload: WorkflowRunRequest, request: Request):
                             }
                         )
 
+                elif kind == "human_intervention":
+                    output_variable = str(node.data.get("outputVariable") or "human_input")
+                    prompt = render_workflow_template(
+                        str(node.data.get("prompt") or "请输入人工补充内容。"),
+                        variables,
+                    )
+                    if not WORKFLOW_HUMAN_INTERVENTION_ENABLED:
+                        yield sse_payload(
+                            {
+                                "event": "error",
+                                "node_id": node.id,
+                                "message": "人工介入节点当前未启用。",
+                            }
+                        )
+                    else:
+                        pause_event = asyncio.Event()
+                        task_state["pause_event"] = pause_event
+                        task_state["resume_input"] = None
+                        task_state["paused_node_id"] = node.id
+                        yield sse_payload(
+                            {
+                                "event": "human_intervention_pending",
+                                "task_id": task_id,
+                                "node_id": node.id,
+                                "node_title": title,
+                                "node_type": kind,
+                                "prompt": prompt,
+                                "output_variable": output_variable,
+                            }
+                        )
+                        while not pause_event.is_set():
+                            try:
+                                await asyncio.wait_for(pause_event.wait(), timeout=15)
+                            except asyncio.TimeoutError:
+                                yield sse_payload(
+                                    {
+                                        "event": "heartbeat",
+                                        "task_id": task_id,
+                                        "node_id": node.id,
+                                        "at": time.time(),
+                                    }
+                                )
+                        output = str(task_state.get("resume_input") or "")
+                        task_state["paused_node_id"] = None
+                        task_state["resume_input"] = None
+                        task_state["pause_event"] = None
+                        variables[output_variable] = output
+                        yield sse_payload(
+                            {
+                                "event": "node_delta",
+                                "node_id": node.id,
+                                "node_title": title,
+                                "node_type": kind,
+                                "output": output,
+                                "variable": output_variable,
+                            }
+                        )
+
                 elif kind == "output":
                     output_variable = str(node.data.get("outputVariable") or "llm_output")
                     final_output = variables.get(output_variable, "")
+                    task_state["final_output"] = final_output
                     output = final_output
 
                 executed.add(node_id)
@@ -1835,11 +1973,61 @@ async def run_workflow(payload: WorkflowRunRequest, request: Request):
         except Exception as exc:
             logger.exception("Workflow run failed workflow=%s", payload.workflow.id)
             yield sse_payload({"event": "error", "message": str(exc)})
+        finally:
+            workflow_task_store.pop(task_id, None)
 
     return StreamingResponse(
         workflow_stream(),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+    )
+
+
+@app.post("/api/workflow/run/{task_id}/resume")
+async def resume_workflow_task(
+    task_id: str,
+    payload: WorkflowResumeRequest,
+    request: Request,
+):
+    try:
+        rate_limit_or_raise(client_ip(request))
+    except HTTPException as exc:
+        return JSONResponse(status_code=exc.status_code, content={"error": str(exc.detail)})
+
+    task = get_workflow_task_or_none(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="工作流任务不存在或已过期。")
+
+    paused_node_id = task.get("paused_node_id")
+    if not paused_node_id:
+        raise HTTPException(status_code=400, detail="工作流当前不在人工介入等待状态。")
+    if payload.node_id and payload.node_id != paused_node_id:
+        raise HTTPException(status_code=409, detail="人工介入节点不匹配，请刷新运行状态。")
+
+    pause_event = task.get("pause_event")
+    if not isinstance(pause_event, asyncio.Event):
+        raise HTTPException(status_code=400, detail="工作流等待状态异常，无法继续。")
+
+    task["resume_input"] = payload.input_text
+    pause_event.set()
+    return {"ok": True, "task_id": task_id, "node_id": paused_node_id}
+
+
+@app.get("/api/workflow/run/{task_id}/status", response_model=WorkflowTaskStatusResponse)
+async def get_workflow_task_status(task_id: str):
+    task = get_workflow_task_or_none(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="工作流任务不存在或已过期。")
+    created_at = float(task.get("created_at", time.monotonic()))
+    ttl = float(task.get("ttl", WORKFLOW_TASK_TTL_SECONDS))
+    ttl_seconds_left = max(0.0, ttl - (time.monotonic() - created_at))
+    paused_node_id = task.get("paused_node_id")
+    return WorkflowTaskStatusResponse(
+        task_id=task_id,
+        paused=bool(paused_node_id),
+        paused_node_id=str(paused_node_id) if paused_node_id else None,
+        created_at=created_at,
+        ttl_seconds_left=ttl_seconds_left,
     )
 
 

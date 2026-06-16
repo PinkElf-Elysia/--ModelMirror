@@ -11,6 +11,7 @@ export type NativeNodeKind =
   | "parameter_extractor"
   | "knowledge_retrieval"
   | "document_extractor"
+  | "human_intervention"
   | "http_request"
   | "list_operation"
   | "iteration"
@@ -27,6 +28,7 @@ export type DifyConceptNodeKind =
   | "parameter-extractor"
   | "knowledge-retrieval"
   | "document-extractor"
+  | "human-in-the-loop"
   | "http-request"
   | "list-operator"
   | "iteration"
@@ -88,6 +90,11 @@ export const difyNodeMappings: DifyNodeMapping[] = [
     native: "document_extractor",
     dify: "document-extractor",
     note: "Native document extraction reads only sandboxed local files.",
+  },
+  {
+    native: "human_intervention",
+    dify: "human-in-the-loop",
+    note: "Native human intervention pauses the SSE run until a resume input arrives.",
   },
   {
     native: "http_request",

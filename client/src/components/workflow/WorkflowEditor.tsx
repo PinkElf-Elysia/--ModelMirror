@@ -147,6 +147,16 @@ function createNodeData(kind: WorkflowNodeKind): WorkflowNodeData {
     };
   }
 
+  if (kind === "human_intervention") {
+    return {
+      kind,
+      title: "人工确认",
+      description: "暂停流水线，等待用户补充文本后继续。",
+      prompt: "请确认或补充这段内容：\n\n{{user_input}}",
+      outputVariable: "human_input",
+    };
+  }
+
   if (kind === "http_request") {
     return {
       kind,
@@ -616,6 +626,28 @@ function NodeConfig({ node, onChange }: NodeConfigProps) {
             />
           </Field>
           <Field label="输出变量">
+            <input
+              className={textInputClass()}
+              onChange={(event) => update({ outputVariable: event.target.value })}
+              value={data.outputVariable ?? ""}
+            />
+          </Field>
+        </>
+      ) : null}
+
+      {data.kind === "human_intervention" ? (
+        <>
+          <div className="rounded-lg border border-sky-300/25 bg-sky-300/10 px-3 py-2 text-xs leading-5 text-sky-50">
+            运行到这里会暂停流水线，等待用户在运行面板提交文本后继续。
+          </div>
+          <Field label="提示文案（支持 {{变量}}）">
+            <textarea
+              className={`${textInputClass()} min-h-32 resize-none leading-6`}
+              onChange={(event) => update({ prompt: event.target.value })}
+              value={data.prompt ?? ""}
+            />
+          </Field>
+          <Field label="写入变量名">
             <input
               className={textInputClass()}
               onChange={(event) => update({ outputVariable: event.target.value })}

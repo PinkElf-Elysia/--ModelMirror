@@ -430,6 +430,70 @@ async def test_validate_document_extractor_required_fields(
 
 
 @pytest.mark.asyncio
+async def test_validate_human_intervention_required_fields(
+    client: httpx.AsyncClient,
+) -> None:
+    workflow = linear_workflow()
+    workflow["nodes"][1] = {
+        "id": "human",
+        "type": "human_intervention",
+        "data": {
+            "kind": "human_intervention",
+            "prompt": "请确认：{{user_input}}",
+            "outputVariable": "human_input",
+        },
+    }
+    workflow["nodes"][2]["data"]["outputVariable"] = "human_input"
+    workflow["edges"] = [
+        {"id": "e1", "source": "input", "target": "human"},
+        {"id": "e2", "source": "human", "target": "output"},
+    ]
+
+    data = await validate(client, workflow)
+
+    assert data["valid"] is True
+
+    workflow["nodes"][1]["data"].pop("prompt")
+    data = await validate(client, workflow)
+
+    assert data["valid"] is False
+    assert "missing_prompt" in issue_codes(data)
+
+    workflow["nodes"][1]["data"]["prompt"] = "请确认：{{user_input}}"
+    workflow["nodes"][1]["data"].pop("outputVariable")
+    data = await validate(client, workflow)
+
+    assert data["valid"] is False
+    assert "missing_output_variable" in issue_codes(data)
+
+
+@pytest.mark.asyncio
+async def test_validate_human_intervention_template_reference(
+    client: httpx.AsyncClient,
+) -> None:
+    workflow = linear_workflow()
+    workflow["nodes"][1] = {
+        "id": "human",
+        "type": "human-in-the-loop",
+        "data": {
+            "kind": "human-in-the-loop",
+            "prompt": "请确认：{{missing_value}}",
+            "outputVariable": "human_input",
+        },
+    }
+    workflow["nodes"][2]["data"]["outputVariable"] = "human_input"
+    workflow["edges"] = [
+        {"id": "e1", "source": "input", "target": "human"},
+        {"id": "e2", "source": "human", "target": "output"},
+    ]
+
+    data = await validate(client, workflow)
+
+    assert data["valid"] is False
+    assert "missing_template_variable" in issue_codes(data)
+
+
+@pytest.mark.asyncio
 async def test_templates_endpoint_returns_starter_template(
     client: httpx.AsyncClient,
 ) -> None:
