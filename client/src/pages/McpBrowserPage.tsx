@@ -1,6 +1,6 @@
 import { useEffect } from "react";
+import McpServerCard from "../components/McpServerCard";
 import PageContainer from "../components/PageContainer";
-import ResourceProjectCard from "../components/ResourceProjectCard";
 import { mcpProjects } from "../data/mcpProjects";
 
 const nextMcpShelves = [
@@ -20,6 +20,7 @@ export default function McpBrowserPage() {
   }, []);
 
   const totalStars = mcpProjects.reduce((sum, project) => sum + project.stars, 0);
+  const connectableCount = mcpProjects.filter((project) => project.command?.length).length;
 
   return (
     <PageContainer
@@ -40,6 +41,12 @@ export default function McpBrowserPage() {
             <p className="text-xs text-slate-400">GitHub 热度</p>
             <p className="mt-1 text-sm font-semibold text-brand-100">
               {formatStars(totalStars)} stars
+            </p>
+          </div>
+          <div className="mt-3 rounded-lg border border-white/10 bg-white/[0.045] p-3">
+            <p className="text-xs text-slate-400">可原生连接</p>
+            <p className="mt-1 text-sm font-semibold text-emerald-100">
+              {connectableCount} 个
             </p>
           </div>
         </div>
@@ -79,9 +86,9 @@ export default function McpBrowserPage() {
               </div>
               <div className="rounded-lg bg-white/[0.055] px-2 py-3">
                 <p className="text-lg font-semibold text-emerald-100">
-                  {formatStars(totalStars)}
+                  {connectableCount}
                 </p>
-                <p className="mt-1 truncate text-slate-400">热度</p>
+                <p className="mt-1 truncate text-slate-400">可连接</p>
               </div>
             </div>
           </div>
@@ -93,31 +100,17 @@ export default function McpBrowserPage() {
           <div>
             <h2 className="text-xl font-semibold text-white">已上架工具箱</h2>
             <p className="mt-1 text-sm text-slate-400">
-              点击“安装”查看当前展示命令，复制后按你的 MCP 客户端配置。
+              点击“连接”即可由后端以 stdio 启动 MCP Server；连接后可查看工具、填写参数并执行。
             </p>
           </div>
           <span className="w-fit rounded-full border border-emerald-300/25 bg-emerald-300/10 px-3 py-1.5 text-xs font-semibold text-emerald-100">
-            全部来自真实 GitHub 仓库
+            {connectableCount} 个支持原生连接
           </span>
         </div>
 
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
           {mcpProjects.map((project) => (
-            <ResourceProjectCard
-              description={project.description}
-              installCommand={project.installCommand}
-              installNote={project.installNote}
-              key={project.id}
-              kind="mcp"
-              language={project.language}
-              name={project.name}
-              readmeSummary={project.readmeSummary}
-              repoName={project.repoName}
-              repoUrl={project.repoUrl}
-              stars={project.stars}
-              tags={project.tags}
-              updatedAt={project.updatedAt}
-            />
+            <McpServerCard key={project.id} project={project} />
           ))}
         </div>
       </section>

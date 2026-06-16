@@ -120,6 +120,25 @@ curl -N -X POST http://localhost:8000/api/workflow/run ^
 
 响应：SSE 事件，包括 `node_start`、`node_end`、`workflow_end`、`error`。
 
+### `/api/mcp/*`
+
+MCP 原生 stdio 集成接口。详细说明见 [MCP_INTEGRATION.md](./MCP_INTEGRATION.md)。
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| POST | `/api/mcp/connect` | 启动 MCP Server 并创建 session。 |
+| GET | `/api/mcp/{session_id}/tools` | 获取该 session 暴露的工具列表。 |
+| POST | `/api/mcp/{session_id}/call` | 调用指定 MCP 工具。 |
+| DELETE | `/api/mcp/{session_id}` | 断开连接并清理子进程。 |
+
+示例：
+
+```bash
+curl -X POST http://localhost:8000/api/mcp/connect ^
+  -H "Content-Type: application/json" ^
+  -d "{\"server_command\":[\"npx\",\"-y\",\"@playwright/mcp@latest\"]}"
+```
+
 ### POST `/api/fusion/chat`
 
 模型 Fusion 接口。后端并行调用 2-5 个模型，再由裁判模型汇总。
