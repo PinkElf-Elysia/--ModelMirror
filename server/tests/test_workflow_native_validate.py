@@ -1,0 +1,441 @@
+from __future__ import annotations
+
+import httpx
+import pytest
+import pytest_asyncio
+
+from server.main import app
+
+
+@pytest_asyncio.fixture
+async def client():
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://testserver",
+    ) as async_client:
+        yield async_client
+
+
+def linear_workflow() -> dict:
+    return {
+        "id": "draft",
+        "title": "linear",
+        "nodes": [
+            {
+                "id": "input",
+                "type": "input",
+                "data": {
+                    "kind": "input",
+                    "variableName": "user_input",
+                },
+            },
+            {
+                "id": "llm",
+                "type": "llm",
+                "data": {
+                    "kind": "llm",
+                    "modelId": "openai/gpt-4o-mini",
+                    "prompt": "请回答 {{user_input}}",
+                    "outputVariable": "llm_output",
+                },
+            },
+            {
+                "id": "output",
+                "type": "output",
+                "data": {
+                    "kind": "output",
+                    "outputVariable": "llm_output",
+                },
+            },
+        ],
+        "edges": [
+            {"id": "e1", "source": "input", "target": "llm"},
+            {"id": "e2", "source": "llm", "target": "output"},
+        ],
+    }
+
+
+async def validate(client: httpx.AsyncClient, workflow: dict) -> dict:
+    response = await client.post(
+        "/api/workflow-native/validate",
+        json={"workflow": workflow},
+    )
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def issue_codes(data: dict) -> set[str]:
+    return {issue["code"] for issue in data["issues"]}
+
+
+@pytest.mark.asyncio
+async def test_valid_linear_workflow_returns_topological_order(
+    client: httpx.AsyncClient,
+) -> None:
+    data = await validate(client, linear_workflow())
+
+    assert data["valid"] is True
+    assert data["issues"] == []
+    assert data["order"] == ["input", "llm", "output"]
+
+
+@pytest.mark.asyncio
+async def test_missing_input_and_output_nodes_are_structured_issues(
+    client: httpx.AsyncClient,
+) -> None:
+    workflow = {
+        "id": "draft",
+        "title": "empty",
+        "nodes": [],
+        "edges": [],
+    }
+
+    data = await validate(client, workflow)
+
+    assert data["valid"] is False
+    assert {"missing_input_node", "missing_output_node"}.issubset(issue_codes(data))
+
+
+@pytest.mark.asyncio
+async def test_invalid_edge_reference_is_reported(client: httpx.AsyncClient) -> None:
+    workflow = linear_workflow()
+    workflow["edges"].append({"id": "bad", "source": "input", "target": "missing"})
+
+    data = await validate(client, workflow)
+
+    assert data["valid"] is False
+    assert "invalid_edge_reference" in issue_codes(data)
+
+
+@pytest.mark.asyncio
+async def test_cycle_graph_is_rejected(client: httpx.AsyncClient) -> None:
+    workflow = linear_workflow()
+    workflow["edges"].append({"id": "cycle", "source": "output", "target": "input"})
+
+    data = await validate(client, workflow)
+
+    assert data["valid"] is False
+    assert "cycle_detected" in issue_codes(data)
+
+
+@pytest.mark.asyncio
+async def test_llm_missing_model_prompt_and_output_variable(
+    client: httpx.AsyncClient,
+) -> None:
+    workflow = linear_workflow()
+    workflow["nodes"][1]["data"] = {"kind": "llm"}
+
+    data = await validate(client, workflow)
+
+    assert data["valid"] is False
+    assert {
+        "missing_llm_model",
+        "missing_llm_prompt",
+        "missing_llm_output_variable",
+    }.issubset(issue_codes(data))
+
+
+@pytest.mark.asyncio
+async def test_missing_template_and_output_variables_are_reported(
+    client: httpx.AsyncClient,
+) -> None:
+    workflow = linear_workflow()
+    workflow["nodes"][1]["data"]["prompt"] = "请回答 {{missing_input}}"
+    workflow["nodes"][2]["data"]["outputVariable"] = "missing_output"
+
+    data = await validate(client, workflow)
+
+    assert data["valid"] is False
+    assert {
+        "missing_template_variable",
+        "missing_output_variable_reference",
+    }.issubset(issue_codes(data))
+
+
+@pytest.mark.asyncio
+async def test_validate_variable_assign_node(client: httpx.AsyncClient) -> None:
+    workflow = linear_workflow()
+    workflow["nodes"][1] = {
+        "id": "assign",
+        "type": "variable_assign",
+        "data": {
+            "kind": "variable_assign",
+            "variableName": "assigned_text",
+            "template": "hello {{user_input}}",
+        },
+    }
+    workflow["nodes"][2]["data"]["outputVariable"] = "assigned_text"
+    workflow["edges"] = [
+        {"id": "e1", "source": "input", "target": "assign"},
+        {"id": "e2", "source": "assign", "target": "output"},
+    ]
+
+    data = await validate(client, workflow)
+
+    assert data["valid"] is True
+
+    workflow["nodes"][1]["data"].pop("variableName")
+    data = await validate(client, workflow)
+
+    assert data["valid"] is False
+    assert "missing_variable_assign_name" in issue_codes(data)
+
+
+@pytest.mark.asyncio
+async def test_validate_http_request_required_fields(client: httpx.AsyncClient) -> None:
+    workflow = linear_workflow()
+    workflow["nodes"][1] = {
+        "id": "http",
+        "type": "http_request",
+        "data": {
+            "kind": "http_request",
+            "url": "https://example.com?q={{user_input}}",
+            "method": "GET",
+            "headersJson": "{}",
+            "outputVariable": "http_output",
+        },
+    }
+    workflow["nodes"][2]["data"]["outputVariable"] = "http_output"
+    workflow["edges"] = [
+        {"id": "e1", "source": "input", "target": "http"},
+        {"id": "e2", "source": "http", "target": "output"},
+    ]
+
+    data = await validate(client, workflow)
+
+    assert data["valid"] is True
+
+    workflow["nodes"][1]["data"]["headersJson"] = "{bad json"
+    data = await validate(client, workflow)
+
+    assert data["valid"] is False
+    assert "invalid_http_request_headers_json" in issue_codes(data)
+
+
+@pytest.mark.asyncio
+async def test_validate_list_operation_operators(client: httpx.AsyncClient) -> None:
+    workflow = linear_workflow()
+    workflow["nodes"][1] = {
+        "id": "list",
+        "type": "list_operation",
+        "data": {
+            "kind": "list_operation",
+            "inputVariable": "user_input",
+            "operator": "length",
+            "outputVariable": "list_output",
+        },
+    }
+    workflow["nodes"][2]["data"]["outputVariable"] = "list_output"
+    workflow["edges"] = [
+        {"id": "e1", "source": "input", "target": "list"},
+        {"id": "e2", "source": "list", "target": "output"},
+    ]
+
+    data = await validate(client, workflow)
+
+    assert data["valid"] is True
+
+    workflow["nodes"][1]["data"]["operator"] = "join"
+    data = await validate(client, workflow)
+
+    assert data["valid"] is False
+    assert "missing_list_operation_separator" in issue_codes(data)
+
+
+@pytest.mark.asyncio
+async def test_validate_iteration_required_fields(client: httpx.AsyncClient) -> None:
+    workflow = linear_workflow()
+    workflow["nodes"][1] = {
+        "id": "iteration",
+        "type": "iteration",
+        "data": {
+            "kind": "iteration",
+            "inputVariable": "user_input",
+            "iterationVariable": "item",
+            "itemTemplate": "done {{item}}",
+            "outputVariable": "iteration_output",
+        },
+    }
+    workflow["nodes"][2]["data"]["outputVariable"] = "iteration_output"
+    workflow["edges"] = [
+        {"id": "e1", "source": "input", "target": "iteration"},
+        {"id": "e2", "source": "iteration", "target": "output"},
+    ]
+
+    data = await validate(client, workflow)
+
+    assert data["valid"] is True
+
+    workflow["nodes"][1]["data"].pop("itemTemplate")
+    data = await validate(client, workflow)
+
+    assert data["valid"] is False
+    assert "missing_iteration_template" in issue_codes(data)
+
+
+@pytest.mark.asyncio
+async def test_validate_template_transform_required(client: httpx.AsyncClient) -> None:
+    workflow = linear_workflow()
+    workflow["nodes"][1] = {
+        "id": "template",
+        "type": "template_transform",
+        "data": {
+            "kind": "template_transform",
+            "template": "result={{user_input}}",
+            "outputVariable": "template_output",
+        },
+    }
+    workflow["nodes"][2]["data"]["outputVariable"] = "template_output"
+    workflow["edges"] = [
+        {"id": "e1", "source": "input", "target": "template"},
+        {"id": "e2", "source": "template", "target": "output"},
+    ]
+
+    data = await validate(client, workflow)
+
+    assert data["valid"] is True
+
+    workflow["nodes"][1]["data"].pop("template")
+    data = await validate(client, workflow)
+
+    assert data["valid"] is False
+    assert "missing_template_transform_template" in issue_codes(data)
+
+
+@pytest.mark.asyncio
+async def test_validate_variable_aggregator_variables_non_empty(
+    client: httpx.AsyncClient,
+) -> None:
+    workflow = linear_workflow()
+    workflow["nodes"][1] = {
+        "id": "aggregator",
+        "type": "variable_aggregator",
+        "data": {
+            "kind": "variable_aggregator",
+            "variableNames": "user_input",
+            "outputTemplate": "{name}={value}\n",
+            "outputVariable": "aggregated_output",
+        },
+    }
+    workflow["nodes"][2]["data"]["outputVariable"] = "aggregated_output"
+    workflow["edges"] = [
+        {"id": "e1", "source": "input", "target": "aggregator"},
+        {"id": "e2", "source": "aggregator", "target": "output"},
+    ]
+
+    data = await validate(client, workflow)
+
+    assert data["valid"] is True
+
+    workflow["nodes"][1]["data"]["variableNames"] = ""
+    data = await validate(client, workflow)
+
+    assert data["valid"] is False
+    assert "missing_aggregator_variable_names_empty" in issue_codes(data)
+
+
+@pytest.mark.asyncio
+async def test_validate_parameter_extractor_required_fields(
+    client: httpx.AsyncClient,
+) -> None:
+    workflow = linear_workflow()
+    workflow["nodes"][1] = {
+        "id": "extractor",
+        "type": "parameter_extractor",
+        "data": {
+            "kind": "parameter_extractor",
+            "inputVariable": "user_input",
+            "schema": "name, email_address",
+            "modelId": "deepseek/deepseek-chat",
+            "outputVariable": "parameters_json",
+        },
+    }
+    workflow["nodes"][2]["data"]["outputVariable"] = "parameters_json"
+    workflow["edges"] = [
+        {"id": "e1", "source": "input", "target": "extractor"},
+        {"id": "e2", "source": "extractor", "target": "output"},
+    ]
+
+    data = await validate(client, workflow)
+
+    assert data["valid"] is True
+
+    workflow["nodes"][1]["data"].pop("modelId")
+    data = await validate(client, workflow)
+
+    assert data["valid"] is False
+    assert "missing_parameter_extractor_model_id" in issue_codes(data)
+
+
+@pytest.mark.asyncio
+async def test_validate_knowledge_retrieval_top_k(client: httpx.AsyncClient) -> None:
+    workflow = linear_workflow()
+    workflow["nodes"][1] = {
+        "id": "retrieval",
+        "type": "knowledge_retrieval",
+        "data": {
+            "kind": "knowledge_retrieval",
+            "queryVariable": "user_input",
+            "top_k": "3",
+            "outputVariable": "rag_context",
+        },
+    }
+    workflow["nodes"][2]["data"]["outputVariable"] = "rag_context"
+    workflow["edges"] = [
+        {"id": "e1", "source": "input", "target": "retrieval"},
+        {"id": "e2", "source": "retrieval", "target": "output"},
+    ]
+
+    data = await validate(client, workflow)
+
+    assert data["valid"] is True
+
+    workflow["nodes"][1]["data"]["top_k"] = "0"
+    data = await validate(client, workflow)
+
+    assert data["valid"] is False
+    assert "invalid_knowledge_retrieval_top_k" in issue_codes(data)
+
+
+@pytest.mark.asyncio
+async def test_validate_document_extractor_required_fields(
+    client: httpx.AsyncClient,
+) -> None:
+    workflow = linear_workflow()
+    workflow["nodes"][1] = {
+        "id": "document",
+        "type": "document_extractor",
+        "data": {
+            "kind": "document_extractor",
+            "sourcePathVariable": "user_input",
+            "outputVariable": "document_text",
+        },
+    }
+    workflow["nodes"][2]["data"]["outputVariable"] = "document_text"
+    workflow["edges"] = [
+        {"id": "e1", "source": "input", "target": "document"},
+        {"id": "e2", "source": "document", "target": "output"},
+    ]
+
+    data = await validate(client, workflow)
+
+    assert data["valid"] is True
+
+    workflow["nodes"][1]["data"].pop("sourcePathVariable")
+    data = await validate(client, workflow)
+
+    assert data["valid"] is False
+    assert "missing_document_extractor_source_path" in issue_codes(data)
+
+
+@pytest.mark.asyncio
+async def test_templates_endpoint_returns_starter_template(
+    client: httpx.AsyncClient,
+) -> None:
+    response = await client.get("/api/workflow-native/templates")
+
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert len(data) == 1
+    assert data[0]["workflow"]["nodes"]

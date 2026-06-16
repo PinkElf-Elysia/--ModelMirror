@@ -1,10 +1,28 @@
 import { type Edge, type Node } from "@xyflow/react";
 
-export type WorkflowNodeKind = "input" | "llm" | "condition" | "code" | "output";
+export type WorkflowNodeKind =
+  | "input"
+  | "llm"
+  | "condition"
+  | "code"
+  | "variable_assign"
+  | "template_transform"
+  | "variable_aggregator"
+  | "parameter_extractor"
+  | "knowledge_retrieval"
+  | "document_extractor"
+  | "http_request"
+  | "list_operation"
+  | "iteration"
+  | "output";
 
 export type ConditionOperator = "equals" | "contains";
 
 export type CodeOperation = "upper" | "lower" | "replace" | "concat";
+
+export type HttpRequestMethod = "GET" | "POST";
+
+export type ListOperationOperator = "length" | "join" | "first" | "last";
 
 export interface WorkflowNodeData extends Record<string, unknown> {
   kind: WorkflowNodeKind;
@@ -23,6 +41,22 @@ export interface WorkflowNodeData extends Record<string, unknown> {
   replaceFrom?: string;
   replaceTo?: string;
   concatValue?: string;
+  template?: string;
+  variableNames?: string;
+  outputTemplate?: string;
+  schema?: string;
+  queryVariable?: string;
+  top_k?: string;
+  sourcePathVariable?: string;
+  url?: string;
+  method?: HttpRequestMethod;
+  headersJson?: string;
+  bodyVariable?: string;
+  inputVariable?: string;
+  operator?: ListOperationOperator;
+  joinSeparator?: string;
+  iterationVariable?: string;
+  itemTemplate?: string;
 }
 
 export type WorkflowNode = Node<WorkflowNodeData, "workflowNode">;

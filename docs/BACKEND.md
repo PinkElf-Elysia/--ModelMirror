@@ -120,6 +120,42 @@ curl -N -X POST http://localhost:8000/api/workflow/run ^
 
 响应：SSE 事件，包括 `node_start`、`node_end`、`workflow_end`、`error`。
 
+### GET `/api/workflow-native/templates`
+
+自研工作流 native 实验线的模板接口。当前返回一个三节点线性样例，供 `/workflow-native` 做静态校验演示。
+
+```bash
+curl http://localhost:8000/api/workflow-native/templates
+```
+
+### POST `/api/workflow-native/validate`
+
+自研工作流 native 静态图校验接口。该接口不执行模型、代码、Tool 或 RAG，只校验节点、连线、变量引用和拓扑顺序。图校验失败时 HTTP 仍返回 `200`，通过 `valid=false` 和 `issues` 表达问题。
+
+当前支持的 native 节点：`input`、`llm`、`condition`、`code`、`variable_assign`、`template_transform`、`variable_aggregator`、`parameter_extractor`、`knowledge_retrieval`、`document_extractor`、`http_request`、`list_operation`、`iteration`、`output`。
+
+合法三节点样例：
+
+```bash
+curl -X POST http://localhost:8000/api/workflow-native/validate ^
+  -H "Content-Type: application/json" ^
+  -d "{\"workflow\":{\"id\":\"draft\",\"title\":\"linear\",\"nodes\":[{\"id\":\"input\",\"type\":\"input\",\"data\":{\"kind\":\"input\",\"variableName\":\"user_input\"}},{\"id\":\"llm\",\"type\":\"llm\",\"data\":{\"kind\":\"llm\",\"modelId\":\"openai/gpt-4o-mini\",\"prompt\":\"请回答 {{user_input}}\",\"outputVariable\":\"llm_output\"}},{\"id\":\"output\",\"type\":\"output\",\"data\":{\"kind\":\"output\",\"outputVariable\":\"llm_output\"}}],\"edges\":[{\"id\":\"e1\",\"source\":\"input\",\"target\":\"llm\"},{\"id\":\"e2\",\"source\":\"llm\",\"target\":\"output\"}]}}"
+```
+
+响应：
+
+```json
+{
+  "valid": true,
+  "issues": [],
+  "order": ["input", "llm", "output"],
+  "node_count": 3,
+  "edge_count": 2
+}
+```
+
+详细设计见 [workflow-native-design.md](./workflow-native-design.md)。
+
 ### `/api/mcp/*`
 
 MCP 原生 stdio 集成接口。详细说明见 [MCP_INTEGRATION.md](./MCP_INTEGRATION.md)。
@@ -227,5 +263,5 @@ curl -N -X POST http://localhost:8000/api/dify/workflow/run ^
 4. 不要在响应或日志中输出 API Key。
 5. 更新本文档和 [QUICK_START.md](./QUICK_START.md)。
 
-最后更新日期：2026-06-10  
+最后更新日期：2026-06-16
 维护人：模镜团队

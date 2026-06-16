@@ -10,6 +10,7 @@ import RagPage from "./pages/RagPage";
 import SkillBrowserPage from "./pages/SkillBrowserPage";
 import WorkflowClassicPage from "./pages/WorkflowClassicPage";
 import WorkflowEditorPage from "./pages/WorkflowEditorPage";
+import WorkflowNativePage from "./pages/WorkflowNativePage";
 
 export default function App() {
   return (
@@ -27,6 +28,8 @@ export default function App() {
       <Route element={<WorkflowEditorPage />} path="/workflow" />
       <Route element={<WorkflowClassicPage />} path="/workflow/classic" />
       <Route element={<WorkflowClassicPage />} path="/workflow/classic/:id" />
+      <Route element={<WorkflowNativePage />} path="/workflow-native" />
+      <Route element={<WorkflowNativePage />} path="/workflow-native/:id" />
       <Route element={<WorkflowEditorPage />} path="/workflow/new" />
       <Route element={<WorkflowEditorPage />} path="/workflow/:id" />
       <Route element={<Navigate replace to="/models" />} path="*" />

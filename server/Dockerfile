@@ -15,6 +15,7 @@ COPY mcp ./mcp
 COPY registry ./registry
 COPY rag ./rag
 COPY skills ./skills
+COPY workflow_native ./workflow_native
 
 EXPOSE 8000
 
