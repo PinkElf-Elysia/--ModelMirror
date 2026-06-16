@@ -27,6 +27,11 @@ except ModuleNotFoundError:
     from rag.api import router as rag_router
 
 try:
+    from server.skills.api import router as skills_router
+except ModuleNotFoundError:
+    from skills.api import router as skills_router
+
+try:
     from server.mcp.manager import (
         MCPClientError,
         MCPClientManager,
@@ -117,6 +122,7 @@ app.add_middleware(
 
 app.include_router(dify_router)
 app.include_router(rag_router)
+app.include_router(skills_router)
 
 request_windows: dict[str, deque[float]] = defaultdict(deque)
 mcp_connect_windows: dict[str, deque[float]] = defaultdict(deque)

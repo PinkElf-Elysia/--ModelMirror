@@ -64,6 +64,24 @@ interface RagQueryResponse {
   sources: RagSource[];
 }
 
+interface InstalledSkill {
+  skill_id: string;
+  name: string;
+  description: string;
+  repo_url: string;
+  sub_path: string;
+  installed_at: number;
+}
+
+interface InstalledSkillsResponse {
+  skills: InstalledSkill[];
+}
+
+interface SkillContentResponse {
+  skill_id: string;
+  content: string;
+}
+
 const modalityLabels: Record<string, string> = {
   text: "文本",
   image: "图片",
@@ -369,6 +387,10 @@ export default function ChatPage() {
   const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBase[]>([]);
   const [selectedKnowledgeBaseId, setSelectedKnowledgeBaseId] = useState("");
   const [isLoadingKnowledgeBases, setIsLoadingKnowledgeBases] = useState(false);
+  const [installedSkills, setInstalledSkills] = useState<InstalledSkill[]>([]);
+  const [selectedSkillId, setSelectedSkillId] = useState("");
+  const [skillContentCache, setSkillContentCache] = useState<Record<string, string>>({});
+  const [isLoadingSkills, setIsLoadingSkills] = useState(false);
   const [modelSwitchNotice, setModelSwitchNotice] = useState("");
   const [agentDefaultModelNotice, setAgentDefaultModelNotice] = useState("");
   const chatSectionRef = useRef<HTMLElement>(null);
@@ -394,6 +416,10 @@ export default function ChatPage() {
 
   useEffect(() => {
     void loadKnowledgeBases();
+  }, []);
+
+  useEffect(() => {
+    void loadInstalledSkills();
   }, []);
 
   function scrollMessagesToBottom(behavior: ScrollBehavior = "smooth") {
@@ -526,6 +552,57 @@ export default function ChatPage() {
     }
   }
 
+  async function loadInstalledSkills() {
+    setIsLoadingSkills(true);
+    try {
+      const response = await fetch("/api/skills/installed");
+      if (!response.ok) throw new Error(await readApiError(response));
+      const data = (await response.json()) as InstalledSkillsResponse;
+      setInstalledSkills(data.skills);
+      if (
+        selectedSkillId &&
+        !data.skills.some((skill) => skill.skill_id === selectedSkillId)
+      ) {
+        setSelectedSkillId("");
+      }
+    } catch (loadError) {
+      console.error("Skill list failed to load", loadError);
+    } finally {
+      setIsLoadingSkills(false);
+    }
+  }
+
+  async function loadSkillContent(skillId: string) {
+    if (!skillId) return "";
+    const cached = skillContentCache[skillId];
+    if (cached) return cached;
+
+    const response = await fetch(`/api/skills/${encodeURIComponent(skillId)}/content`);
+    if (!response.ok) throw new Error(await readApiError(response));
+    const data = (await response.json()) as SkillContentResponse;
+    setSkillContentCache((current) => ({
+      ...current,
+      [skillId]: data.content,
+    }));
+    return data.content;
+  }
+
+  async function handleSkillSelection(skillId: string) {
+    setSelectedSkillId(skillId);
+    setError("");
+    if (!skillId || skillContentCache[skillId]) return;
+
+    try {
+      setIsLoadingSkills(true);
+      await loadSkillContent(skillId);
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : "Skill 内容加载失败");
+      setSelectedSkillId("");
+    } finally {
+      setIsLoadingSkills(false);
+    }
+  }
+
   async function sendMessage(overrideText?: string) {
     const rawText = (overrideText ?? input).trim();
     const images = overrideText ? [] : uploadedImages;
@@ -539,6 +616,16 @@ export default function ChatPage() {
     if (selectedKnowledgeBaseId && images.length > 0) {
       setError("知识库检索模式暂不支持图片问题，请先移除图片或取消知识库选择。");
       return;
+    }
+
+    let activeSkillContent = "";
+    if (selectedSkillId) {
+      try {
+        activeSkillContent = await loadSkillContent(selectedSkillId);
+      } catch (loadError) {
+        setError(loadError instanceof Error ? loadError.message : "Skill 内容加载失败");
+        return;
+      }
     }
 
     const userContent = buildUserContent(rawText, images, superPromptMode);
@@ -557,9 +644,23 @@ export default function ChatPage() {
       displayContent: "",
     };
 
-    const systemMessages: ChatApiMessage[] = agentInterview?.prompt
-      ? [{ role: "system", content: agentInterview.prompt }]
+    const selectedSkill = installedSkills.find(
+      (skill) => skill.skill_id === selectedSkillId,
+    );
+    const skillSystemMessages: ChatApiMessage[] = activeSkillContent
+      ? [
+          {
+            role: "system",
+            content: `当前激活 Skill：${selectedSkill?.name ?? selectedSkillId}\n\n${activeSkillContent}`,
+          },
+        ]
       : [];
+    const systemMessages: ChatApiMessage[] = [
+      ...skillSystemMessages,
+      ...(agentInterview?.prompt
+        ? [{ role: "system" as const, content: agentInterview.prompt }]
+        : []),
+    ];
     const apiMessages: ChatApiMessage[] = [
       ...systemMessages,
       ...messages.map((message) => ({
@@ -577,12 +678,15 @@ export default function ChatPage() {
 
     try {
       if (selectedKnowledgeBaseId && rawText) {
+        const ragQuestion = activeSkillContent
+          ? `请遵循以下 Skill 说明回答，并结合知识库检索结果。\n\n${activeSkillContent}\n\n用户问题：${rawText}`
+          : rawText;
         const response = await fetch("/api/rag/query", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             kb_id: selectedKnowledgeBaseId,
-            question: rawText,
+            question: ragQuestion,
           }),
         });
         if (!response.ok) throw new Error(await readApiError(response));
@@ -995,6 +1099,26 @@ export default function ChatPage() {
                       {knowledgeBases.map((kb) => (
                         <option className="bg-slate-950 text-white" key={kb.id} value={kb.id}>
                           {kb.name}（{kb.document_count} 份文档）
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="flex flex-1 flex-col gap-2 text-xs font-semibold text-slate-300 sm:flex-row sm:items-center">
+                    <span className="shrink-0 text-brand-100">Skill</span>
+                    <select
+                      className="min-w-0 flex-1 rounded-full border border-white/10 bg-ink-950/80 px-3 py-2 text-xs font-semibold text-white outline-none transition focus:border-brand-300/50 focus:ring-4 focus:ring-brand-300/10"
+                      disabled={isSending || isLoadingSkills}
+                      onChange={(event) => void handleSkillSelection(event.target.value)}
+                      value={selectedSkillId}
+                    >
+                      <option value="">不使用 Skill，普通面试</option>
+                      {installedSkills.map((skill) => (
+                        <option
+                          className="bg-slate-950 text-white"
+                          key={skill.skill_id}
+                          value={skill.skill_id}
+                        >
+                          {skill.name}
                         </option>
                       ))}
                     </select>

@@ -15,6 +15,7 @@
 | [INTEGRATION_DIFY.md](./INTEGRATION_DIFY.md) | Dify iframe + 后端代理集成方案与排障。 |
 | [MCP_INTEGRATION.md](./MCP_INTEGRATION.md) | MCP 原生 stdio 集成、REST API、前端交互和测试指南。 |
 | [RAG_INTEGRATION.md](./RAG_INTEGRATION.md) | 本地 RAG 知识库、文档上传、向量检索、聊天引用和测试指南。 |
+| [SKILL_INTEGRATION.md](./SKILL_INTEGRATION.md) | Skill 扩展包安装、管理、聊天注入和测试指南。 |
 | [THEME.md](./THEME.md) | “AI 牛马招聘会”主题、设计 token 和 UI 规范。 |
 | [GLOSSARY.md](./GLOSSARY.md) | 项目常用术语、缩写和内部黑话。 |
 | [ONBOARDING.md](./ONBOARDING.md) | 新成员第一天到第一周的上手路线。 |
