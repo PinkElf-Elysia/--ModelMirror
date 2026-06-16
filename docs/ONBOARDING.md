@@ -12,6 +12,7 @@
 - [ ] 克隆仓库并按 [QUICK_START.md](./QUICK_START.md) 启动项目。
 - [ ] 打开 `/models`、`/agents`、`/chat/:modelId`、`/workflow`、`/rag` 了解产品。
 - [ ] 阅读 [ARCHITECTURE.md](./ARCHITECTURE.md)。
+- [ ] 阅读 [HARNESS_ENGINEERING.md](./HARNESS_ENGINEERING.md)，理解开发护栏和回退要求。
 - [ ] 阅读与你角色相关的文档：
   - 前端：[FRONTEND.md](./FRONTEND.md)
   - 后端：[BACKEND.md](./BACKEND.md)

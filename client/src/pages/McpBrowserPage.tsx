@@ -1,7 +1,18 @@
-import { useEffect } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import McpServerCard, {
+  type McpSessionSummary,
+} from "../components/McpServerCard";
 import PageContainer from "../components/PageContainer";
-import ResourceProjectCard from "../components/ResourceProjectCard";
 import { mcpProjects } from "../data/mcpProjects";
+
+interface RegistryTool {
+  name: string;
+  description?: string | null;
+  input_schema: Record<string, unknown>;
+  server_id: string;
+  session_id: string;
+  registered_at: number;
+}
 
 const nextMcpShelves = [
   "Markitdown MCP",
@@ -14,12 +25,62 @@ function formatStars(stars: number) {
   return `${(stars / 1000).toFixed(1)}k`;
 }
 
+function commandKey(command?: string[]) {
+  return command?.join("\u0000") ?? "";
+}
+
 export default function McpBrowserPage() {
+  const [sessions, setSessions] = useState<McpSessionSummary[]>([]);
+  const [registryTools, setRegistryTools] = useState<RegistryTool[]>([]);
+  const [activeView, setActiveView] = useState<"servers" | "registry">("servers");
+  const [isLoadingRuntime, setIsLoadingRuntime] = useState(false);
+  const [runtimeError, setRuntimeError] = useState("");
+
   useEffect(() => {
     document.title = "模镜 - MCP 工具采购";
   }, []);
 
+  const refreshRuntime = useCallback(async () => {
+    setIsLoadingRuntime(true);
+    setRuntimeError("");
+    try {
+      const [sessionsResponse, registryResponse] = await Promise.all([
+        fetch("/api/mcp/sessions"),
+        fetch("/api/registry/tools"),
+      ]);
+      if (!sessionsResponse.ok) throw new Error("无法获取 MCP 会话列表");
+      if (!registryResponse.ok) throw new Error("无法获取全局工具注册表");
+      const sessionsData = (await sessionsResponse.json()) as {
+        sessions: McpSessionSummary[];
+      };
+      const registryData = (await registryResponse.json()) as {
+        tools: RegistryTool[];
+      };
+      setSessions(sessionsData.sessions);
+      setRegistryTools(registryData.tools);
+    } catch (exc) {
+      setRuntimeError(
+        exc instanceof Error ? exc.message : "MCP 运行态信息加载失败",
+      );
+    } finally {
+      setIsLoadingRuntime(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshRuntime();
+  }, [refreshRuntime]);
+
   const totalStars = mcpProjects.reduce((sum, project) => sum + project.stars, 0);
+  const connectableCount = mcpProjects.filter((project) => project.command?.length).length;
+  const sessionsByCommand = useMemo(() => {
+    const map = new Map<string, McpSessionSummary>();
+    for (const session of sessions) {
+      const key = commandKey(session.server_command);
+      if (!map.has(key)) map.set(key, session);
+    }
+    return map;
+  }, [sessions]);
 
   return (
     <PageContainer
@@ -42,6 +103,19 @@ export default function McpBrowserPage() {
               {formatStars(totalStars)} stars
             </p>
           </div>
+          <div className="mt-3 rounded-lg border border-white/10 bg-white/[0.045] p-3">
+            <p className="text-xs text-slate-400">可原生连接</p>
+            <p className="mt-1 text-sm font-semibold text-emerald-100">
+              {connectableCount} 个
+            </p>
+          </div>
+          <button
+            className="mt-4 w-full rounded-full border border-brand-300/25 bg-brand-300/10 px-4 py-2 text-sm font-semibold text-brand-100 transition hover:bg-brand-300/15"
+            onClick={() => void refreshRuntime()}
+            type="button"
+          >
+            刷新连接状态
+          </button>
         </div>
       }
     >
@@ -79,9 +153,9 @@ export default function McpBrowserPage() {
               </div>
               <div className="rounded-lg bg-white/[0.055] px-2 py-3">
                 <p className="text-lg font-semibold text-emerald-100">
-                  {formatStars(totalStars)}
+                  {connectableCount}
                 </p>
-                <p className="mt-1 truncate text-slate-400">热度</p>
+                <p className="mt-1 truncate text-slate-400">可连接</p>
               </div>
             </div>
           </div>
@@ -89,37 +163,130 @@ export default function McpBrowserPage() {
       </header>
 
       <section className="mt-8">
+        <div className="mb-5 grid gap-3 md:grid-cols-3">
+          <div className="rounded-lg border border-white/10 bg-white/[0.045] p-4">
+            <p className="text-xs text-slate-400">已连接 Server</p>
+            <p className="mt-2 text-2xl font-semibold text-white">
+              {sessions.length}
+            </p>
+          </div>
+          <div className="rounded-lg border border-white/10 bg-white/[0.045] p-4">
+            <p className="text-xs text-slate-400">全局工具数</p>
+            <p className="mt-2 text-2xl font-semibold text-brand-100">
+              {registryTools.length}
+            </p>
+          </div>
+          <div className="rounded-lg border border-white/10 bg-white/[0.045] p-4">
+            <p className="text-xs text-slate-400">运行态</p>
+            <p className="mt-2 text-sm font-semibold text-emerald-100">
+              {isLoadingRuntime ? "同步中..." : "已同步"}
+            </p>
+          </div>
+        </div>
+
+        {runtimeError ? (
+          <div className="mb-5 rounded-lg border border-rose-300/25 bg-rose-300/10 p-4 text-sm text-rose-100">
+            {runtimeError}
+          </div>
+        ) : null}
+
+        <div className="mb-5 flex flex-wrap gap-2">
+          <button
+            className={`rounded-full px-4 py-2 text-sm font-semibold transition ${
+              activeView === "servers"
+                ? "bg-hire-300 text-ink-950"
+                : "border border-white/10 bg-white/[0.055] text-slate-200 hover:border-hire-300/30"
+            }`}
+            onClick={() => setActiveView("servers")}
+            type="button"
+          >
+            工具货架
+          </button>
+          <button
+            className={`rounded-full px-4 py-2 text-sm font-semibold transition ${
+              activeView === "registry"
+                ? "bg-brand-300 text-ink-950"
+                : "border border-white/10 bg-white/[0.055] text-slate-200 hover:border-brand-300/30"
+            }`}
+            onClick={() => {
+              setActiveView("registry");
+              void refreshRuntime();
+            }}
+            type="button"
+          >
+            全局工具注册表
+          </button>
+        </div>
+
         <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
           <div>
-            <h2 className="text-xl font-semibold text-white">已上架工具箱</h2>
+            <h2 className="text-xl font-semibold text-white">
+              {activeView === "servers" ? "已上架工具箱" : "全局工具注册表"}
+            </h2>
             <p className="mt-1 text-sm text-slate-400">
-              点击“安装”查看当前展示命令，复制后按你的 MCP 客户端配置。
+              {activeView === "servers"
+                ? "点击“连接”即可由后端以 stdio 启动 MCP Server；连接后可查看工具、填写参数并执行。"
+                : "这里聚合所有已连接 MCP Server 的工具；重名工具按首次出现保留。"}
             </p>
           </div>
           <span className="w-fit rounded-full border border-emerald-300/25 bg-emerald-300/10 px-3 py-1.5 text-xs font-semibold text-emerald-100">
-            全部来自真实 GitHub 仓库
+            {activeView === "servers"
+              ? `${connectableCount} 个支持原生连接`
+              : `${registryTools.length} 个已发现工具`}
           </span>
         </div>
 
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-          {mcpProjects.map((project) => (
-            <ResourceProjectCard
-              description={project.description}
-              installCommand={project.installCommand}
-              installNote={project.installNote}
-              key={project.id}
-              kind="mcp"
-              language={project.language}
-              name={project.name}
-              readmeSummary={project.readmeSummary}
-              repoName={project.repoName}
-              repoUrl={project.repoUrl}
-              stars={project.stars}
-              tags={project.tags}
-              updatedAt={project.updatedAt}
-            />
-          ))}
-        </div>
+        {activeView === "servers" ? (
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+            {mcpProjects.map((project) => (
+              <McpServerCard
+                key={project.id}
+                onConnectionChange={() => void refreshRuntime()}
+                project={project}
+                restoredSession={sessionsByCommand.get(commandKey(project.command))}
+              />
+            ))}
+          </div>
+        ) : (
+          <div className="overflow-hidden rounded-lg border border-white/10 bg-white/[0.045]">
+            {registryTools.length === 0 ? (
+              <div className="p-6 text-sm leading-6 text-slate-400">
+                当前还没有已注册工具。先回到“工具货架”连接一个 MCP Server。
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="min-w-full divide-y divide-white/10 text-sm">
+                  <thead className="bg-white/[0.04] text-left text-xs uppercase tracking-wide text-slate-400">
+                    <tr>
+                      <th className="px-4 py-3">工具名</th>
+                      <th className="px-4 py-3">所属 Server</th>
+                      <th className="px-4 py-3">Session</th>
+                      <th className="px-4 py-3">描述</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-white/10">
+                    {registryTools.map((tool) => (
+                      <tr className="align-top text-slate-300" key={`${tool.session_id}-${tool.name}`}>
+                        <td className="px-4 py-3 font-semibold text-white">
+                          {tool.name}
+                        </td>
+                        <td className="px-4 py-3 text-brand-100">
+                          {tool.server_id}
+                        </td>
+                        <td className="px-4 py-3 font-mono text-xs text-slate-500">
+                          {tool.session_id.slice(0, 10)}
+                        </td>
+                        <td className="max-w-xl px-4 py-3 text-slate-400">
+                          {tool.description ?? "暂无描述"}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        )}
       </section>
 
       <section className="mt-8 rounded-lg border border-white/10 bg-white/[0.045] p-5">

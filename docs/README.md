@@ -13,9 +13,11 @@
 | [DATABASE.md](./DATABASE.md) | 当前静态数据、本地状态和未来数据库迁移方案。 |
 | [DEPLOYMENT.md](./DEPLOYMENT.md) | 开发、生产、Docker、日志和运维建议。 |
 | [INTEGRATION_DIFY.md](./INTEGRATION_DIFY.md) | Dify iframe + 后端代理集成方案与排障。 |
+| [MCP_INTEGRATION.md](./MCP_INTEGRATION.md) | MCP 原生 stdio 集成、REST API、前端交互和测试指南。 |
 | [THEME.md](./THEME.md) | “AI 牛马招聘会”主题、设计 token 和 UI 规范。 |
 | [GLOSSARY.md](./GLOSSARY.md) | 项目常用术语、缩写和内部黑话。 |
 | [ONBOARDING.md](./ONBOARDING.md) | 新成员第一天到第一周的上手路线。 |
+| [HARNESS_ENGINEERING.md](./HARNESS_ENGINEERING.md) | 开发护栏、验收标准、回退策略和高风险变更规则。 |
 | [postmortem-workflow-rewrite.md](./postmortem-workflow-rewrite.md) | 自研工作流失败复盘。 |
 | [retry-plan-workflow-native.md](./retry-plan-workflow-native.md) | 未来重试自研工作流的阶段路线。 |
 
@@ -26,14 +28,16 @@
 1. [QUICK_START.md](./QUICK_START.md)
 2. [FRONTEND.md](./FRONTEND.md)
 3. [THEME.md](./THEME.md)
-4. [INTEGRATION_DIFY.md](./INTEGRATION_DIFY.md)
+4. [HARNESS_ENGINEERING.md](./HARNESS_ENGINEERING.md)
+5. [INTEGRATION_DIFY.md](./INTEGRATION_DIFY.md)
 
 ### 后端工程师
 
 1. [QUICK_START.md](./QUICK_START.md)
 2. [BACKEND.md](./BACKEND.md)
-3. [INTEGRATION_DIFY.md](./INTEGRATION_DIFY.md)
-4. [DEPLOYMENT.md](./DEPLOYMENT.md)
+3. [HARNESS_ENGINEERING.md](./HARNESS_ENGINEERING.md)
+4. [INTEGRATION_DIFY.md](./INTEGRATION_DIFY.md)
+5. [DEPLOYMENT.md](./DEPLOYMENT.md)
 
 ### 产品经理
 

@@ -16,7 +16,27 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from api.dify_proxy import router as dify_router
+try:
+    from server.api.dify_proxy import router as dify_router
+except ModuleNotFoundError:
+    from api.dify_proxy import router as dify_router
+
+try:
+    from server.mcp.manager import (
+        MCPClientError,
+        MCPClientManager,
+        MCPSessionNotFoundError,
+        validate_server_command,
+    )
+    from server.registry.tool_registry import ToolRegistry
+except ModuleNotFoundError:
+    from mcp.manager import (
+        MCPClientError,
+        MCPClientManager,
+        MCPSessionNotFoundError,
+        validate_server_command,
+    )
+    from registry.tool_registry import ToolRegistry
 
 load_dotenv()
 
@@ -86,13 +106,16 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
 app.include_router(dify_router)
 
 request_windows: dict[str, deque[float]] = defaultdict(deque)
+mcp_connect_windows: dict[str, deque[float]] = defaultdict(deque)
+mcp_manager = MCPClientManager()
+tool_registry = ToolRegistry()
 
 
 class TextContentPart(BaseModel):
@@ -172,6 +195,64 @@ class TeamChatRequest(BaseModel):
     max_tokens: int = Field(default=1800, ge=1, le=128000)
 
 
+class MCPConnectRequest(BaseModel):
+    server_command: list[str] = Field(min_length=1, max_length=32)
+
+
+class MCPConnectResponse(BaseModel):
+    session_id: str
+    tools_count: int
+
+
+class MCPSessionSummary(BaseModel):
+    session_id: str
+    server_command: list[str]
+    status: str
+    created_at: float
+    uptime_seconds: float
+    idle_seconds: float
+    tools_count: int
+
+
+class MCPSessionsResponse(BaseModel):
+    sessions: list[MCPSessionSummary]
+
+
+class MCPToolPayload(BaseModel):
+    name: str
+    description: str | None = None
+    inputSchema: dict[str, Any] = Field(default_factory=dict)
+    title: str | None = None
+
+
+class MCPToolsResponse(BaseModel):
+    tools: list[MCPToolPayload]
+
+
+class RegistryToolPayload(BaseModel):
+    name: str
+    description: str | None = None
+    input_schema: dict[str, Any] = Field(default_factory=dict)
+    server_id: str
+    session_id: str
+    registered_at: float
+
+
+class RegistryToolsResponse(BaseModel):
+    tools: list[RegistryToolPayload]
+
+
+class MCPCallRequest(BaseModel):
+    tool_name: str = Field(min_length=1, max_length=160)
+    arguments: dict[str, Any] = Field(default_factory=dict)
+
+
+class MCPCallResponse(BaseModel):
+    content: list[dict[str, Any]] = Field(default_factory=list)
+    is_error: bool = False
+    raw: dict[str, Any] = Field(default_factory=dict)
+
+
 WorkflowNodeType = Literal["input", "llm", "condition", "code", "output"]
 
 
@@ -222,6 +303,51 @@ def rate_limit_or_raise(ip: str) -> None:
     if len(window) >= REQUESTS_PER_MINUTE:
         raise HTTPException(status_code=429, detail="请求过于频繁，请稍后再试。")
     window.append(now)
+
+
+def mcp_connect_rate_limit_or_raise(ip: str) -> None:
+    now = time.monotonic()
+    window = mcp_connect_windows[ip]
+    while window and now - window[0] > 60:
+        window.popleft()
+    if len(window) >= 5:
+        raise HTTPException(status_code=429, detail="MCP 连接过于频繁，请稍后再试。")
+    window.append(now)
+
+
+def serialize_mcp_tool(tool: Any) -> MCPToolPayload:
+    data = tool.model_dump(by_alias=True, mode="json")
+    return MCPToolPayload(
+        name=data.get("name", ""),
+        title=data.get("title"),
+        description=data.get("description"),
+        inputSchema=data.get("inputSchema") or {},
+    )
+
+
+def serialize_mcp_call_result(result: Any) -> MCPCallResponse:
+    data = result.model_dump(by_alias=True, mode="json")
+    content = data.get("content")
+    return MCPCallResponse(
+        content=content if isinstance(content, list) else [],
+        is_error=bool(data.get("isError") or data.get("is_error")),
+        raw=data if isinstance(data, dict) else {},
+    )
+
+
+def mcp_server_id_from_command(server_command: list[str]) -> str:
+    if not server_command:
+        return "unknown"
+    if len(server_command) >= 3 and server_command[0].lower().startswith("npx"):
+        return server_command[2]
+    return " ".join(server_command[:3])
+
+
+async def cleanup_mcp_idle_sessions_and_registry() -> list[str]:
+    cleaned_ids = await mcp_manager.cleanup_idle_sessions()
+    if cleaned_ids:
+        await tool_registry.unregister_sessions(cleaned_ids)
+    return cleaned_ids
 
 
 def validate_content(messages: list[ChatMessage]) -> None:
@@ -1560,6 +1686,115 @@ async def team_chat(payload: TeamChatRequest, request: Request):
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
     )
+
+
+@app.on_event("startup")
+async def start_mcp_ttl_cleanup() -> None:
+    mcp_manager.start_ttl_cleanup(on_cleanup=tool_registry.unregister_sessions)
+
+
+@app.on_event("shutdown")
+async def shutdown_mcp_sessions() -> None:
+    await mcp_manager.stop_ttl_cleanup()
+    await mcp_manager.close_all()
+    await tool_registry.clear()
+
+
+@app.post("/api/mcp/connect", response_model=MCPConnectResponse)
+async def connect_mcp_server(payload: MCPConnectRequest, request: Request):
+    try:
+        mcp_connect_rate_limit_or_raise(client_ip(request))
+        validate_server_command(payload.server_command)
+        await cleanup_mcp_idle_sessions_and_registry()
+        session_id = await mcp_manager.connect(payload.server_command)
+        tools = await mcp_manager.list_tools(session_id)
+        await tool_registry.register_session_tools(
+            session_id=session_id,
+            server_id=mcp_server_id_from_command(payload.server_command),
+            tools=tools,
+        )
+        return MCPConnectResponse(session_id=session_id, tools_count=len(tools))
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("MCP connect failed")
+        raise HTTPException(status_code=400, detail=f"MCP Server 启动失败：{exc}") from exc
+
+
+@app.get("/api/mcp/sessions", response_model=MCPSessionsResponse)
+async def list_mcp_sessions():
+    await cleanup_mcp_idle_sessions_and_registry()
+    return MCPSessionsResponse(
+        sessions=[
+            MCPSessionSummary.model_validate(summary)
+            for summary in await mcp_manager.get_sessions_summary()
+        ]
+    )
+
+
+@app.get("/api/registry/tools", response_model=RegistryToolsResponse)
+async def list_registered_tools():
+    await cleanup_mcp_idle_sessions_and_registry()
+    return RegistryToolsResponse(
+        tools=[
+            RegistryToolPayload.model_validate(tool)
+            for tool in await tool_registry.list_tools()
+        ]
+    )
+
+
+@app.get("/api/mcp/{session_id}/tools", response_model=MCPToolsResponse)
+async def list_mcp_tools(session_id: str):
+    try:
+        tools = await mcp_manager.list_tools(session_id)
+        summary = {
+            item["session_id"]: item
+            for item in await mcp_manager.get_sessions_summary()
+        }.get(session_id)
+        if summary:
+            await tool_registry.register_session_tools(
+                session_id=session_id,
+                server_id=mcp_server_id_from_command(summary["server_command"]),
+                tools=tools,
+            )
+        return MCPToolsResponse(tools=[serialize_mcp_tool(tool) for tool in tools])
+    except MCPSessionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="MCP session 不存在或已断开。") from exc
+    except Exception as exc:
+        logger.exception("MCP list tools failed session=%s", session_id)
+        raise HTTPException(status_code=500, detail=f"获取 MCP 工具列表失败：{exc}") from exc
+
+
+@app.post("/api/mcp/{session_id}/call", response_model=MCPCallResponse)
+async def call_mcp_tool(session_id: str, payload: MCPCallRequest):
+    try:
+        result = await mcp_manager.call_tool(
+            session_id,
+            payload.tool_name,
+            payload.arguments,
+        )
+        return serialize_mcp_call_result(result)
+    except MCPSessionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="MCP session 不存在或已断开。") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("MCP tool call failed session=%s tool=%s", session_id, payload.tool_name)
+        raise HTTPException(status_code=500, detail=f"MCP 工具调用失败：{exc}") from exc
+
+
+@app.delete("/api/mcp/{session_id}")
+async def disconnect_mcp_server(session_id: str):
+    try:
+        await mcp_manager.disconnect(session_id)
+        await tool_registry.unregister_session(session_id)
+        return {"ok": True}
+    except MCPSessionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="MCP session 不存在或已断开。") from exc
+    except MCPClientError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.post("/api/chat")
