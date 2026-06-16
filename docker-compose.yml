@@ -9,11 +9,14 @@ services:
       RAG_STORAGE_DIR: /app/rag/storage
       RAG_UPLOAD_DIR: /app/rag/uploads
       CHROMA_DB_PATH: /app/rag/storage/chroma_db
+      SKILL_INSTALLED_DIR: /app/skills/installed
+      SKILL_TMP_DIR: /app/skills/tmp
     ports:
       - "8000:8000"
     volumes:
       - ./server/rag/storage:/app/rag/storage
       - ./server/rag/uploads:/app/rag/uploads
+      - ./server/skills/installed:/app/skills/installed
     restart: unless-stopped
     healthcheck:
       test:

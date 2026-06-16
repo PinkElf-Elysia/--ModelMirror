@@ -14,6 +14,7 @@ COPY api ./api
 COPY mcp ./mcp
 COPY registry ./registry
 COPY rag ./rag
+COPY skills ./skills
 
 EXPOSE 8000
 

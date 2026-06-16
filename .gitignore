@@ -42,6 +42,8 @@ docker-data/
 volumes/
 server/rag/storage/
 server/rag/uploads/
+server/skills/installed/
+server/skills/tmp/
 
 # Temporary generated assets
 .tmp-*/
