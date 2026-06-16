@@ -22,6 +22,8 @@
 | Vision 格式 | OpenAI Vision Content | `content` 为 text/image_url 数组的消息格式。 | `/api/chat` 多模态请求。 |
 | 资料库 | Dataset / Knowledge Base | 文档集合及其分段和检索能力。 | Dify 知识库、RAG。 |
 | 工作流 | Workflow | 多节点编排的 AI 流程。 | Dify 工作流、经典自研画布。 |
+| 自研工作流 | workflow-native | 与 Dify 稳定入口并行的本地实验线，当前包含静态图校验和 classic 本地节点试点执行。 | `/workflow-native`、`/api/workflow-native/validate`、`/workflow/classic`。 |
+| 工作流校验 | validate | 在执行前检查节点、连线、变量引用和拓扑顺序。 | workflow-native 第一阶段护栏。 |
 | 经典画布 | Classic Canvas | 早期 React Flow 自研 MVP，保留实验用途。 | `/workflow/classic`。 |
 | 工牌 / 展位 | Badge / Booth | 招聘会主题中的 UI 隐喻。 | 模型卡片、智能体卡片、筛选标签。 |
 | UGC | User-Generated Content | 用户生成内容。 | 未来提示词市场和自定义工作流。 |
@@ -31,5 +33,5 @@
 | Vite | Vite | 前端开发与构建工具。 | `client/`。 |
 | React Flow | React Flow / XYFlow | 节点画布库。 | `/workflow/classic`。 |
 
-最后更新日期：2026-06-10  
+最后更新日期：2026-06-16
 维护人：模镜团队

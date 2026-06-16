@@ -19,6 +19,8 @@ import { models } from "../../data/models";
 import {
   type CodeOperation,
   type ConditionOperator,
+  type HttpRequestMethod,
+  type ListOperationOperator,
   type WorkflowDefinition,
   type WorkflowEdge,
   type WorkflowNode,
@@ -78,6 +80,107 @@ function createNodeData(kind: WorkflowNodeKind): WorkflowNodeData {
       replaceFrom: "",
       replaceTo: "",
       concatValue: "",
+    };
+  }
+
+  if (kind === "variable_assign") {
+    return {
+      kind,
+      title: "变量赋值",
+      description: "把模板内容写入一个新变量。",
+      variableName: "assigned_text",
+      template: "收到：{{user_input}}",
+    };
+  }
+
+  if (kind === "template_transform") {
+    return {
+      kind,
+      title: "模板转换",
+      description: "把变量填入长文本模板，产出报告或结构化文本。",
+      template: "## 处理结果\n\n用户输入：{{user_input}}\n",
+      outputVariable: "template_output",
+    };
+  }
+
+  if (kind === "variable_aggregator") {
+    return {
+      kind,
+      title: "变量聚合器",
+      description: "汇总多个变量，便于下游统一处理。",
+      variableNames: "user_input",
+      outputTemplate: "{name}={value}\n",
+      outputVariable: "aggregated_output",
+    };
+  }
+
+  if (kind === "parameter_extractor") {
+    return {
+      kind,
+      title: "参数提取器",
+      description: "调用模型从文本中抽取字段，返回 JSON 字符串。",
+      inputVariable: "user_input",
+      schema: "name: 姓名\nemail_address: 邮箱地址",
+      modelId: "deepseek/deepseek-chat",
+      outputVariable: "parameters_json",
+    };
+  }
+
+  if (kind === "knowledge_retrieval") {
+    return {
+      kind,
+      title: "知识检索",
+      description: "使用本地 RAG 资料库检索相关片段。",
+      queryVariable: "user_input",
+      top_k: "3",
+      outputVariable: "rag_context",
+    };
+  }
+
+  if (kind === "document_extractor") {
+    return {
+      kind,
+      title: "文档提取器",
+      description: "从受限本地文件路径中提取纯文本。",
+      sourcePathVariable: "document_path",
+      outputVariable: "document_text",
+    };
+  }
+
+  if (kind === "http_request") {
+    return {
+      kind,
+      title: "HTTP 请求",
+      description: "调用一个外部接口并保存响应文本。默认运行器不会真实出站。",
+      url: "https://example.com",
+      method: "GET",
+      headersJson: "",
+      bodyVariable: "",
+      outputVariable: "http_output",
+    };
+  }
+
+  if (kind === "list_operation") {
+    return {
+      kind,
+      title: "列表操作",
+      description: "把逗号分隔文本当作列表做轻量处理。",
+      inputVariable: "user_input",
+      operator: "length",
+      joinSeparator: " / ",
+      outputVariable: "list_output",
+    };
+  }
+
+  if (kind === "iteration") {
+    return {
+      kind,
+      title: "迭代处理",
+      description: "逐项渲染模板，把结果汇总为 JSON 数组字符串。",
+      inputVariable: "user_input",
+      iterationVariable: "item",
+      itemTemplate: "处理：{{item}}",
+      outputVariable: "iteration_output",
     };
   }
 
@@ -360,6 +463,303 @@ function NodeConfig({ node, onChange }: NodeConfigProps) {
               />
             </Field>
           ) : null}
+        </>
+      ) : null}
+
+      {data.kind === "variable_assign" ? (
+        <>
+          <Field label="写入变量名">
+            <input
+              className={textInputClass()}
+              onChange={(event) => update({ variableName: event.target.value })}
+              value={data.variableName ?? ""}
+            />
+          </Field>
+          <Field label="赋值模板（支持 {{变量}}）">
+            <textarea
+              className={`${textInputClass()} min-h-28 resize-none leading-6`}
+              onChange={(event) => update({ template: event.target.value })}
+              value={data.template ?? ""}
+            />
+          </Field>
+        </>
+      ) : null}
+
+      {data.kind === "template_transform" ? (
+        <>
+          <Field label="模板内容（支持 {{变量}}）">
+            <textarea
+              className={`${textInputClass()} min-h-36 resize-none leading-6`}
+              onChange={(event) => update({ template: event.target.value })}
+              value={data.template ?? ""}
+            />
+          </Field>
+          <Field label="输出变量">
+            <input
+              className={textInputClass()}
+              onChange={(event) => update({ outputVariable: event.target.value })}
+              value={data.outputVariable ?? ""}
+            />
+          </Field>
+        </>
+      ) : null}
+
+      {data.kind === "variable_aggregator" ? (
+        <>
+          <Field label="变量名列表（逗号分隔）">
+            <input
+              className={textInputClass()}
+              onChange={(event) => update({ variableNames: event.target.value })}
+              value={data.variableNames ?? ""}
+            />
+          </Field>
+          <Field label="输出模板（可选，支持 {name} / {value}）">
+            <textarea
+              className={`${textInputClass()} min-h-24 resize-none font-mono text-xs leading-5`}
+              onChange={(event) => update({ outputTemplate: event.target.value })}
+              value={data.outputTemplate ?? ""}
+            />
+          </Field>
+          <Field label="输出变量">
+            <input
+              className={textInputClass()}
+              onChange={(event) => update({ outputVariable: event.target.value })}
+              value={data.outputVariable ?? ""}
+            />
+          </Field>
+        </>
+      ) : null}
+
+      {data.kind === "parameter_extractor" ? (
+        <>
+          <Field label="待提取文本变量">
+            <input
+              className={textInputClass()}
+              onChange={(event) => update({ inputVariable: event.target.value })}
+              value={data.inputVariable ?? ""}
+            />
+          </Field>
+          <Field label="调用模型">
+            <select
+              className={textInputClass()}
+              onChange={(event) => update({ modelId: event.target.value })}
+              value={data.modelId ?? "deepseek/deepseek-chat"}
+            >
+              {models.map((model) => (
+                <option
+                  className="bg-slate-950 text-white"
+                  key={model.id}
+                  value={model.id}
+                >
+                  {model.name}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <Field label="字段描述">
+            <textarea
+              className={`${textInputClass()} min-h-28 resize-none leading-6`}
+              onChange={(event) => update({ schema: event.target.value })}
+              value={data.schema ?? ""}
+            />
+          </Field>
+          <Field label="输出变量">
+            <input
+              className={textInputClass()}
+              onChange={(event) => update({ outputVariable: event.target.value })}
+              value={data.outputVariable ?? ""}
+            />
+          </Field>
+        </>
+      ) : null}
+
+      {data.kind === "knowledge_retrieval" ? (
+        <>
+          <Field label="查询变量">
+            <input
+              className={textInputClass()}
+              onChange={(event) => update({ queryVariable: event.target.value })}
+              value={data.queryVariable ?? ""}
+            />
+          </Field>
+          <Field label="返回片段数 Top K">
+            <input
+              className={textInputClass()}
+              inputMode="numeric"
+              onChange={(event) => update({ top_k: event.target.value })}
+              type="number"
+              value={data.top_k ?? "3"}
+            />
+          </Field>
+          <Field label="输出变量">
+            <input
+              className={textInputClass()}
+              onChange={(event) => update({ outputVariable: event.target.value })}
+              value={data.outputVariable ?? ""}
+            />
+          </Field>
+        </>
+      ) : null}
+
+      {data.kind === "document_extractor" ? (
+        <>
+          <div className="rounded-lg border border-amber-300/25 bg-amber-300/10 px-3 py-2 text-xs leading-5 text-amber-50">
+            安全提示：该节点只读取后端允许目录内的本地文件路径，不提供上传能力。
+          </div>
+          <Field label="文件路径变量">
+            <input
+              className={textInputClass()}
+              onChange={(event) =>
+                update({ sourcePathVariable: event.target.value })
+              }
+              value={data.sourcePathVariable ?? ""}
+            />
+          </Field>
+          <Field label="输出变量">
+            <input
+              className={textInputClass()}
+              onChange={(event) => update({ outputVariable: event.target.value })}
+              value={data.outputVariable ?? ""}
+            />
+          </Field>
+        </>
+      ) : null}
+
+      {data.kind === "http_request" ? (
+        <>
+          <div className="rounded-lg border border-cyan-300/25 bg-cyan-300/10 px-3 py-2 text-xs leading-5 text-cyan-50">
+            安全提示：默认运行器不会真实发起出站请求；管理员开启后才会调用外部 URL。
+          </div>
+          <Field label="请求方法">
+            <select
+              className={textInputClass()}
+              onChange={(event) =>
+                update({ method: event.target.value as HttpRequestMethod })
+              }
+              value={data.method ?? "GET"}
+            >
+              <option className="bg-slate-950" value="GET">
+                GET
+              </option>
+              <option className="bg-slate-950" value="POST">
+                POST
+              </option>
+            </select>
+          </Field>
+          <Field label="URL（支持 {{变量}}）">
+            <input
+              className={textInputClass()}
+              onChange={(event) => update({ url: event.target.value })}
+              value={data.url ?? ""}
+            />
+          </Field>
+          <Field label="请求头 JSON（可选）">
+            <textarea
+              className={`${textInputClass()} min-h-24 resize-none font-mono text-xs leading-5`}
+              onChange={(event) => update({ headersJson: event.target.value })}
+              placeholder='{"Content-Type":"application/json"}'
+              value={data.headersJson ?? ""}
+            />
+          </Field>
+          <Field label="请求正文变量（POST 可选）">
+            <input
+              className={textInputClass()}
+              onChange={(event) => update({ bodyVariable: event.target.value })}
+              value={data.bodyVariable ?? ""}
+            />
+          </Field>
+          <Field label="响应输出变量">
+            <input
+              className={textInputClass()}
+              onChange={(event) => update({ outputVariable: event.target.value })}
+              value={data.outputVariable ?? ""}
+            />
+          </Field>
+        </>
+      ) : null}
+
+      {data.kind === "list_operation" ? (
+        <>
+          <Field label="输入列表变量">
+            <input
+              className={textInputClass()}
+              onChange={(event) => update({ inputVariable: event.target.value })}
+              value={data.inputVariable ?? ""}
+            />
+          </Field>
+          <Field label="列表操作">
+            <select
+              className={textInputClass()}
+              onChange={(event) =>
+                update({ operator: event.target.value as ListOperationOperator })
+              }
+              value={data.operator ?? "length"}
+            >
+              <option className="bg-slate-950" value="length">
+                计算长度
+              </option>
+              <option className="bg-slate-950" value="join">
+                拼接文本
+              </option>
+              <option className="bg-slate-950" value="first">
+                取第一项
+              </option>
+              <option className="bg-slate-950" value="last">
+                取最后一项
+              </option>
+            </select>
+          </Field>
+          {data.operator === "join" ? (
+            <Field label="拼接分隔符">
+              <input
+                className={textInputClass()}
+                onChange={(event) => update({ joinSeparator: event.target.value })}
+                value={data.joinSeparator ?? ""}
+              />
+            </Field>
+          ) : null}
+          <Field label="输出变量">
+            <input
+              className={textInputClass()}
+              onChange={(event) => update({ outputVariable: event.target.value })}
+              value={data.outputVariable ?? ""}
+            />
+          </Field>
+        </>
+      ) : null}
+
+      {data.kind === "iteration" ? (
+        <>
+          <Field label="输入列表变量">
+            <input
+              className={textInputClass()}
+              onChange={(event) => update({ inputVariable: event.target.value })}
+              value={data.inputVariable ?? ""}
+            />
+          </Field>
+          <Field label="单项变量名">
+            <input
+              className={textInputClass()}
+              onChange={(event) =>
+                update({ iterationVariable: event.target.value })
+              }
+              value={data.iterationVariable ?? ""}
+            />
+          </Field>
+          <Field label="单项模板（支持 {{单项变量}}）">
+            <textarea
+              className={`${textInputClass()} min-h-28 resize-none leading-6`}
+              onChange={(event) => update({ itemTemplate: event.target.value })}
+              value={data.itemTemplate ?? ""}
+            />
+          </Field>
+          <Field label="输出变量">
+            <input
+              className={textInputClass()}
+              onChange={(event) => update({ outputVariable: event.target.value })}
+              value={data.outputVariable ?? ""}
+            />
+          </Field>
         </>
       ) : null}
 

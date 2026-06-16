@@ -30,6 +30,69 @@ const nodeMeta = {
     bg: "bg-accent-300/10",
     text: "text-accent-100",
   },
+  variable_assign: {
+    icon: "🪄",
+    label: "赋值工位",
+    border: "border-fuchsia-300/40",
+    bg: "bg-fuchsia-300/10",
+    text: "text-fuchsia-100",
+  },
+  template_transform: {
+    icon: "📝",
+    label: "模板工位",
+    border: "border-lime-300/40",
+    bg: "bg-lime-300/10",
+    text: "text-lime-100",
+  },
+  variable_aggregator: {
+    icon: "🔗",
+    label: "聚合工位",
+    border: "border-orange-300/40",
+    bg: "bg-orange-300/10",
+    text: "text-orange-100",
+  },
+  parameter_extractor: {
+    icon: "🎯",
+    label: "提取工位",
+    border: "border-rose-300/40",
+    bg: "bg-rose-300/10",
+    text: "text-rose-100",
+  },
+  knowledge_retrieval: {
+    icon: "📚",
+    label: "资料工位",
+    border: "border-teal-300/40",
+    bg: "bg-teal-300/10",
+    text: "text-teal-100",
+  },
+  document_extractor: {
+    icon: "📄",
+    label: "文档工位",
+    border: "border-slate-300/40",
+    bg: "bg-slate-300/10",
+    text: "text-slate-100",
+  },
+  http_request: {
+    icon: "🌐",
+    label: "外联工位",
+    border: "border-cyan-300/40",
+    bg: "bg-cyan-300/10",
+    text: "text-cyan-100",
+  },
+  list_operation: {
+    icon: "📋",
+    label: "列表工位",
+    border: "border-sky-300/40",
+    bg: "bg-sky-300/10",
+    text: "text-sky-100",
+  },
+  iteration: {
+    icon: "🔁",
+    label: "迭代工位",
+    border: "border-violet-300/40",
+    bg: "bg-violet-300/10",
+    text: "text-violet-100",
+  },
   output: {
     icon: "📤",
     label: "交付工位",
@@ -45,6 +108,33 @@ function outputName(data: WorkflowNode["data"]) {
     return `${data.conditionVariable ?? "变量"} ${data.conditionOperator === "equals" ? "等于" : "包含"} ${data.conditionValue ?? "值"}`;
   }
   if (data.kind === "code") return data.codeOutputVariable ?? "code_output";
+  if (data.kind === "variable_assign") {
+    return `${data.variableName ?? "variable"} = ${data.template ?? "{{value}}"}`;
+  }
+  if (data.kind === "template_transform") {
+    return `${data.outputVariable ?? "template_output"} <= template`;
+  }
+  if (data.kind === "variable_aggregator") {
+    return `${data.variableNames ?? "变量列表"} -> ${data.outputVariable ?? "aggregated_output"}`;
+  }
+  if (data.kind === "parameter_extractor") {
+    return `${data.inputVariable ?? "text"} -> ${data.outputVariable ?? "parameters_json"}`;
+  }
+  if (data.kind === "knowledge_retrieval") {
+    return `${data.queryVariable ?? "query"} top ${data.top_k ?? "3"} -> ${data.outputVariable ?? "rag_context"}`;
+  }
+  if (data.kind === "document_extractor") {
+    return `${data.sourcePathVariable ?? "path"} -> ${data.outputVariable ?? "document_text"}`;
+  }
+  if (data.kind === "http_request") {
+    return `${data.method ?? "GET"} ${data.url ?? "https://example.com"} -> ${data.outputVariable ?? "http_output"}`;
+  }
+  if (data.kind === "list_operation") {
+    return `${data.inputVariable ?? "items"} ${data.operator ?? "length"} -> ${data.outputVariable ?? "list_output"}`;
+  }
+  if (data.kind === "iteration") {
+    return `${data.inputVariable ?? "items"} as ${data.iterationVariable ?? "item"} -> ${data.outputVariable ?? "iteration_output"}`;
+  }
   if (data.kind === "output") return data.outputVariable ?? "final_output";
   return data.outputVariable ?? "llm_output";
 }

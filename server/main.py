@@ -32,6 +32,18 @@ except ModuleNotFoundError:
     from skills.api import router as skills_router
 
 try:
+    from server.api.workflow_native import router as workflow_native_router
+except ModuleNotFoundError:
+    from api.workflow_native import router as workflow_native_router
+
+try:
+    from server.rag.document_parser import parse_document
+    from server.rag.rag_service import RagService
+except ModuleNotFoundError:
+    from rag.document_parser import parse_document
+    from rag.rag_service import RagService
+
+try:
     from server.mcp.manager import (
         MCPClientError,
         MCPClientManager,
@@ -63,6 +75,9 @@ VISION_FALLBACK_MODEL = os.getenv(
     "OPENROUTER_VISION_FALLBACK_MODEL", "qwen/qwen2.5-vl-72b-instruct"
 ).strip()
 REQUESTS_PER_MINUTE = 20
+WORKFLOW_ALLOW_HTTP_OUTBOUND = False
+WORKFLOW_MAX_ITERATION_ITEMS = 50
+WORKFLOW_DOC_EXTRACTOR_ROOT = "server/rag"
 MAX_IMAGE_DATA_URL_BYTES = 5 * 1024 * 1024
 AGENTS_DATA_PATH = Path(__file__).parent / "data" / "agents.json"
 MAX_AGENT_PROMPT_CHARS = 6000
@@ -123,6 +138,7 @@ app.add_middleware(
 app.include_router(dify_router)
 app.include_router(rag_router)
 app.include_router(skills_router)
+app.include_router(workflow_native_router)
 
 request_windows: dict[str, deque[float]] = defaultdict(deque)
 mcp_connect_windows: dict[str, deque[float]] = defaultdict(deque)
@@ -265,7 +281,22 @@ class MCPCallResponse(BaseModel):
     raw: dict[str, Any] = Field(default_factory=dict)
 
 
-WorkflowNodeType = Literal["input", "llm", "condition", "code", "output"]
+WorkflowNodeType = Literal[
+    "input",
+    "llm",
+    "condition",
+    "code",
+    "variable_assign",
+    "template_transform",
+    "variable_aggregator",
+    "parameter_extractor",
+    "knowledge_retrieval",
+    "document_extractor",
+    "http_request",
+    "list_operation",
+    "iteration",
+    "output",
+]
 
 
 class WorkflowPosition(BaseModel):
@@ -948,7 +979,22 @@ def fusion_judge_prompt(
 
 def workflow_node_kind(node: WorkflowNodePayload) -> WorkflowNodeType:
     data_kind = node.data.get("kind")
-    if data_kind in {"input", "llm", "condition", "code", "output"}:
+    if data_kind in {
+        "input",
+        "llm",
+        "condition",
+        "code",
+        "variable_assign",
+        "template_transform",
+        "variable_aggregator",
+        "parameter_extractor",
+        "knowledge_retrieval",
+        "document_extractor",
+        "http_request",
+        "list_operation",
+        "iteration",
+        "output",
+    }:
         return data_kind  # type: ignore[return-value]
     if node.type:
         return node.type
@@ -970,6 +1016,38 @@ def render_workflow_template(template: str, variables: dict[str, str]) -> str:
         return variables.get(variable_name, "")
 
     return re.sub(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}", replace, template)
+
+
+def split_workflow_list(value: str) -> list[str]:
+    if not value.strip():
+        return []
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def split_workflow_variable_names(value: str) -> list[str]:
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def extract_json_object_text(value: str) -> str | None:
+    match = re.search(r"\{.*\}", value, re.DOTALL)
+    return match.group(0) if match else None
+
+
+def workflow_document_extractor_root() -> Path:
+    configured = Path(WORKFLOW_DOC_EXTRACTOR_ROOT)
+    if configured.is_absolute():
+        return configured.resolve()
+
+    candidates = [
+        (Path.cwd() / configured).resolve(),
+        (Path(__file__).resolve().parent / configured).resolve(),
+        (Path(__file__).resolve().parent.parent / configured).resolve(),
+        (Path(__file__).resolve().parent / "rag").resolve(),
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[-1]
 
 
 def workflow_topological_order(
@@ -1131,7 +1209,12 @@ async def health() -> dict[str, str]:
 
 @app.post("/api/workflow/run")
 async def run_workflow(payload: WorkflowRunRequest, request: Request):
-    if not API_KEY:
+    requires_model = any(
+        (node.data.get("kind") if isinstance(node.data.get("kind"), str) else node.type)
+        == "llm"
+        for node in payload.workflow.nodes
+    )
+    if requires_model and not API_KEY:
         return JSONResponse(
             status_code=500,
             content={"error": "后端密钥尚未配置，请先设置环境变量 OPENROUTER_API_KEY。"},
@@ -1229,6 +1312,482 @@ async def run_workflow(payload: WorkflowRunRequest, request: Request):
                     output_variable = str(node.data.get("codeOutputVariable") or "code_output")
                     output = run_safe_code_node(node, variables)
                     variables[output_variable] = output
+
+                elif kind == "variable_assign":
+                    try:
+                        variable_name = str(node.data.get("variableName") or "assigned_text")
+                        template = str(node.data.get("template") or "")
+                        output = render_workflow_template(template, variables)
+                        variables[variable_name] = output
+                        yield sse_payload(
+                            {
+                                "event": "node_delta",
+                                "node_id": node.id,
+                                "node_title": title,
+                                "node_type": kind,
+                                "output": output,
+                                "variable": variable_name,
+                            }
+                        )
+                    except Exception as exc:
+                        logger.warning("Workflow variable_assign node failed: %s", exc)
+                        yield sse_payload(
+                            {
+                                "event": "error",
+                                "node_id": node.id,
+                                "message": str(exc),
+                            }
+                        )
+
+                elif kind == "http_request":
+                    try:
+                        method = str(node.data.get("method") or "GET").upper()
+                        url = render_workflow_template(
+                            str(node.data.get("url") or ""),
+                            variables,
+                        )
+                        output_variable = str(
+                            node.data.get("outputVariable") or "http_output"
+                        )
+                        headers: dict[str, str] = {}
+                        headers_json = str(node.data.get("headersJson") or "").strip()
+                        if headers_json:
+                            try:
+                                parsed_headers = json.loads(headers_json)
+                                if isinstance(parsed_headers, dict):
+                                    headers = {
+                                        str(key): str(value)
+                                        for key, value in parsed_headers.items()
+                                    }
+                            except ValueError as exc:
+                                yield sse_payload(
+                                    {
+                                        "event": "error",
+                                        "node_id": node.id,
+                                        "message": f"headersJson 解析失败，已忽略：{exc}",
+                                    }
+                                )
+                        body_variable = str(node.data.get("bodyVariable") or "").strip()
+                        body = variables.get(body_variable, "") if body_variable else None
+                        if not WORKFLOW_ALLOW_HTTP_OUTBOUND:
+                            output = (
+                                f"[http mock] method={method} url={url} "
+                                "status=200 body=mocked"
+                            )
+                            variables[output_variable] = output
+                            yield sse_payload(
+                                {
+                                    "event": "node_delta",
+                                    "node_id": node.id,
+                                    "node_title": title,
+                                    "node_type": kind,
+                                    "output": f"outbound disabled\n{output}",
+                                    "variable": output_variable,
+                                }
+                            )
+                        else:
+                            async with httpx.AsyncClient(timeout=10) as client:
+                                response = await client.request(
+                                    method,
+                                    url,
+                                    headers=headers,
+                                    content=body if method == "POST" else None,
+                                )
+                            output = response.text
+                            if response.status_code < 200 or response.status_code >= 300:
+                                yield sse_payload(
+                                    {
+                                        "event": "error",
+                                        "node_id": node.id,
+                                        "message": (
+                                            f"HTTP 请求失败：{response.status_code}"
+                                        ),
+                                    }
+                                )
+                            else:
+                                variables[output_variable] = output
+                                yield sse_payload(
+                                    {
+                                        "event": "node_delta",
+                                        "node_id": node.id,
+                                        "node_title": title,
+                                        "node_type": kind,
+                                        "output": output,
+                                        "variable": output_variable,
+                                    }
+                                )
+                    except Exception as exc:
+                        logger.warning("Workflow http_request node failed: %s", exc)
+                        yield sse_payload(
+                            {
+                                "event": "error",
+                                "node_id": node.id,
+                                "message": str(exc),
+                            }
+                        )
+
+                elif kind == "list_operation":
+                    try:
+                        input_variable = str(node.data.get("inputVariable") or "user_input")
+                        operator = str(node.data.get("operator") or "length")
+                        output_variable = str(
+                            node.data.get("outputVariable") or "list_output"
+                        )
+                        items = split_workflow_list(variables.get(input_variable, ""))
+                        if operator == "length":
+                            output = str(len(items))
+                        elif operator == "join":
+                            separator = str(node.data.get("joinSeparator") or "")
+                            output = separator.join(items)
+                        elif operator == "first":
+                            output = items[0] if items else ""
+                        elif operator == "last":
+                            output = items[-1] if items else ""
+                        else:
+                            raise ValueError(f"列表操作不支持：{operator}")
+                        variables[output_variable] = output
+                        yield sse_payload(
+                            {
+                                "event": "node_delta",
+                                "node_id": node.id,
+                                "node_title": title,
+                                "node_type": kind,
+                                "output": output,
+                                "variable": output_variable,
+                            }
+                        )
+                    except Exception as exc:
+                        logger.warning("Workflow list_operation node failed: %s", exc)
+                        yield sse_payload(
+                            {
+                                "event": "error",
+                                "node_id": node.id,
+                                "message": str(exc),
+                            }
+                        )
+
+                elif kind == "iteration":
+                    try:
+                        input_variable = str(node.data.get("inputVariable") or "user_input")
+                        iteration_variable = str(
+                            node.data.get("iterationVariable") or "item"
+                        )
+                        item_template = str(node.data.get("itemTemplate") or "{{item}}")
+                        output_variable = str(
+                            node.data.get("outputVariable") or "iteration_output"
+                        )
+                        items = split_workflow_list(variables.get(input_variable, ""))
+                        if len(items) > WORKFLOW_MAX_ITERATION_ITEMS:
+                            items = items[:WORKFLOW_MAX_ITERATION_ITEMS]
+                            yield sse_payload(
+                                {
+                                    "event": "node_delta",
+                                    "node_id": node.id,
+                                    "node_title": title,
+                                    "node_type": kind,
+                                    "output": (
+                                        "truncated to "
+                                        f"{WORKFLOW_MAX_ITERATION_ITEMS} items"
+                                    ),
+                                    "variable": output_variable,
+                                }
+                            )
+                        results: list[str] = []
+                        for index, item in enumerate(items, start=1):
+                            variables[iteration_variable] = item
+                            result = render_workflow_template(item_template, variables)
+                            results.append(result)
+                            yield sse_payload(
+                                {
+                                    "event": "node_delta",
+                                    "node_id": node.id,
+                                    "node_title": title,
+                                    "node_type": kind,
+                                    "output": f"[{index}] {result}",
+                                    "variable": output_variable,
+                                }
+                            )
+                        output = json.dumps(results, ensure_ascii=False)
+                        variables[output_variable] = output
+                    except Exception as exc:
+                        logger.warning("Workflow iteration node failed: %s", exc)
+                        yield sse_payload(
+                            {
+                                "event": "error",
+                                "node_id": node.id,
+                                "message": str(exc),
+                            }
+                        )
+
+                elif kind == "template_transform":
+                    try:
+                        output_variable = str(
+                            node.data.get("outputVariable") or "template_output"
+                        )
+                        template = str(node.data.get("template") or "")
+                        output = render_workflow_template(template, variables)
+                        variables[output_variable] = output
+                        yield sse_payload(
+                            {
+                                "event": "node_delta",
+                                "node_id": node.id,
+                                "node_title": title,
+                                "node_type": kind,
+                                "output": output[:200],
+                                "variable": output_variable,
+                            }
+                        )
+                    except Exception as exc:
+                        logger.warning("Workflow template_transform node failed: %s", exc)
+                        yield sse_payload(
+                            {
+                                "event": "error",
+                                "node_id": node.id,
+                                "message": str(exc),
+                            }
+                        )
+
+                elif kind == "variable_aggregator":
+                    try:
+                        output_variable = str(
+                            node.data.get("outputVariable") or "aggregated_output"
+                        )
+                        variable_names = split_workflow_variable_names(
+                            str(node.data.get("variableNames") or "")
+                        )
+                        output_template = str(node.data.get("outputTemplate") or "")
+                        values = {name: variables.get(name, "") for name in variable_names}
+                        if output_template:
+                            output = "".join(
+                                output_template.replace("{name}", name).replace(
+                                    "{value}", value
+                                )
+                                for name, value in values.items()
+                            )
+                        else:
+                            output = json.dumps(values, ensure_ascii=False)
+                        variables[output_variable] = output
+                        yield sse_payload(
+                            {
+                                "event": "node_delta",
+                                "node_id": node.id,
+                                "node_title": title,
+                                "node_type": kind,
+                                "output": output,
+                                "variable": output_variable,
+                            }
+                        )
+                    except Exception as exc:
+                        logger.warning("Workflow variable_aggregator node failed: %s", exc)
+                        yield sse_payload(
+                            {
+                                "event": "error",
+                                "node_id": node.id,
+                                "message": str(exc),
+                            }
+                        )
+
+                elif kind == "parameter_extractor":
+                    try:
+                        output_variable = str(
+                            node.data.get("outputVariable") or "parameters_json"
+                        )
+                        input_variable = str(node.data.get("inputVariable") or "user_input")
+                        schema = str(node.data.get("schema") or "")
+                        model_id = str(node.data.get("modelId") or TEXT_FALLBACK_MODEL)
+                        input_text = variables.get(input_variable, "")
+                        if not API_KEY:
+                            output = "{}"
+                            variables[output_variable] = output
+                            yield sse_payload(
+                                {
+                                    "event": "node_delta",
+                                    "node_id": node.id,
+                                    "node_title": title,
+                                    "node_type": kind,
+                                    "output": "LLM not configured; returned {}",
+                                    "variable": output_variable,
+                                }
+                            )
+                        else:
+                            prompt = (
+                                "请从以下文本中严格按 JSON 格式返回指定字段 "
+                                f"{schema}；若无法提取则返回空对象 {{}}。\n\n"
+                                f"文本：\n{input_text}"
+                            )
+                            raw_text = await collect_chat_completion_text(
+                                model_id,
+                                [ChatMessage(role="user", content=prompt)],
+                                temperature=0.3,
+                                max_tokens=1024,
+                            )
+                            json_text = extract_json_object_text(raw_text)
+                            if json_text:
+                                try:
+                                    parsed = json.loads(json_text)
+                                    output = json.dumps(parsed, ensure_ascii=False)
+                                except ValueError:
+                                    output = raw_text
+                                    yield sse_payload(
+                                        {
+                                            "event": "error",
+                                            "node_id": node.id,
+                                            "message": "参数提取返回 JSON 解析失败，已保留原文。",
+                                        }
+                                    )
+                            else:
+                                output = raw_text
+                                yield sse_payload(
+                                    {
+                                        "event": "error",
+                                        "node_id": node.id,
+                                        "message": "参数提取未找到 JSON 对象，已保留原文。",
+                                    }
+                                )
+                            variables[output_variable] = output
+                            yield sse_payload(
+                                {
+                                    "event": "node_delta",
+                                    "node_id": node.id,
+                                    "node_title": title,
+                                    "node_type": kind,
+                                    "output": output,
+                                    "variable": output_variable,
+                                }
+                            )
+                    except Exception as exc:
+                        logger.warning("Workflow parameter_extractor node failed: %s", exc)
+                        variables[str(node.data.get("outputVariable") or "parameters_json")] = "{}"
+                        yield sse_payload(
+                            {
+                                "event": "error",
+                                "node_id": node.id,
+                                "message": str(exc),
+                            }
+                        )
+
+                elif kind == "knowledge_retrieval":
+                    try:
+                        output_variable = str(
+                            node.data.get("outputVariable") or "rag_context"
+                        )
+                        query_variable = str(node.data.get("queryVariable") or "user_input")
+                        query_text = variables.get(query_variable, "")
+                        try:
+                            top_k = int(str(node.data.get("top_k") or "3"))
+                        except ValueError:
+                            top_k = 3
+                        top_k = max(1, min(top_k, 20))
+                        service = RagService(llm_enabled=False)
+                        knowledge_bases = service.list_knowledge_bases()
+                        if not knowledge_bases:
+                            output = ""
+                            variables[output_variable] = output
+                            yield sse_payload(
+                                {
+                                    "event": "error",
+                                    "node_id": node.id,
+                                    "message": "RAG 索引未就绪，尚无可查询知识库。",
+                                }
+                            )
+                        else:
+                            kb_id = str(knowledge_bases[0]["id"])
+                            result = await service.query(kb_id, query_text, top_k=top_k)
+                            sources = result.get("sources")
+                            if isinstance(sources, list):
+                                parts = [
+                                    str(source.get("text") or "")
+                                    for source in sources
+                                    if isinstance(source, dict) and source.get("text")
+                                ]
+                            else:
+                                parts = []
+                            output = "\n---\n".join(parts)
+                            variables[output_variable] = output
+                            yield sse_payload(
+                                {
+                                    "event": "node_delta",
+                                    "node_id": node.id,
+                                    "node_title": title,
+                                    "node_type": kind,
+                                    "output": output or "RAG 未返回相关片段。",
+                                    "variable": output_variable,
+                                }
+                            )
+                    except Exception as exc:
+                        logger.warning("Workflow knowledge_retrieval node failed: %s", exc)
+                        variables[str(node.data.get("outputVariable") or "rag_context")] = ""
+                        yield sse_payload(
+                            {
+                                "event": "error",
+                                "node_id": node.id,
+                                "message": str(exc),
+                            }
+                        )
+
+                elif kind == "document_extractor":
+                    try:
+                        output_variable = str(
+                            node.data.get("outputVariable") or "document_text"
+                        )
+                        source_path_variable = str(
+                            node.data.get("sourcePathVariable") or "document_path"
+                        )
+                        raw_path = variables.get(source_path_variable, "")
+                        root = workflow_document_extractor_root()
+                        candidate = (root / raw_path).resolve()
+                        output = ""
+                        if not raw_path.strip():
+                            yield sse_payload(
+                                {
+                                    "event": "error",
+                                    "node_id": node.id,
+                                    "message": "文档路径为空。",
+                                }
+                            )
+                        elif root != candidate and root not in candidate.parents:
+                            yield sse_payload(
+                                {
+                                    "event": "error",
+                                    "node_id": node.id,
+                                    "message": "文档路径超出允许目录，已拒绝读取。",
+                                }
+                            )
+                        elif not candidate.exists() or not candidate.is_file():
+                            yield sse_payload(
+                                {
+                                    "event": "error",
+                                    "node_id": node.id,
+                                    "message": "文档不存在或不是文件。",
+                                }
+                            )
+                        else:
+                            try:
+                                output = parse_document(candidate, candidate.name)
+                            except Exception:
+                                output = candidate.read_text(encoding="utf-8")
+                            variables[output_variable] = output
+                            yield sse_payload(
+                                {
+                                    "event": "node_delta",
+                                    "node_id": node.id,
+                                    "node_title": title,
+                                    "node_type": kind,
+                                    "output": output[:500],
+                                    "variable": output_variable,
+                                }
+                            )
+                        variables.setdefault(output_variable, output)
+                    except Exception as exc:
+                        logger.warning("Workflow document_extractor node failed: %s", exc)
+                        variables[str(node.data.get("outputVariable") or "document_text")] = ""
+                        yield sse_payload(
+                            {
+                                "event": "error",
+                                "node_id": node.id,
+                                "message": str(exc),
+                            }
+                        )
 
                 elif kind == "output":
                     output_variable = str(node.data.get("outputVariable") or "llm_output")

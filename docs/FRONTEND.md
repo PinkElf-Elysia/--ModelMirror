@@ -75,6 +75,8 @@ main.tsx
 | `/workflow/new` | `WorkflowEditorPage` | 兼容旧入口。 |
 | `/workflow/:id` | `WorkflowEditorPage` | 兼容旧入口。 |
 | `/workflow/classic` | `WorkflowClassicPage` | 经典自研画布。 |
+| `/workflow-native` | `WorkflowNativePage` | 自研工作流 native 实验入口，提供 validate 演示；节点执行仍由 classic 运行器试点。 |
+| `/workflow-native/:id` | `WorkflowNativePage` | 自研工作流 native 草稿占位入口。 |
 | `/rag` | `RagPage` | Dify 知识库 iframe。 |
 | `/studio` | `StudioHomePage` | 工作台总览。 |
 
@@ -140,5 +142,5 @@ cd client
 npm run build
 ```
 
-最后更新日期：2026-06-10  
+最后更新日期：2026-06-16
 维护人：模镜团队

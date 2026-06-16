@@ -58,6 +58,17 @@ export function createInitialStudioState(): StudioState {
         href: "/workflow/classic",
         tags: ["实验", "备用"],
       },
+      {
+        id: "workflow-native",
+        name: "自研工作流（实验）",
+        kind: "workflow",
+        icon: "WN",
+        status: "planned",
+        description:
+          "独立于 Dify 的 native 实验线，当前只开放静态图校验，不替代稳定 /workflow。",
+        href: "/workflow-native",
+        tags: ["实验", "validate", "非 iframe"],
+      },
     ],
     activities: [
       {
