@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { McpProject } from "../data/mcpProjects";
@@ -21,7 +21,7 @@ interface ToolSchema {
   required?: string[];
 }
 
-interface McpTool {
+export interface McpTool {
   name: string;
   title?: string | null;
   description?: string | null;
@@ -36,6 +36,18 @@ interface ToolCallResult {
 
 interface McpServerCardProps {
   project: McpProject;
+  restoredSession?: McpSessionSummary;
+  onConnectionChange?: () => void;
+}
+
+export interface McpSessionSummary {
+  session_id: string;
+  server_command: string[];
+  status: string;
+  created_at: number;
+  uptime_seconds: number;
+  idle_seconds: number;
+  tools_count: number;
 }
 
 function formatStars(stars: number) {
@@ -89,7 +101,11 @@ function contentToMarkdown(result: ToolCallResult | null) {
     .join("\n\n");
 }
 
-export default function McpServerCard({ project }: McpServerCardProps) {
+export default function McpServerCard({
+  project,
+  restoredSession,
+  onConnectionChange,
+}: McpServerCardProps) {
   const [state, setState] = useState<ConnectionState>("idle");
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [tools, setTools] = useState<McpTool[]>([]);
@@ -106,6 +122,14 @@ export default function McpServerCard({ project }: McpServerCardProps) {
     () => project.command?.join(" ") ?? "该项目暂未提供本地 stdio 启动命令",
     [project.command],
   );
+
+  useEffect(() => {
+    if (!restoredSession || restoredSession.session_id === sessionId) return;
+    setSessionId(restoredSession.session_id);
+    setState("connected");
+    setError("");
+    void fetchTools(restoredSession.session_id);
+  }, [restoredSession, sessionId]);
 
   async function readError(response: Response) {
     try {
@@ -132,15 +156,20 @@ export default function McpServerCard({ project }: McpServerCardProps) {
       const data = (await response.json()) as { session_id: string };
       setSessionId(data.session_id);
 
-      const toolsResponse = await fetch(`/api/mcp/${data.session_id}/tools`);
-      if (!toolsResponse.ok) throw new Error(await readError(toolsResponse));
-      const toolsData = (await toolsResponse.json()) as { tools: McpTool[] };
-      setTools(toolsData.tools);
+      await fetchTools(data.session_id);
       setState("connected");
+      onConnectionChange?.();
     } catch (exc) {
       setState("error");
       setError(exc instanceof Error ? exc.message : "无法连接 MCP Server");
     }
+  }
+
+  async function fetchTools(nextSessionId: string) {
+    const toolsResponse = await fetch(`/api/mcp/${nextSessionId}/tools`);
+    if (!toolsResponse.ok) throw new Error(await readError(toolsResponse));
+    const toolsData = (await toolsResponse.json()) as { tools: McpTool[] };
+    setTools(toolsData.tools);
   }
 
   async function disconnect() {
@@ -153,6 +182,7 @@ export default function McpServerCard({ project }: McpServerCardProps) {
     setFormValues({});
     setError("");
     setState("idle");
+    onConnectionChange?.();
   }
 
   function updateField(toolName: string, key: string, value: string) {
@@ -354,10 +384,19 @@ export default function McpServerCard({ project }: McpServerCardProps) {
       </div>
 
       <div className="relative mt-4 rounded-lg border border-white/10 bg-slate-950/55 p-3">
-        <p className="text-xs font-semibold text-slate-300">stdio 命令</p>
-        <code className="mt-2 block break-all text-xs text-brand-100">
-          {commandPreview}
-        </code>
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+          <div>
+            <p className="text-xs font-semibold text-slate-300">stdio 命令</p>
+            <code className="mt-2 block break-all text-xs text-brand-100">
+              {commandPreview}
+            </code>
+          </div>
+          {restoredSession ? (
+            <span className="w-fit rounded-full border border-white/10 bg-white/[0.06] px-2.5 py-1 text-xs font-semibold text-slate-300">
+              已连接 {Math.max(0, Math.floor(restoredSession.uptime_seconds))}s
+            </span>
+          ) : null}
+        </div>
       </div>
 
       {error ? (

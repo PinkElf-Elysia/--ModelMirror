@@ -47,6 +47,8 @@ MCP（Model Context Protocol）是一套让 AI 应用通过标准协议连接外
 - 子进程工作目录固定为 `server/mcp/sandboxes/`。
 - 每个 IP 每分钟最多建立 5 个 MCP 连接。
 - session 存储在内存中，断开连接时清理 stdio 资源和子进程。
+- 每个 session TTL 为 30 分钟，后台任务每 5 分钟清理一次；查询 sessions 或 registry 时也会触发一次轻量清理。
+- 全局 ToolRegistry 会聚合所有活跃 session 的工具，重名工具按首次出现保留。
 
 ## 2. 如何添加新的 MCP Server
 
@@ -153,6 +155,62 @@ curl http://localhost:8000/api/mcp/<session_id>/tools
         },
         "required": ["url"]
       }
+    }
+  ]
+}
+```
+
+### GET `/api/mcp/sessions`
+
+获取当前活跃 MCP session。
+
+```bash
+curl http://localhost:8000/api/mcp/sessions
+```
+
+响应：
+
+```json
+{
+  "sessions": [
+    {
+      "session_id": "8f3d8d6cc4af4f5c9a3e7b0d0f0fd9a0",
+      "server_command": ["npx", "-y", "@playwright/mcp@latest"],
+      "status": "connected",
+      "created_at": 1792137600.0,
+      "uptime_seconds": 42.1,
+      "idle_seconds": 3.4,
+      "tools_count": 5
+    }
+  ]
+}
+```
+
+### GET `/api/registry/tools`
+
+获取全局 MCP 工具注册表。返回值已按工具名去重。
+
+```bash
+curl http://localhost:8000/api/registry/tools
+```
+
+响应：
+
+```json
+{
+  "tools": [
+    {
+      "name": "fetch",
+      "description": "Fetch a URL",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "url": { "type": "string" }
+        }
+      },
+      "server_id": "@example/mcp-server",
+      "session_id": "8f3d8d6cc4af4f5c9a3e7b0d0f0fd9a0",
+      "registered_at": 1792137600.0
     }
   ]
 }
@@ -269,7 +327,9 @@ python server/mcp/test_manager.py
 | --- | --- |
 | `server/mcp/manager.py` | MCPClientManager，负责 stdio session 生命周期。 |
 | `server/mcp/test_manager.py` | 外部 fetch server smoke 脚本。 |
+| `server/registry/tool_registry.py` | 内存级全局工具注册表。 |
 | `server/tests/mock_mcp_server.py` | 本地 mock MCP Server。 |
 | `server/tests/test_mcp_integration.py` | FastAPI MCP 端点集成测试。 |
+| `server/tests/test_mcp_multisession.py` | 多 session、TTL 与 ToolRegistry 集成测试。 |
 | `client/src/components/McpServerCard.tsx` | 前端连接、工具表单、执行结果组件。 |
 | `client/src/data/mcpProjects.ts` | MCP 项目与可选 stdio 命令数据。 |

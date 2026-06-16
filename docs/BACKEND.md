@@ -127,9 +127,11 @@ MCP 原生 stdio 集成接口。详细说明见 [MCP_INTEGRATION.md](./MCP_INTEG
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | POST | `/api/mcp/connect` | 启动 MCP Server 并创建 session。 |
+| GET | `/api/mcp/sessions` | 获取所有活跃 MCP session 摘要。 |
 | GET | `/api/mcp/{session_id}/tools` | 获取该 session 暴露的工具列表。 |
 | POST | `/api/mcp/{session_id}/call` | 调用指定 MCP 工具。 |
 | DELETE | `/api/mcp/{session_id}` | 断开连接并清理子进程。 |
+| GET | `/api/registry/tools` | 获取全局 MCP 工具注册表，重名工具按首次出现保留。 |
 
 示例：
 
