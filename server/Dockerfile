@@ -9,9 +9,11 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY main.py .
+COPY data ./data
 COPY api ./api
 COPY mcp ./mcp
 COPY registry ./registry
+COPY rag ./rag
 
 EXPOSE 8000
 

@@ -5,8 +5,15 @@ services:
     container_name: modelmirror-server
     env_file:
       - ./server/.env
+    environment:
+      RAG_STORAGE_DIR: /app/rag/storage
+      RAG_UPLOAD_DIR: /app/rag/uploads
+      CHROMA_DB_PATH: /app/rag/storage/chroma_db
     ports:
       - "8000:8000"
+    volumes:
+      - ./server/rag/storage:/app/rag/storage
+      - ./server/rag/uploads:/app/rag/uploads
     restart: unless-stopped
     healthcheck:
       test:
