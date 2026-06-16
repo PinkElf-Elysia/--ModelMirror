@@ -43,6 +43,27 @@ interface ChatMessage {
   images?: UploadedImage[];
 }
 
+interface KnowledgeBase {
+  id: string;
+  name: string;
+  document_count: number;
+}
+
+interface KnowledgeBaseListResponse {
+  knowledge_bases: KnowledgeBase[];
+}
+
+interface RagSource {
+  document_name: string;
+  text: string;
+  score: number;
+}
+
+interface RagQueryResponse {
+  answer: string;
+  sources: RagSource[];
+}
+
 const modalityLabels: Record<string, string> = {
   text: "文本",
   image: "图片",
@@ -123,6 +144,29 @@ function decodeModelId(value: string | undefined) {
 
 function wrapWithSuperPrompt(content: string) {
   return `${SUPER_PROMPT_PREFIX}${content || "请基于我上传的图片生成一个高质量提示词。"}`;
+}
+
+async function readApiError(response: Response) {
+  try {
+    const data = (await response.json()) as { detail?: string; error?: string };
+    return data.detail ?? data.error ?? `请求失败：${response.status}`;
+  } catch {
+    return `请求失败：${response.status}`;
+  }
+}
+
+function formatRagAnswer(data: RagQueryResponse) {
+  if (data.sources.length === 0) return data.answer;
+
+  const sources = data.sources
+    .map((source, index) => {
+      const preview =
+        source.text.length > 180 ? `${source.text.slice(0, 180)}...` : source.text;
+      return `${index + 1}. **${source.document_name}**（相关度 ${source.score.toFixed(2)}）\n> ${preview}`;
+    })
+    .join("\n\n");
+
+  return `${data.answer}\n\n---\n**引用来源**\n\n${sources}`;
 }
 
 function buildUserContent(
@@ -322,6 +366,9 @@ export default function ChatPage() {
   const [advancedParams, setAdvancedParams] = useState<ChatAdvancedParams>(() =>
     defaultAdvancedParams(),
   );
+  const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBase[]>([]);
+  const [selectedKnowledgeBaseId, setSelectedKnowledgeBaseId] = useState("");
+  const [isLoadingKnowledgeBases, setIsLoadingKnowledgeBases] = useState(false);
   const [modelSwitchNotice, setModelSwitchNotice] = useState("");
   const [agentDefaultModelNotice, setAgentDefaultModelNotice] = useState("");
   const chatSectionRef = useRef<HTMLElement>(null);
@@ -343,6 +390,10 @@ export default function ChatPage() {
     if (window.matchMedia("(min-width: 1024px)").matches) {
       setPromptSidebarOpen(true);
     }
+  }, []);
+
+  useEffect(() => {
+    void loadKnowledgeBases();
   }, []);
 
   function scrollMessagesToBottom(behavior: ScrollBehavior = "smooth") {
@@ -455,6 +506,26 @@ export default function ChatPage() {
     setUploadedImages((current) => current.filter((image) => image.id !== id));
   }
 
+  async function loadKnowledgeBases() {
+    setIsLoadingKnowledgeBases(true);
+    try {
+      const response = await fetch("/api/rag/knowledge_bases");
+      if (!response.ok) throw new Error(await readApiError(response));
+      const data = (await response.json()) as KnowledgeBaseListResponse;
+      setKnowledgeBases(data.knowledge_bases);
+      if (
+        selectedKnowledgeBaseId &&
+        !data.knowledge_bases.some((item) => item.id === selectedKnowledgeBaseId)
+      ) {
+        setSelectedKnowledgeBaseId("");
+      }
+    } catch (loadError) {
+      console.error("知识库列表加载失败", loadError);
+    } finally {
+      setIsLoadingKnowledgeBases(false);
+    }
+  }
+
   async function sendMessage(overrideText?: string) {
     const rawText = (overrideText ?? input).trim();
     const images = overrideText ? [] : uploadedImages;
@@ -462,6 +533,11 @@ export default function ChatPage() {
 
     if (images.length > 0 && !model.input_modalities.includes("image")) {
       setError("当前候选人不接视觉岗面试，请切换支持图片输入的候选人");
+      return;
+    }
+
+    if (selectedKnowledgeBaseId && images.length > 0) {
+      setError("知识库检索模式暂不支持图片问题，请先移除图片或取消知识库选择。");
       return;
     }
 
@@ -500,6 +576,32 @@ export default function ChatPage() {
     setIsSending(true);
 
     try {
+      if (selectedKnowledgeBaseId && rawText) {
+        const response = await fetch("/api/rag/query", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            kb_id: selectedKnowledgeBaseId,
+            question: rawText,
+          }),
+        });
+        if (!response.ok) throw new Error(await readApiError(response));
+        const data = (await response.json()) as RagQueryResponse;
+        const answer = formatRagAnswer(data);
+        setMessages((current) =>
+          current.map((message) =>
+            message.id === assistantId
+              ? {
+                  ...message,
+                  content: answer,
+                  displayContent: answer,
+                }
+              : message,
+          ),
+        );
+        return;
+      }
+
       await fetchChatStream({
         modelId: model.id,
         messages: apiMessages,
@@ -880,6 +982,39 @@ export default function ChatPage() {
               />
 
               <div className="border-t border-white/10 bg-ink-950/40 p-4 sm:p-5">
+                <div className="mb-3 flex flex-col gap-2 rounded-lg border border-white/10 bg-white/[0.045] px-3 py-3 sm:flex-row sm:items-center sm:justify-between">
+                  <label className="flex flex-1 flex-col gap-2 text-xs font-semibold text-slate-300 sm:flex-row sm:items-center">
+                    <span className="shrink-0 text-hire-100">知识库</span>
+                    <select
+                      className="min-w-0 flex-1 rounded-full border border-white/10 bg-ink-950/80 px-3 py-2 text-xs font-semibold text-white outline-none transition focus:border-hire-300/50 focus:ring-4 focus:ring-hire-300/10"
+                      disabled={isSending || isLoadingKnowledgeBases}
+                      onChange={(event) => setSelectedKnowledgeBaseId(event.target.value)}
+                      value={selectedKnowledgeBaseId}
+                    >
+                      <option value="">不使用知识库，直接面试</option>
+                      {knowledgeBases.map((kb) => (
+                        <option className="bg-slate-950 text-white" key={kb.id} value={kb.id}>
+                          {kb.name}（{kb.document_count} 份文档）
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <div className="flex items-center justify-between gap-3 sm:justify-end">
+                    <span className="text-xs text-slate-500">
+                      {selectedKnowledgeBaseId
+                        ? "回答会基于资料库并附引用"
+                        : "可在 /rag 上传资料后选择"}
+                    </span>
+                    <button
+                      className="rounded-full border border-white/10 px-3 py-1.5 text-xs font-semibold text-slate-300 transition hover:border-hire-300/30 hover:bg-hire-300/10 hover:text-hire-100"
+                      disabled={isLoadingKnowledgeBases}
+                      onClick={() => void loadKnowledgeBases()}
+                      type="button"
+                    >
+                      {isLoadingKnowledgeBases ? "刷新中" : "刷新"}
+                    </button>
+                  </div>
+                </div>
                 <div
                   className={`rounded-lg border p-2 transition ${
                     superPromptMode

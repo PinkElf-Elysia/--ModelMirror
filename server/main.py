@@ -22,6 +22,11 @@ except ModuleNotFoundError:
     from api.dify_proxy import router as dify_router
 
 try:
+    from server.rag.api import router as rag_router
+except ModuleNotFoundError:
+    from rag.api import router as rag_router
+
+try:
     from server.mcp.manager import (
         MCPClientError,
         MCPClientManager,
@@ -111,6 +116,7 @@ app.add_middleware(
 )
 
 app.include_router(dify_router)
+app.include_router(rag_router)
 
 request_windows: dict[str, deque[float]] = defaultdict(deque)
 mcp_connect_windows: dict[str, deque[float]] = defaultdict(deque)
