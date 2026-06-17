@@ -8,8 +8,8 @@ import ModelListPage from "./pages/ModelListPage";
 import StudioHomePage from "./pages/StudioHomePage";
 import RagPage from "./pages/RagPage";
 import SkillBrowserPage from "./pages/SkillBrowserPage";
+import SystemSettingsPage from "./pages/SystemSettingsPage";
 import WorkflowClassicPage from "./pages/WorkflowClassicPage";
-import WorkflowEditorPage from "./pages/WorkflowEditorPage";
 import WorkflowNativePage from "./pages/WorkflowNativePage";
 
 export default function App() {
@@ -25,13 +25,13 @@ export default function App() {
       <Route element={<ComingSoonPage resource="prompts" />} path="/prompts" />
       <Route element={<RagPage />} path="/rag" />
       <Route element={<ChatPage />} path="/chat/:modelId" />
-      <Route element={<WorkflowEditorPage />} path="/workflow" />
+      <Route element={<WorkflowClassicPage />} path="/workflow" />
+      <Route element={<WorkflowClassicPage />} path="/workflow/:id" />
       <Route element={<WorkflowClassicPage />} path="/workflow/classic" />
       <Route element={<WorkflowClassicPage />} path="/workflow/classic/:id" />
       <Route element={<WorkflowNativePage />} path="/workflow-native" />
       <Route element={<WorkflowNativePage />} path="/workflow-native/:id" />
-      <Route element={<WorkflowEditorPage />} path="/workflow/new" />
-      <Route element={<WorkflowEditorPage />} path="/workflow/:id" />
+      <Route element={<SystemSettingsPage />} path="/settings" />
       <Route element={<Navigate replace to="/models" />} path="*" />
     </Routes>
   );

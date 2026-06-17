@@ -1,11 +1,36 @@
 services:
+  new-api:
+    image: calciumion/new-api:latest
+    container_name: modelmirror-new-api
+    restart: always
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./new-api-data:/data
+    environment:
+      TZ: Asia/Shanghai
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "wget -qO- http://localhost:3000/api/status >/dev/null 2>&1 || curl -fsS http://localhost:3000/api/status >/dev/null 2>&1",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
   server:
     build:
       context: ./server
     container_name: modelmirror-server
+    depends_on:
+      new-api:
+        condition: service_healthy
     env_file:
       - ./server/.env
     environment:
+      LLM_GATEWAY_URL: http://new-api:3000/v1/chat/completions
       RAG_STORAGE_DIR: /app/rag/storage
       RAG_UPLOAD_DIR: /app/rag/uploads
       CHROMA_DB_PATH: /app/rag/storage/chroma_db
