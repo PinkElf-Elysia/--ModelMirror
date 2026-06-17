@@ -7,6 +7,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator
 from collections import defaultdict, deque
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
@@ -82,6 +83,11 @@ WORKFLOW_DOC_EXTRACTOR_ROOT = "server/rag"
 WORKFLOW_TASK_TTL_SECONDS = 1800
 WORKFLOW_HUMAN_INTERVENTION_ENABLED = True
 WORKFLOW_QUESTION_CLASSIFIER_ENABLED = True
+WORKFLOW_MCP_TOOL_ENABLED = True
+WORKFLOW_TIME_TOOL_ENABLED = True
+WORKFLOW_AGENT_ENABLED = True
+WORKFLOW_AGENT_MAX_ITERATIONS_DEFAULT = 5
+WORKFLOW_AGENT_MAX_TOKENS = 1024
 MAX_IMAGE_DATA_URL_BYTES = 5 * 1024 * 1024
 AGENTS_DATA_PATH = Path(__file__).parent / "data" / "agents.json"
 MAX_AGENT_PROMPT_CHARS = 6000
@@ -299,6 +305,9 @@ WorkflowNodeType = Literal[
     "document_extractor",
     "human_intervention",
     "question_classifier",
+    "agent",
+    "mcp_tool",
+    "time_tool",
     "http_request",
     "list_operation",
     "iteration",
@@ -1012,6 +1021,9 @@ def workflow_node_kind(node: WorkflowNodePayload) -> WorkflowNodeType:
         "document_extractor",
         "human_intervention",
         "question_classifier",
+        "agent",
+        "mcp_tool",
+        "time_tool",
         "http_request",
         "list_operation",
         "iteration",
@@ -2103,6 +2115,444 @@ async def run_workflow(payload: WorkflowRunRequest, request: Request):
                     except Exception as exc:
                         logger.warning("Workflow question_classifier node failed: %s", exc)
                         output = default_category
+                        variables[output_variable] = output
+                        yield sse_payload(
+                            {
+                                "event": "error",
+                                "node_id": node.id,
+                                "message": str(exc),
+                            }
+                        )
+
+                elif kind == "agent":
+                    output_variable = str(node.data.get("outputVariable") or "agent_output")
+                    output = ""
+                    try:
+                        if not WORKFLOW_AGENT_ENABLED:
+                            variables[output_variable] = output
+                            yield sse_payload(
+                                {
+                                    "event": "node_delta",
+                                    "node_id": node.id,
+                                    "node_title": title,
+                                    "node_type": kind,
+                                    "output": "agent 节点当前未启用。",
+                                    "variable": output_variable,
+                                }
+                            )
+                        else:
+                            agent_mode = str(
+                                node.data.get("agentMode") or "tool_first"
+                            ).strip()
+                            model_id = str(node.data.get("modelId") or "").strip()
+                            instruction = render_workflow_template(
+                                str(node.data.get("instruction") or ""),
+                                variables,
+                            ).strip()
+                            prompt_suffix = render_workflow_template(
+                                str(node.data.get("promptSuffix") or ""),
+                                variables,
+                            ).strip()
+                            if prompt_suffix:
+                                instruction = f"{instruction}\n\n{prompt_suffix}".strip()
+                            if not model_id:
+                                raise ValueError("Agent 节点缺少 modelId。")
+                            if not instruction:
+                                raise ValueError("Agent 节点缺少 instruction。")
+                            try:
+                                temperature = float(
+                                    str(node.data.get("temperature") or "0.7")
+                                )
+                            except ValueError:
+                                temperature = 0.7
+                            temperature = min(max(temperature, 0.0), 2.0)
+                            try:
+                                max_iterations = int(
+                                    str(
+                                        node.data.get("maxIterations")
+                                        or WORKFLOW_AGENT_MAX_ITERATIONS_DEFAULT
+                                    )
+                                )
+                            except ValueError:
+                                max_iterations = WORKFLOW_AGENT_MAX_ITERATIONS_DEFAULT
+                            max_iterations = min(max(max_iterations, 1), 20)
+
+                            async def run_direct_agent() -> str:
+                                if not API_KEY:
+                                    raise ValueError("OpenRouter API Key 未配置。")
+                                return await collect_chat_completion_text(
+                                    model_id,
+                                    [ChatMessage(role="user", content=instruction)],
+                                    temperature=temperature,
+                                    max_tokens=WORKFLOW_AGENT_MAX_TOKENS,
+                                )
+
+                            if agent_mode == "direct":
+                                output = await run_direct_agent()
+                                variables[output_variable] = output
+                                yield sse_payload(
+                                    {
+                                        "event": "node_delta",
+                                        "node_id": node.id,
+                                        "node_title": title,
+                                        "node_type": kind,
+                                        "output": output[:500],
+                                        "variable": output_variable,
+                                    }
+                                )
+                            elif agent_mode == "tool_first":
+                                registered_tools = await tool_registry.list_tools()
+                                requested_tool_names = [
+                                    item.strip()
+                                    for item in str(node.data.get("toolNames") or "").split(",")
+                                    if item.strip()
+                                ]
+                                if requested_tool_names:
+                                    allowed_names = set(requested_tool_names)
+                                    available_tools = [
+                                        tool
+                                        for tool in registered_tools
+                                        if str(tool.get("name") or "") in allowed_names
+                                    ]
+                                else:
+                                    available_tools = registered_tools
+
+                                if not available_tools:
+                                    yield sse_payload(
+                                        {
+                                            "event": "node_delta",
+                                            "node_id": node.id,
+                                            "node_title": title,
+                                            "node_type": kind,
+                                            "output": "Agent 切换为直接回答：没有可用 MCP 工具",
+                                            "variable": output_variable,
+                                        }
+                                    )
+                                    output = await run_direct_agent()
+                                    variables[output_variable] = output
+                                    yield sse_payload(
+                                        {
+                                            "event": "node_delta",
+                                            "node_id": node.id,
+                                            "node_title": title,
+                                            "node_type": kind,
+                                            "output": output[:500],
+                                            "variable": output_variable,
+                                        }
+                                    )
+                                else:
+                                    tool_by_name = {
+                                        str(tool.get("name") or ""): tool
+                                        for tool in available_tools
+                                        if str(tool.get("name") or "")
+                                    }
+                                    tool_descriptions = "\n".join(
+                                        (
+                                            f"- {name}: "
+                                            f"{tool.get('description') or '无描述'} "
+                                            f"schema={json.dumps(tool.get('input_schema') or {}, ensure_ascii=False)}"
+                                        )
+                                        for name, tool in tool_by_name.items()
+                                    )
+                                    system_prompt = (
+                                        "你是模镜工作流中的 ReAct-Lite Agent。"
+                                        "你可以选择调用一个工具，或给出最终答案。"
+                                        "每次回复必须是 JSON，且只能使用以下两种格式之一："
+                                        '{"tool":"工具名","arguments":{...}} 或 {"answer":"最终答案"}。'
+                                        "不要输出 JSON 以外的文字。\n\n可用工具：\n"
+                                        f"{tool_descriptions}"
+                                    )
+                                    messages: list[ChatMessage] = [
+                                        ChatMessage(role="system", content=system_prompt),
+                                        ChatMessage(role="user", content=instruction),
+                                    ]
+                                    for iteration_index in range(max_iterations):
+                                        if not API_KEY:
+                                            raise ValueError("OpenRouter API Key 未配置。")
+                                        raw_response = (
+                                            await collect_chat_completion_text(
+                                                model_id,
+                                                messages,
+                                                temperature=temperature,
+                                                max_tokens=WORKFLOW_AGENT_MAX_TOKENS,
+                                            )
+                                        ).strip()
+                                        json_text = raw_response
+                                        fenced = re.search(
+                                            r"```(?:json)?\s*\n?(.*?)\n?```",
+                                            raw_response,
+                                            re.DOTALL,
+                                        )
+                                        if fenced:
+                                            json_text = fenced.group(1).strip()
+                                        try:
+                                            decision = json.loads(json_text)
+                                        except ValueError:
+                                            output = raw_response
+                                            break
+                                        if not isinstance(decision, dict):
+                                            output = raw_response
+                                            break
+                                        answer = decision.get("answer")
+                                        if isinstance(answer, str) and answer.strip():
+                                            output = answer.strip()
+                                            break
+                                        tool_name = str(decision.get("tool") or "").strip()
+                                        arguments = decision.get("arguments")
+                                        if not tool_name:
+                                            output = raw_response
+                                            break
+                                        if not isinstance(arguments, dict):
+                                            arguments = {}
+                                        matched_tool = tool_by_name.get(tool_name)
+                                        if not matched_tool:
+                                            tool_result_text = f"工具不可用：{tool_name}"
+                                            yield sse_payload(
+                                                {
+                                                    "event": "node_delta",
+                                                    "node_id": node.id,
+                                                    "node_title": title,
+                                                    "node_type": kind,
+                                                    "output": tool_result_text,
+                                                    "variable": output_variable,
+                                                }
+                                            )
+                                        else:
+                                            call_result = await mcp_manager.call_tool(
+                                                str(matched_tool.get("session_id") or ""),
+                                                tool_name,
+                                                arguments,
+                                            )
+                                            text_parts: list[str] = []
+                                            non_text_types: list[str] = []
+                                            for part in getattr(call_result, "content", []) or []:
+                                                if isinstance(part, dict):
+                                                    part_type = str(part.get("type") or "other")
+                                                    part_text = part.get("text")
+                                                else:
+                                                    part_type = str(getattr(part, "type", "other"))
+                                                    part_text = getattr(part, "text", None)
+                                                if part_type == "text":
+                                                    text_parts.append(str(part_text or ""))
+                                                else:
+                                                    non_text_types.append(part_type)
+                                            tool_result_text = "\n".join(text_parts).strip()
+                                            if non_text_types:
+                                                tool_result_text = (
+                                                    tool_result_text
+                                                    + "\n"
+                                                    + "非文本结果已省略："
+                                                    + ", ".join(non_text_types)
+                                                ).strip()
+                                            yield sse_payload(
+                                                {
+                                                    "event": "node_delta",
+                                                    "node_id": node.id,
+                                                    "node_title": title,
+                                                    "node_type": kind,
+                                                    "output": (
+                                                        f"[{iteration_index + 1}/{max_iterations}] "
+                                                        f"调用工具 {tool_name}，结果预览："
+                                                        f"{tool_result_text[:300]}"
+                                                    ),
+                                                    "variable": output_variable,
+                                                }
+                                            )
+                                        messages.append(
+                                            ChatMessage(
+                                                role="assistant",
+                                                content=json.dumps(
+                                                    decision,
+                                                    ensure_ascii=False,
+                                                ),
+                                            )
+                                        )
+                                        messages.append(
+                                            ChatMessage(
+                                                role="user",
+                                                content=(
+                                                    f"工具 {tool_name} 的执行结果：\n"
+                                                    f"{tool_result_text}\n\n"
+                                                    "请继续用 JSON 决策下一步。"
+                                                ),
+                                            )
+                                        )
+                                    else:
+                                        yield sse_payload(
+                                            {
+                                                "event": "node_delta",
+                                                "node_id": node.id,
+                                                "node_title": title,
+                                                "node_type": kind,
+                                                "output": (
+                                                    f"Agent 达到最大循环次数 {max_iterations}，"
+                                                    "未得到最终答案。"
+                                                ),
+                                                "variable": output_variable,
+                                            }
+                                        )
+                                        output = ""
+                                    variables[output_variable] = output
+                                    yield sse_payload(
+                                        {
+                                            "event": "node_delta",
+                                            "node_id": node.id,
+                                            "node_title": title,
+                                            "node_type": kind,
+                                            "output": output[:500],
+                                            "variable": output_variable,
+                                        }
+                                    )
+                            else:
+                                raise ValueError(f"Agent 模式不支持：{agent_mode}")
+                    except Exception as exc:
+                        logger.warning("Workflow agent node failed: %s", exc)
+                        output = ""
+                        variables[output_variable] = output
+                        yield sse_payload(
+                            {
+                                "event": "error",
+                                "node_id": node.id,
+                                "message": str(exc),
+                            }
+                        )
+
+                elif kind == "mcp_tool":
+                    output_variable = str(node.data.get("outputVariable") or "mcp_output")
+                    try:
+                        tool_name = str(node.data.get("toolName") or "").strip()
+                        if not WORKFLOW_MCP_TOOL_ENABLED or not tool_name:
+                            output = ""
+                            variables[output_variable] = output
+                            yield sse_payload(
+                                {
+                                    "event": "node_delta",
+                                    "node_id": node.id,
+                                    "node_title": title,
+                                    "node_type": kind,
+                                    "output": "mcp_tool 未启用或 toolName 为空。",
+                                    "variable": output_variable,
+                                }
+                            )
+                        else:
+                            registered_tools = await tool_registry.list_tools()
+                            matched_tool = next(
+                                (
+                                    tool
+                                    for tool in registered_tools
+                                    if str(tool.get("name") or "") == tool_name
+                                ),
+                                None,
+                            )
+                            if not matched_tool:
+                                raise ValueError(f"MCP 工具未注册：{tool_name}")
+                            session_id = str(matched_tool.get("session_id") or "")
+                            raw_arguments = render_workflow_template(
+                                str(node.data.get("argumentsJson") or "{}"),
+                                variables,
+                            )
+                            arguments = json.loads(raw_arguments)
+                            if not isinstance(arguments, dict):
+                                raise ValueError("MCP 工具参数必须是 JSON 对象。")
+                            call_result = await mcp_manager.call_tool(
+                                session_id,
+                                tool_name,
+                                arguments,
+                            )
+                            text_parts: list[str] = []
+                            non_text_types: list[str] = []
+                            for part in getattr(call_result, "content", []) or []:
+                                if isinstance(part, dict):
+                                    part_type = str(part.get("type") or "other")
+                                    part_text = part.get("text")
+                                else:
+                                    part_type = str(getattr(part, "type", "other"))
+                                    part_text = getattr(part, "text", None)
+                                if part_type == "text":
+                                    text_parts.append(str(part_text or ""))
+                                else:
+                                    non_text_types.append(part_type)
+                            output = "\n".join(text_parts).strip()
+                            variables[output_variable] = output
+                            if non_text_types:
+                                yield sse_payload(
+                                    {
+                                        "event": "node_delta",
+                                        "node_id": node.id,
+                                        "node_title": title,
+                                        "node_type": kind,
+                                        "output": (
+                                            "非文本工具结果已省略："
+                                            + ", ".join(non_text_types)
+                                        ),
+                                        "variable": output_variable,
+                                    }
+                                )
+                            yield sse_payload(
+                                {
+                                    "event": "node_delta",
+                                    "node_id": node.id,
+                                    "node_title": title,
+                                    "node_type": kind,
+                                    "output": output[:300],
+                                    "variable": output_variable,
+                                }
+                            )
+                    except Exception as exc:
+                        logger.warning("Workflow mcp_tool node failed: %s", exc)
+                        output = ""
+                        variables[output_variable] = output
+                        yield sse_payload(
+                            {
+                                "event": "error",
+                                "node_id": node.id,
+                                "message": str(exc),
+                            }
+                        )
+
+                elif kind == "time_tool":
+                    output_variable = str(node.data.get("outputVariable") or "current_time")
+                    try:
+                        if not WORKFLOW_TIME_TOOL_ENABLED:
+                            output = ""
+                            variables[output_variable] = output
+                            yield sse_payload(
+                                {
+                                    "event": "node_delta",
+                                    "node_id": node.id,
+                                    "node_title": title,
+                                    "node_type": kind,
+                                    "output": "time_tool 当前未启用。",
+                                    "variable": output_variable,
+                                }
+                            )
+                        else:
+                            operation = str(node.data.get("operation") or "now_iso").strip()
+                            format_string = str(
+                                node.data.get("formatString") or "%Y-%m-%d %H:%M:%S"
+                            )
+                            if operation == "now_iso":
+                                output = datetime.now().isoformat()
+                            elif operation == "now_epoch":
+                                output = str(int(time.time()))
+                            elif operation == "format":
+                                output = datetime.now().strftime(format_string)
+                            else:
+                                raise ValueError(f"时间工具操作不支持：{operation}")
+                            variables[output_variable] = output
+                            yield sse_payload(
+                                {
+                                    "event": "node_delta",
+                                    "node_id": node.id,
+                                    "node_title": title,
+                                    "node_type": kind,
+                                    "output": output[:200],
+                                    "variable": output_variable,
+                                }
+                            )
+                    except Exception as exc:
+                        logger.warning("Workflow time_tool node failed: %s", exc)
+                        output = ""
                         variables[output_variable] = output
                         yield sse_payload(
                             {

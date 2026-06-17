@@ -86,6 +86,27 @@ const nodeMeta = {
     bg: "bg-yellow-300/10",
     text: "text-yellow-100",
   },
+  agent: {
+    icon: "🤖",
+    label: "Agent",
+    border: "border-violet-400/40",
+    bg: "bg-violet-400/10",
+    text: "text-violet-100",
+  },
+  mcp_tool: {
+    icon: "🔧",
+    label: "MCP Tool",
+    border: "border-emerald-400/40",
+    bg: "bg-emerald-400/10",
+    text: "text-emerald-200",
+  },
+  time_tool: {
+    icon: "🕒",
+    label: "时间",
+    border: "border-sky-400/40",
+    bg: "bg-sky-400/10",
+    text: "text-sky-200",
+  },
   http_request: {
     icon: "🌐",
     label: "外联工位",
@@ -145,6 +166,15 @@ function outputName(data: WorkflowNode["data"]) {
   }
   if (data.kind === "question_classifier") {
     return `分类 → ${data.outputVariable ?? "category"}`;
+  }
+  if (data.kind === "agent") {
+    return `🤖 ${data.agentMode ?? "tool_first"} → ${data.outputVariable ?? "agent_output"}`;
+  }
+  if (data.kind === "mcp_tool") {
+    return `🔧 ${data.toolName ?? "未选择"} → ${data.outputVariable ?? "mcp_output"}`;
+  }
+  if (data.kind === "time_tool") {
+    return `🕒 ${data.operation ?? "now_iso"} → ${data.outputVariable ?? "current_time"}`;
   }
   if (data.kind === "http_request") {
     return `${data.method ?? "GET"} ${data.url ?? "https://example.com"} -> ${data.outputVariable ?? "http_output"}`;

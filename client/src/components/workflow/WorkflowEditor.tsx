@@ -175,6 +175,45 @@ function createNodeData(kind: WorkflowNodeKind): WorkflowNodeData {
     };
   }
 
+  if (kind === "agent") {
+    return {
+      kind,
+      title: "Agent",
+      description: "模型驱动的任务执行节点。",
+      agentMode: "tool_first",
+      instruction: "{{user_input}}",
+      modelId: "",
+      toolNames: "",
+      outputVariable: "agent_output",
+      maxIterations: "5",
+      temperature: "0.7",
+      promptSuffix: "",
+    };
+  }
+
+  if (kind === "mcp_tool") {
+    return {
+      kind,
+      title: "MCP Tool",
+      description: "调用已注册的 MCP 工具",
+      toolName: "",
+      argumentsJson: "{}",
+      outputVariable: "mcp_output",
+      errorMode: "fail_safe",
+    };
+  }
+
+  if (kind === "time_tool") {
+    return {
+      kind,
+      title: "时间工具",
+      description: "获取当前时间或格式化日期",
+      operation: "now_iso",
+      formatString: "%Y-%m-%d %H:%M:%S",
+      outputVariable: "current_time",
+    };
+  }
+
   if (kind === "http_request") {
     return {
       kind,
@@ -299,12 +338,63 @@ function textInputClass() {
   return "w-full rounded-lg border border-white/10 bg-white/[0.055] px-3 py-2 text-sm text-white outline-none transition placeholder:text-slate-500 focus:border-brand-300/50 focus:ring-4 focus:ring-brand-300/10";
 }
 
+interface RegistryToolOption {
+  name: string;
+  description?: string;
+}
+
+function isRegistryToolOption(value: unknown): value is RegistryToolOption {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "name" in value &&
+    typeof (value as { name?: unknown }).name === "string"
+  );
+}
+
 interface NodeConfigProps {
   node: WorkflowNode | null;
   onChange: (nodeId: string, data: Partial<WorkflowNodeData>) => void;
 }
 
 function NodeConfig({ node, onChange }: NodeConfigProps) {
+  const [registryTools, setRegistryTools] = useState<RegistryToolOption[]>([]);
+  const [registryToolsError, setRegistryToolsError] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadRegistryTools() {
+      try {
+        const response = await fetch("/api/registry/tools");
+        if (!response.ok) {
+          throw new Error("工具注册表暂时不可用。");
+        }
+        const payload: unknown = await response.json();
+        const tools = Array.isArray(payload)
+          ? payload.filter(isRegistryToolOption)
+          : [];
+        if (!cancelled) {
+          setRegistryTools(tools);
+          setRegistryToolsError("");
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setRegistryTools([]);
+          setRegistryToolsError(
+            error instanceof Error ? error.message : "工具注册表加载失败。",
+          );
+        }
+      }
+    }
+
+    void loadRegistryTools();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   if (!node) {
     return (
       <div className="rounded-lg border border-dashed border-white/15 bg-white/[0.035] px-4 py-8 text-center text-sm leading-6 text-slate-400">
@@ -785,6 +875,191 @@ function NodeConfig({ node, onChange }: NodeConfigProps) {
               </Field>
             </>
           ) : null}
+        </>
+      ) : null}
+
+      {data.kind === "agent" ? (
+        <>
+          <div className="rounded-lg border border-violet-300/25 bg-violet-300/10 px-3 py-2 text-xs leading-5 text-violet-50">
+            Agent 节点是实验能力：工具模式会尝试调用已注册 MCP 工具，直接模式只调用模型生成回答。
+          </div>
+          <Field label="执行模式">
+            <select
+              className={textInputClass()}
+              onChange={(event) => update({ agentMode: event.target.value })}
+              value={data.agentMode ?? "tool_first"}
+            >
+              <option className="bg-slate-950" value="tool_first">
+                tool_first：优先规划工具调用
+              </option>
+              <option className="bg-slate-950" value="direct">
+                direct：直接回答
+              </option>
+            </select>
+          </Field>
+          <Field label="任务指令（支持 {{变量}}）">
+            <textarea
+              className={`${textInputClass()} min-h-36 resize-none leading-6`}
+              onChange={(event) => update({ instruction: event.target.value })}
+              placeholder="例如：请基于 {{user_input}} 制定处理计划。"
+              value={data.instruction ?? ""}
+            />
+          </Field>
+          <Field label="调用模型">
+            <select
+              className={textInputClass()}
+              onChange={(event) => update({ modelId: event.target.value })}
+              value={data.modelId ?? ""}
+            >
+              <option className="bg-slate-950" value="">
+                请选择模型
+              </option>
+              {models.map((model) => (
+                <option
+                  className="bg-slate-950 text-white"
+                  key={model.id}
+                  value={model.id}
+                >
+                  {model.name}
+                </option>
+              ))}
+            </select>
+          </Field>
+          {data.agentMode !== "direct" ? (
+            <>
+              <Field label="允许工具名（逗号分隔，留空代表全部已注册工具）">
+                <input
+                  className={textInputClass()}
+                  onChange={(event) => update({ toolNames: event.target.value })}
+                  placeholder={
+                    registryTools.length
+                      ? registryTools.map((tool) => tool.name).slice(0, 3).join(", ")
+                      : "先在 MCP 页面连接工具 Server"
+                  }
+                  value={data.toolNames ?? ""}
+                />
+              </Field>
+              <Field label="最大工具循环次数">
+                <input
+                  className={textInputClass()}
+                  inputMode="numeric"
+                  max={20}
+                  min={1}
+                  onChange={(event) =>
+                    update({ maxIterations: event.target.value })
+                  }
+                  type="number"
+                  value={data.maxIterations ?? "5"}
+                />
+              </Field>
+            </>
+          ) : null}
+          <Field label="Temperature">
+            <input
+              className={textInputClass()}
+              max={2}
+              min={0}
+              onChange={(event) => update({ temperature: event.target.value })}
+              step={0.1}
+              type="number"
+              value={data.temperature ?? "0.7"}
+            />
+          </Field>
+          <Field label="补充提示词（可选，支持 {{变量}}）">
+            <textarea
+              className={`${textInputClass()} min-h-24 resize-none leading-6`}
+              onChange={(event) => update({ promptSuffix: event.target.value })}
+              placeholder="可加入输出格式、语气或额外约束。"
+              value={data.promptSuffix ?? ""}
+            />
+          </Field>
+          <Field label="输出变量">
+            <input
+              className={textInputClass()}
+              onChange={(event) => update({ outputVariable: event.target.value })}
+              value={data.outputVariable ?? ""}
+            />
+          </Field>
+        </>
+      ) : null}
+
+      {data.kind === "mcp_tool" ? (
+        <>
+          <div className="rounded-lg border border-emerald-300/25 bg-emerald-300/10 px-3 py-2 text-xs leading-5 text-emerald-50">
+            先在 MCP 工具采购页连接 Server，工具会自动进入全局注册表。
+          </div>
+          <Field label="MCP 工具">
+            <select
+              className={textInputClass()}
+              onChange={(event) => update({ toolName: event.target.value })}
+              value={data.toolName ?? ""}
+            >
+              <option className="bg-slate-950" value="">
+                {registryTools.length ? "请选择工具" : "暂无已注册工具"}
+              </option>
+              {registryTools.map((tool) => (
+                <option className="bg-slate-950" key={tool.name} value={tool.name}>
+                  {tool.name}
+                </option>
+              ))}
+            </select>
+            {registryToolsError ? (
+              <p className="mt-2 text-xs text-rose-200">{registryToolsError}</p>
+            ) : null}
+          </Field>
+          <Field label="参数 JSON（支持 {{变量}}）">
+            <textarea
+              className={`${textInputClass()} min-h-32 resize-none font-mono text-xs leading-5`}
+              onChange={(event) => update({ argumentsJson: event.target.value })}
+              placeholder='{"url":"{{user_input}}"}'
+              value={data.argumentsJson ?? "{}"}
+            />
+          </Field>
+          <Field label="输出变量">
+            <input
+              className={textInputClass()}
+              onChange={(event) => update({ outputVariable: event.target.value })}
+              value={data.outputVariable ?? ""}
+            />
+          </Field>
+        </>
+      ) : null}
+
+      {data.kind === "time_tool" ? (
+        <>
+          <Field label="时间操作">
+            <select
+              className={textInputClass()}
+              onChange={(event) => update({ operation: event.target.value })}
+              value={data.operation ?? "now_iso"}
+            >
+              <option className="bg-slate-950" value="now_iso">
+                当前时间 ISO
+              </option>
+              <option className="bg-slate-950" value="now_epoch">
+                当前时间戳
+              </option>
+              <option className="bg-slate-950" value="format">
+                按格式输出
+              </option>
+            </select>
+          </Field>
+          <Field label="格式字符串">
+            <input
+              className={textInputClass()}
+              disabled={data.operation !== "format"}
+              onChange={(event) => update({ formatString: event.target.value })}
+              placeholder="%Y-%m-%d %H:%M:%S"
+              value={data.formatString ?? ""}
+            />
+          </Field>
+          <Field label="输出变量">
+            <input
+              className={textInputClass()}
+              onChange={(event) => update({ outputVariable: event.target.value })}
+              value={data.outputVariable ?? ""}
+            />
+          </Field>
         </>
       ) : null}
 
