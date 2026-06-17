@@ -817,16 +817,16 @@ async def stream_chat_text(
                 events = buffer.split("\n\n")
                 buffer = events.pop() or ""
                 for event in events:
-                    delta = sse_delta_text(event)
-                    if delta:
-                        yield delta
+                    for text_chunk in sse_delta_text(event):
+                        if text_chunk:
+                            yield text_chunk
         finally:
             await response.aclose()
 
         if buffer.strip():
-            delta = sse_delta_text(buffer)
-            if delta:
-                yield delta
+            for text_chunk in sse_delta_text(buffer):
+                if text_chunk:
+                    yield text_chunk
 
 
 async def stream_text_with_model_fallback(
@@ -1209,7 +1209,44 @@ def run_safe_code_node(node: WorkflowNodePayload, variables: dict[str, str]) -> 
     raise HTTPException(status_code=400, detail=f"代码节点不支持操作：{operation}")
 
 
-def sse_delta_text(event_text: str) -> str:
+def image_url_as_markdown(url: str) -> str:
+    return f"\n![图片]({url})\n"
+
+
+def content_to_text_chunks(content: Any) -> list[str]:
+    chunks: list[str] = []
+    if isinstance(content, str):
+        if content:
+            chunks.append(content)
+        return chunks
+
+    if isinstance(content, list):
+        for part in content:
+            chunks.extend(content_to_text_chunks(part))
+        return chunks
+
+    if not isinstance(content, dict):
+        return chunks
+
+    part_type = content.get("type")
+    if part_type == "text":
+        text = content.get("text")
+        if isinstance(text, str) and text:
+            chunks.append(text)
+        return chunks
+
+    image_url = content.get("image_url")
+    if part_type == "image_url" or isinstance(image_url, dict):
+        if isinstance(image_url, dict):
+            url = image_url.get("url")
+            if isinstance(url, str) and url:
+                chunks.append(image_url_as_markdown(url))
+        return chunks
+
+    return chunks
+
+
+def sse_delta_text(event_text: str) -> list[str]:
     delta_parts: list[str] = []
     for line in event_text.splitlines():
         stripped = line.strip()
@@ -1230,14 +1267,19 @@ def sse_delta_text(event_text: str) -> str:
             continue
         delta = first_choice.get("delta")
         message = first_choice.get("message")
-        content = ""
+        content: Any = ""
         if isinstance(delta, dict):
-            content = delta.get("content") or ""
-        elif isinstance(message, dict):
+            content = delta.get("content")
+        if (content is None or content == "") and isinstance(message, dict):
             content = message.get("content") or ""
-        if isinstance(content, str) and content:
-            delta_parts.append(content)
-    return "".join(delta_parts)
+        if content is None:
+            content = ""
+        delta_parts.extend(content_to_text_chunks(content))
+        if isinstance(delta, dict):
+            delta_parts.extend(content_to_text_chunks(delta.get("images")))
+        if isinstance(message, dict):
+            delta_parts.extend(content_to_text_chunks(message.get("images")))
+    return delta_parts
 
 
 async def stream_workflow_llm_text(
@@ -1296,16 +1338,16 @@ async def stream_workflow_llm_text(
                 events = buffer.split("\n\n")
                 buffer = events.pop() or ""
                 for event in events:
-                    delta = sse_delta_text(event)
-                    if delta:
-                        yield delta
+                    for text_chunk in sse_delta_text(event):
+                        if text_chunk:
+                            yield text_chunk
         finally:
             await response.aclose()
 
         if buffer.strip():
-            delta = sse_delta_text(buffer)
-            if delta:
-                yield delta
+            for text_chunk in sse_delta_text(buffer):
+                if text_chunk:
+                    yield text_chunk
 
 
 @app.get("/api/health")

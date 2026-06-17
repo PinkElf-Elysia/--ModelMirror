@@ -1,44 +1,29 @@
 # Harness Engineering 开发规范
 
-Harness Engineering 是模镜的工程治理方法：在功能开发前先建立护栏，让每次变更都可理解、可测试、可回滚。
+Harness Engineering 是模镜的工程治理方法：先建立护栏，再开发功能，让每次变更都可理解、可测试、可回退。
 
-最后更新日期：2026-06-16  
+最后更新日期：2026-06-17
 维护人：模镜团队
 
-## 1. 为什么需要 Harness
-
-模镜经历过一次 P0 级回退。根因不是单个 bug，而是缺少版本基线、缺少测试护栏、实验功能直接替换稳定入口。因此后续所有开发都必须先建立 harness。
-
-Harness 包括：
-
-- 明确边界。
-- 类型和接口契约。
-- 最小可运行测试。
-- 安全默认值。
-- 运行手册和回退路径。
-- 文档化上下文。
-
-## 2. Harness Checklist
+## 1. Harness Checklist
 
 每个任务开工前回答：
 
 | 问题 | 必填 |
 | --- | --- |
-| 这次改动影响哪些路由或 API？ | 是 |
-| 是否触碰稳定入口 `/workflow`、`/rag`、`/api/chat`？ | 是 |
+| 本次影响哪些路由或 API？ | 是 |
+| 是否触碰 `/api/chat`、`/workflow`、`/rag` 等主路径？ | 是 |
 | 最小验收命令是什么？ | 是 |
 | 失败如何回退？ | 是 |
 | 是否新增依赖？ | 是 |
 | 是否涉及密钥、子进程、文件系统或网络？ | 是 |
 | 是否需要更新文档？ | 是 |
 
-## 3. 变更分级
+## 2. 变更分级
 
 ### Level 0 - 文档或样式
 
-风险低。仍需确认构建不破坏。
-
-验收：
+验证：
 
 ```bash
 cd client
@@ -47,118 +32,106 @@ npm.cmd run build
 
 ### Level 1 - 前端功能
 
-涉及页面、组件、状态或 API 调用。
-
-验收：
+验证：
 
 - 前端 build。
 - 至少一个本地页面访问验证。
-- 错误态和加载态可见。
+- loading / error / empty / disabled 状态可见。
 
 ### Level 2 - 后端 API
 
-涉及 FastAPI、Pydantic、外部 API 或流式响应。
+验证：
 
-验收：
+```bash
+python -m py_compile server/main.py
+```
 
-- `python -m py_compile ...`
-- curl 样例。
-- 错误路径样例。
-- 不泄露密钥。
+并补充 curl 样例、错误路径和密钥泄露检查。
 
-### Level 3 - 子进程 / MCP / 工作流 / RAG
+### Level 3 - MCP / 工作流 / RAG / 图片生成链路
 
-风险最高。必须有隔离目录、超时、清理、测试替身和文档。
+最高风险。必须有隔离、超时、测试替身或真实冒烟。
 
-验收：
+## 3. 主路径保护
 
-- 单元测试或集成测试。
-- 失败命令不会挂死进程。
-- 并发限制或限流。
-- 明确回退路径。
-
-## 4. 稳定入口保护
-
-以下入口受保护：
-
-| 入口 | 稳定实现 | 规则 |
+| 入口 | 实现 | 规则 |
 | --- | --- | --- |
-| `/workflow` | Dify iframe | 不得直接替换为自研版本。 |
-| `/rag` | Dify iframe | 不得直接替换为自研版本。 |
-| `/api/chat` | OpenRouter 代理 | 不得改坏流式协议和多模态格式。 |
-| `/models` | 模型招聘会 | 不得破坏筛选和聊天入口。 |
-| `/agents` | AI 人才市场 | 不得破坏智能体面试入口。 |
+| `/api/chat` | OpenAI 兼容 SSE 代理 | 不得破坏文本流式追加、多模态输入或图片输出。 |
+| `/chat/:modelId` | ChatPage | 不得破坏用户上传图片和 Lightbox。 |
+| `/workflow` | 经典自研工作流 | 不得无测试改动运行器主链路。 |
+| `/workflow-native` | 实验线 | 新节点必须同步类型、校验、测试和文档。 |
+| `/rag` | 本地 RAG | 不得提交上传文件、向量库或临时存储。 |
+| `/settings` | newAPI iframe | 不得在前端硬编码密钥。 |
 
-实验功能必须使用新路由或 feature flag。
+## 4. `/api/chat` 图片输出 Harness
 
-## 5. 依赖管理
+修改以下文件时必须运行本节验收：
 
-新增依赖必须说明：
+- `server/main.py`
+- `client/src/utils/fetchChatStream.ts`
+- `client/src/utils/extractImages.ts`
+- `client/src/pages/ChatPage.tsx`
 
-- 为什么需要。
-- 是否有更轻替代方案。
-- 是否影响现有依赖版本。
-- 安装后运行 `pip check` 或前端 build。
+必须保持：
 
-Python 依赖写入 `server/requirements.txt`。注意 FastAPI 和 Starlette 版本兼容。
+- `onDelta(text: string)` 签名不变。
+- 纯文本模型仍按文本流式追加。
+- 图片生成模型输出能进入图片卡片和 Lightbox。
+- `data:image/...` 不依赖 ReactMarkdown 协议白名单，必须由 `extractImages` 提取。
+- 用户上传图片 `message.images` 逻辑不变。
 
-## 6. 子进程安全
+最小验证：
 
-任何启动外部进程的代码必须：
+```bash
+cd client
+npm.cmd run build
+```
 
-- 不使用 `shell=True`。
-- 命令参数是 `list[str]`。
-- 拒绝 `;`、`&&`、`|`、重定向等 shell 特殊字符。
-- 设置 cwd 到受控目录。
-- 设置超时。
-- 退出时清理进程。
-- 返回简要错误，不暴露本机路径和密钥。
+```bash
+python -m py_compile server/main.py
+```
 
-## 7. API Harness
+真实图片模型冒烟：
 
-新增 API 必须包含：
+```bash
+curl -N -X POST http://localhost:8000/api/chat ^
+  -H "Content-Type: application/json" ^
+  -d "{\"model_id\":\"recraft/recraft-v3\",\"messages\":[{\"role\":\"user\",\"content\":\"画一只猫\"}]}"
+```
 
-- Pydantic request model。
-- 明确 response schema。
-- 输入校验。
-- 错误码策略。
-- curl 示例。
-- 文档更新。
+预期：
 
-## 8. 前端 Harness
+- 响应包含 `image_url` 或 `data:image/...`。
+- `/chat/recraft%2Frecraft-v3` 中出现至少一张可点击图片。
+- 点击图片进入 Lightbox。
 
-新增交互组件必须包含：
+## 5. 文档 Harness
 
-- loading 状态。
-- error 状态。
-- empty 状态。
-- disabled 状态。
-- 移动端布局。
-- API 失败提示。
+新增或修改功能时同步更新：
 
-动态表单必须有 schema fallback，不认识的字段不能让页面崩溃。
+- 根 `README.md`
+- `docs/README.md`
+- 相关模块文档，例如 `docs/FRONTEND.md`、`docs/BACKEND.md`
+- `docs/GLOSSARY.md`（新术语）
+- `AGENTS.md`（新 harness 或红线）
 
-## 9. 文档 Harness
+文档必须：
 
-每个新模块至少包含：
+- 简体中文。
+- UTF-8 编码。
+- 代码块标注语言。
+- 与当前代码一致，不写虚构接口。
+- 尾部或头部包含最后更新日期和维护人。
 
-- 设计背景。
-- 文件位置。
-- 数据流。
-- API 示例。
-- 测试方式。
-- 常见问题。
+## 6. 回退模板
 
-## 10. 回退模板
-
-每个高风险 PR 在描述中写：
+高风险 PR 描述中写明：
 
 ```markdown
 ## 回退方案
 
 1. 回滚提交 `<commit>`。
-2. 确认 `/api/health` 正常。
-3. 确认 `/models`、`/workflow`、`/rag` 可访问。
-4. 如涉及依赖，恢复 lockfile。
+2. 重新构建前后端。
+3. 确认 `/api/health`、`/models`、`/chat/:modelId` 可访问。
+4. 若涉及环境变量，恢复上一版 `.env`。
 ```
-
