@@ -86,6 +86,40 @@ function parseErrorMessage(value: unknown) {
   return fallbackErrorMessage;
 }
 
+function imageUrlAsMarkdown(url: string) {
+  return `\n![图片](${url})\n`;
+}
+
+function readContentPart(part: unknown): string {
+  if (typeof part === "string") return part;
+  if (!part || typeof part !== "object") return "";
+
+  const record = part as Record<string, unknown>;
+  if (record.type === "text" && typeof record.text === "string") {
+    return record.text;
+  }
+
+  const imageUrl = record.image_url;
+  if (record.type === "image_url" || (imageUrl && typeof imageUrl === "object")) {
+    if (imageUrl && typeof imageUrl === "object") {
+      const imageRecord = imageUrl as Record<string, unknown>;
+      if (typeof imageRecord.url === "string") {
+        return imageUrlAsMarkdown(imageRecord.url);
+      }
+    }
+  }
+
+  return "";
+}
+
+function readContent(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content.map(readContentPart).join("");
+  }
+  return readContentPart(content);
+}
+
 function readDelta(payload: unknown) {
   if (!payload || typeof payload !== "object" || !("choices" in payload)) {
     return "";
@@ -95,13 +129,18 @@ function readDelta(payload: unknown) {
   if (!Array.isArray(choices)) return "";
 
   const firstChoice = choices[0] as
-    | { delta?: { content?: unknown }; message?: { content?: unknown } }
+    | {
+        delta?: { content?: unknown; images?: unknown };
+        message?: { content?: unknown; images?: unknown };
+      }
     | undefined;
 
   const content =
     firstChoice?.delta?.content ?? firstChoice?.message?.content ?? "";
+  const images =
+    firstChoice?.delta?.images ?? firstChoice?.message?.images ?? "";
 
-  return typeof content === "string" ? content : "";
+  return `${readContent(content)}${readContent(images)}`;
 }
 
 function readStreamError(payload: unknown) {
