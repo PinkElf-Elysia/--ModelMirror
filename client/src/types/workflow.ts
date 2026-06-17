@@ -11,6 +11,8 @@ export type WorkflowNodeKind =
   | "parameter_extractor"
   | "knowledge_retrieval"
   | "document_extractor"
+  | "human_intervention"
+  | "question_classifier"
   | "http_request"
   | "list_operation"
   | "iteration"
@@ -48,6 +50,12 @@ export interface WorkflowNodeData extends Record<string, unknown> {
   queryVariable?: string;
   top_k?: string;
   sourcePathVariable?: string;
+  categories?: string;
+  defaultCategory?: string;
+  matchMode?: string;
+  caseSensitive?: string;
+  useLlmFallback?: string;
+  llmFallbackPrompt?: string;
   url?: string;
   method?: HttpRequestMethod;
   headersJson?: string;
@@ -72,13 +80,25 @@ export interface WorkflowDefinition {
 }
 
 export interface WorkflowRunEvent {
-  event: "node_start" | "node_delta" | "node_end" | "workflow_end" | "error";
+  event:
+    | "workflow_meta"
+    | "node_start"
+    | "node_delta"
+    | "human_intervention_pending"
+    | "heartbeat"
+    | "node_end"
+    | "workflow_end"
+    | "error";
+  task_id?: string;
   node_id?: string;
   node_title?: string;
   node_type?: WorkflowNodeKind;
+  prompt?: string;
   output?: string;
+  output_variable?: string;
   variable?: string;
   final_output?: string;
   variables?: Record<string, string>;
   message?: string;
+  at?: number;
 }

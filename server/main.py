@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import time
+import uuid
 from collections.abc import AsyncIterator
 from collections import defaultdict, deque
 from pathlib import Path
@@ -78,6 +79,9 @@ REQUESTS_PER_MINUTE = 20
 WORKFLOW_ALLOW_HTTP_OUTBOUND = False
 WORKFLOW_MAX_ITERATION_ITEMS = 50
 WORKFLOW_DOC_EXTRACTOR_ROOT = "server/rag"
+WORKFLOW_TASK_TTL_SECONDS = 1800
+WORKFLOW_HUMAN_INTERVENTION_ENABLED = True
+WORKFLOW_QUESTION_CLASSIFIER_ENABLED = True
 MAX_IMAGE_DATA_URL_BYTES = 5 * 1024 * 1024
 AGENTS_DATA_PATH = Path(__file__).parent / "data" / "agents.json"
 MAX_AGENT_PROMPT_CHARS = 6000
@@ -144,6 +148,7 @@ request_windows: dict[str, deque[float]] = defaultdict(deque)
 mcp_connect_windows: dict[str, deque[float]] = defaultdict(deque)
 mcp_manager = MCPClientManager()
 tool_registry = ToolRegistry()
+workflow_task_store: dict[str, dict[str, Any]] = {}
 
 
 class TextContentPart(BaseModel):
@@ -292,6 +297,8 @@ WorkflowNodeType = Literal[
     "parameter_extractor",
     "knowledge_retrieval",
     "document_extractor",
+    "human_intervention",
+    "question_classifier",
     "http_request",
     "list_operation",
     "iteration",
@@ -329,6 +336,19 @@ class WorkflowPayload(BaseModel):
 class WorkflowRunRequest(BaseModel):
     workflow: WorkflowPayload
     inputs: dict[str, str] = Field(default_factory=dict)
+
+
+class WorkflowResumeRequest(BaseModel):
+    input_text: str = Field(default="", max_length=20_000)
+    node_id: str | None = Field(default=None, max_length=128)
+
+
+class WorkflowTaskStatusResponse(BaseModel):
+    task_id: str
+    paused: bool
+    paused_node_id: str | None = None
+    created_at: float
+    ttl_seconds_left: float
 
 
 def client_ip(request: Request) -> str:
@@ -990,6 +1010,8 @@ def workflow_node_kind(node: WorkflowNodePayload) -> WorkflowNodeType:
         "parameter_extractor",
         "knowledge_retrieval",
         "document_extractor",
+        "human_intervention",
+        "question_classifier",
         "http_request",
         "list_operation",
         "iteration",
@@ -1008,6 +1030,38 @@ def workflow_node_title(node: WorkflowNodePayload) -> str:
 
 def sse_payload(data: dict[str, Any]) -> bytes:
     return f"data: {json.dumps(data, ensure_ascii=False)}\n\n".encode("utf-8")
+
+
+def cleanup_expired_workflow_tasks() -> None:
+    """Remove stale paused workflow runs from the in-memory task store."""
+
+    now = time.monotonic()
+    expired_task_ids = [
+        task_id
+        for task_id, task in workflow_task_store.items()
+        if now - float(task.get("created_at", now)) > float(task.get("ttl", 0))
+    ]
+    for task_id in expired_task_ids:
+        task = workflow_task_store.pop(task_id, None)
+        pause_event = task.get("pause_event") if task else None
+        if isinstance(pause_event, asyncio.Event):
+            pause_event.set()
+
+
+def get_workflow_task_or_none(task_id: str) -> dict[str, Any] | None:
+    """Return an active workflow task or clean it up if it has expired."""
+
+    task = workflow_task_store.get(task_id)
+    if task is None:
+        return None
+    now = time.monotonic()
+    if now - float(task.get("created_at", now)) > float(task.get("ttl", 0)):
+        workflow_task_store.pop(task_id, None)
+        pause_event = task.get("pause_event")
+        if isinstance(pause_event, asyncio.Event):
+            pause_event.set()
+        return None
+    return task
 
 
 def render_workflow_template(template: str, variables: dict[str, str]) -> str:
@@ -1241,14 +1295,42 @@ async def run_workflow(payload: WorkflowRunRequest, request: Request):
     if not start_node_ids and order:
         start_node_ids = [order[0]]
 
+    cleanup_expired_workflow_tasks()
+    task_id = uuid.uuid4().hex
+    initial_queue = deque(sorted(start_node_ids, key=lambda node_id: order_index[node_id]))
+    task_state: dict[str, Any] = {
+        "task_id": task_id,
+        "variables": {str(key): str(value) for key, value in payload.inputs.items()},
+        "queue": initial_queue,
+        "queued": set(initial_queue),
+        "executed": set(),
+        "nodes_by_id": nodes_by_id,
+        "outgoing": outgoing,
+        "order_index": order_index,
+        "final_output": "",
+        "pause_event": None,
+        "resume_input": None,
+        "paused_node_id": None,
+        "created_at": time.monotonic(),
+        "ttl": WORKFLOW_TASK_TTL_SECONDS,
+    }
+    workflow_task_store[task_id] = task_state
+
     async def workflow_stream():
-        variables = {str(key): str(value) for key, value in payload.inputs.items()}
-        queue = deque(sorted(start_node_ids, key=lambda node_id: order_index[node_id]))
-        queued = set(queue)
-        executed: set[str] = set()
+        variables: dict[str, str] = task_state["variables"]
+        queue: deque[str] = task_state["queue"]
+        queued: set[str] = task_state["queued"]
+        executed: set[str] = task_state["executed"]
         final_output = ""
 
         try:
+            yield sse_payload(
+                {
+                    "event": "workflow_meta",
+                    "task_id": task_id,
+                    "ttl_seconds": WORKFLOW_TASK_TTL_SECONDS,
+                }
+            )
             while queue:
                 node_id = queue.popleft()
                 node = nodes_by_id[node_id]
@@ -1789,9 +1871,251 @@ async def run_workflow(payload: WorkflowRunRequest, request: Request):
                             }
                         )
 
+                elif kind == "human_intervention":
+                    output_variable = str(node.data.get("outputVariable") or "human_input")
+                    prompt = render_workflow_template(
+                        str(node.data.get("prompt") or "请输入人工补充内容。"),
+                        variables,
+                    )
+                    if not WORKFLOW_HUMAN_INTERVENTION_ENABLED:
+                        yield sse_payload(
+                            {
+                                "event": "error",
+                                "node_id": node.id,
+                                "message": "人工介入节点当前未启用。",
+                            }
+                        )
+                    else:
+                        pause_event = asyncio.Event()
+                        task_state["pause_event"] = pause_event
+                        task_state["resume_input"] = None
+                        task_state["paused_node_id"] = node.id
+                        yield sse_payload(
+                            {
+                                "event": "human_intervention_pending",
+                                "task_id": task_id,
+                                "node_id": node.id,
+                                "node_title": title,
+                                "node_type": kind,
+                                "prompt": prompt,
+                                "output_variable": output_variable,
+                            }
+                        )
+                        while not pause_event.is_set():
+                            try:
+                                await asyncio.wait_for(pause_event.wait(), timeout=15)
+                            except asyncio.TimeoutError:
+                                yield sse_payload(
+                                    {
+                                        "event": "heartbeat",
+                                        "task_id": task_id,
+                                        "node_id": node.id,
+                                        "at": time.time(),
+                                    }
+                                )
+                        output = str(task_state.get("resume_input") or "")
+                        task_state["paused_node_id"] = None
+                        task_state["resume_input"] = None
+                        task_state["pause_event"] = None
+                        variables[output_variable] = output
+                        yield sse_payload(
+                            {
+                                "event": "node_delta",
+                                "node_id": node.id,
+                                "node_title": title,
+                                "node_type": kind,
+                                "output": output,
+                                "variable": output_variable,
+                            }
+                        )
+
+                elif kind == "question_classifier":
+                    output_variable = str(node.data.get("outputVariable") or "category")
+                    default_category = str(node.data.get("defaultCategory") or "未知")
+                    output = default_category
+                    try:
+                        input_variable = str(
+                            node.data.get("inputVariable") or "user_input"
+                        )
+                        categories_json = str(node.data.get("categories") or "{}")
+                        match_mode = str(
+                            node.data.get("matchMode") or "contains_any"
+                        ).strip()
+                        case_sensitive = (
+                            str(node.data.get("caseSensitive") or "false")
+                            .strip()
+                            .lower()
+                            == "true"
+                        )
+                        use_llm_fallback = (
+                            str(node.data.get("useLlmFallback") or "false")
+                            .strip()
+                            .lower()
+                            == "true"
+                        )
+                        model_id = str(node.data.get("modelId") or "").strip()
+                        text = variables.get(input_variable, "")
+
+                        if not WORKFLOW_QUESTION_CLASSIFIER_ENABLED:
+                            variables[output_variable] = default_category
+                            output = default_category
+                            yield sse_payload(
+                                {
+                                    "event": "node_delta",
+                                    "node_id": node.id,
+                                    "node_title": title,
+                                    "node_type": kind,
+                                    "output": (
+                                        "question_classifier disabled; "
+                                        f"default={default_category}"
+                                    ),
+                                    "variable": output_variable,
+                                }
+                            )
+                        else:
+                            try:
+                                raw_categories = json.loads(categories_json)
+                            except ValueError as exc:
+                                raise ValueError(f"分类规则 JSON 解析失败：{exc}") from exc
+                            if not isinstance(raw_categories, dict) or not raw_categories:
+                                raise ValueError("分类规则必须是非空 JSON 对象。")
+
+                            category_map: dict[str, list[str]] = {}
+                            for category_name, keywords in raw_categories.items():
+                                if not isinstance(category_name, str):
+                                    raise ValueError("分类名称必须是字符串。")
+                                if not isinstance(keywords, list):
+                                    raise ValueError("分类关键词必须是字符串数组。")
+                                clean_keywords = [
+                                    str(keyword).strip()
+                                    for keyword in keywords
+                                    if isinstance(keyword, str) and keyword.strip()
+                                ]
+                                if not clean_keywords:
+                                    raise ValueError(
+                                        f"分类 {category_name} 至少需要一个关键词。"
+                                    )
+                                category_map[category_name] = clean_keywords
+
+                            comparison_text = text if case_sensitive else text.lower()
+                            selected = ""
+                            matched_keyword = ""
+                            for category_name, keywords in category_map.items():
+                                comparison_keywords = (
+                                    keywords
+                                    if case_sensitive
+                                    else [keyword.lower() for keyword in keywords]
+                                )
+                                if match_mode == "contains_all":
+                                    matched = all(
+                                        keyword in comparison_text
+                                        for keyword in comparison_keywords
+                                    )
+                                    keyword_hint = ",".join(keywords)
+                                else:
+                                    hit_index = next(
+                                        (
+                                            index
+                                            for index, keyword in enumerate(
+                                                comparison_keywords
+                                            )
+                                            if keyword in comparison_text
+                                        ),
+                                        -1,
+                                    )
+                                    matched = hit_index >= 0
+                                    keyword_hint = (
+                                        keywords[hit_index] if hit_index >= 0 else ""
+                                    )
+                                if matched:
+                                    selected = category_name
+                                    matched_keyword = keyword_hint
+                                    break
+
+                            delta_output = ""
+                            if selected:
+                                output = selected
+                                delta_output = (
+                                    f"已分类：{selected}（关键词命中：{matched_keyword}）"
+                                )
+                            elif use_llm_fallback:
+                                if not API_KEY or not model_id:
+                                    raise ValueError(
+                                        "LLM 回退未配置 API Key 或 modelId。"
+                                    )
+                                fallback_prompt = str(
+                                    node.data.get("llmFallbackPrompt") or ""
+                                ).strip()
+                                if fallback_prompt:
+                                    prompt = render_workflow_template(
+                                        fallback_prompt,
+                                        variables,
+                                    )
+                                else:
+                                    prompt = (
+                                        "请从下列文本中判断它属于哪个已知类别："
+                                        f"{json.dumps(list(category_map.keys()), ensure_ascii=False)}。"
+                                        "只回答类别名，不要多余文字或解释。如无法判断则回答 "
+                                        '"未知"。\n\n文本：\n'
+                                        f"{text}"
+                                    )
+                                selected = (
+                                    await collect_chat_completion_text(
+                                        model_id,
+                                        [ChatMessage(role="user", content=prompt)],
+                                        temperature=0,
+                                        max_tokens=20,
+                                    )
+                                ).strip()
+                                output = selected or default_category
+                                delta_output = f"已分类：{output}（LLM 回退）"
+                                if output not in category_map:
+                                    yield sse_payload(
+                                        {
+                                            "event": "node_delta",
+                                            "node_id": node.id,
+                                            "node_title": title,
+                                            "node_type": kind,
+                                            "output": (
+                                                f'LLM 返回类别 "{output}" 不在预设集合中，'
+                                                "已原样输出。"
+                                            ),
+                                            "variable": output_variable,
+                                        }
+                                    )
+                            else:
+                                output = default_category
+                                delta_output = (
+                                    f"规则未命中，返回默认类别：{default_category}"
+                                )
+
+                            variables[output_variable] = output
+                            yield sse_payload(
+                                {
+                                    "event": "node_delta",
+                                    "node_id": node.id,
+                                    "node_title": title,
+                                    "node_type": kind,
+                                    "output": delta_output,
+                                    "variable": output_variable,
+                                }
+                            )
+                    except Exception as exc:
+                        logger.warning("Workflow question_classifier node failed: %s", exc)
+                        output = default_category
+                        variables[output_variable] = output
+                        yield sse_payload(
+                            {
+                                "event": "error",
+                                "node_id": node.id,
+                                "message": str(exc),
+                            }
+                        )
+
                 elif kind == "output":
                     output_variable = str(node.data.get("outputVariable") or "llm_output")
                     final_output = variables.get(output_variable, "")
+                    task_state["final_output"] = final_output
                     output = final_output
 
                 executed.add(node_id)
@@ -1835,11 +2159,61 @@ async def run_workflow(payload: WorkflowRunRequest, request: Request):
         except Exception as exc:
             logger.exception("Workflow run failed workflow=%s", payload.workflow.id)
             yield sse_payload({"event": "error", "message": str(exc)})
+        finally:
+            workflow_task_store.pop(task_id, None)
 
     return StreamingResponse(
         workflow_stream(),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+    )
+
+
+@app.post("/api/workflow/run/{task_id}/resume")
+async def resume_workflow_task(
+    task_id: str,
+    payload: WorkflowResumeRequest,
+    request: Request,
+):
+    try:
+        rate_limit_or_raise(client_ip(request))
+    except HTTPException as exc:
+        return JSONResponse(status_code=exc.status_code, content={"error": str(exc.detail)})
+
+    task = get_workflow_task_or_none(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="工作流任务不存在或已过期。")
+
+    paused_node_id = task.get("paused_node_id")
+    if not paused_node_id:
+        raise HTTPException(status_code=400, detail="工作流当前不在人工介入等待状态。")
+    if payload.node_id and payload.node_id != paused_node_id:
+        raise HTTPException(status_code=409, detail="人工介入节点不匹配，请刷新运行状态。")
+
+    pause_event = task.get("pause_event")
+    if not isinstance(pause_event, asyncio.Event):
+        raise HTTPException(status_code=400, detail="工作流等待状态异常，无法继续。")
+
+    task["resume_input"] = payload.input_text
+    pause_event.set()
+    return {"ok": True, "task_id": task_id, "node_id": paused_node_id}
+
+
+@app.get("/api/workflow/run/{task_id}/status", response_model=WorkflowTaskStatusResponse)
+async def get_workflow_task_status(task_id: str):
+    task = get_workflow_task_or_none(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="工作流任务不存在或已过期。")
+    created_at = float(task.get("created_at", time.monotonic()))
+    ttl = float(task.get("ttl", WORKFLOW_TASK_TTL_SECONDS))
+    ttl_seconds_left = max(0.0, ttl - (time.monotonic() - created_at))
+    paused_node_id = task.get("paused_node_id")
+    return WorkflowTaskStatusResponse(
+        task_id=task_id,
+        paused=bool(paused_node_id),
+        paused_node_id=str(paused_node_id) if paused_node_id else None,
+        created_at=created_at,
+        ttl_seconds_left=ttl_seconds_left,
     )
 
 

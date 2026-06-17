@@ -11,6 +11,8 @@ export type NativeNodeKind =
   | "parameter_extractor"
   | "knowledge_retrieval"
   | "document_extractor"
+  | "human_intervention"
+  | "question_classifier"
   | "http_request"
   | "list_operation"
   | "iteration"
@@ -27,6 +29,8 @@ export type DifyConceptNodeKind =
   | "parameter-extractor"
   | "knowledge-retrieval"
   | "document-extractor"
+  | "human-in-the-loop"
+  | "question-classifier"
   | "http-request"
   | "list-operator"
   | "iteration"
@@ -88,6 +92,16 @@ export const difyNodeMappings: DifyNodeMapping[] = [
     native: "document_extractor",
     dify: "document-extractor",
     note: "Native document extraction reads only sandboxed local files.",
+  },
+  {
+    native: "human_intervention",
+    dify: "human-in-the-loop",
+    note: "Native human intervention pauses the SSE run until a resume input arrives.",
+  },
+  {
+    native: "question_classifier",
+    dify: "question-classifier",
+    note: "Native classifier uses keyword rules first; Dify can extend this with model-based classification.",
   },
   {
     native: "http_request",

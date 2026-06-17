@@ -8,6 +8,13 @@ interface WorkflowRunProps {
   definition: WorkflowDefinition;
 }
 
+interface PendingHumanIntervention {
+  nodeId: string;
+  nodeTitle: string;
+  prompt: string;
+  outputVariable: string;
+}
+
 function serializeWorkflow(definition: WorkflowDefinition) {
   return {
     id: definition.id,
@@ -42,6 +49,11 @@ export default function WorkflowRun({ definition }: WorkflowRunProps) {
   const [events, setEvents] = useState<WorkflowRunEvent[]>([]);
   const [isRunning, setIsRunning] = useState(false);
   const [error, setError] = useState("");
+  const [taskId, setTaskId] = useState<string | null>(null);
+  const [pendingHuman, setPendingHuman] =
+    useState<PendingHumanIntervention | null>(null);
+  const [humanInput, setHumanInput] = useState("");
+  const [isResuming, setIsResuming] = useState(false);
 
   const finalOutput = useMemo(() => {
     for (let index = events.length - 1; index >= 0; index -= 1) {
@@ -56,6 +68,9 @@ export default function WorkflowRun({ definition }: WorkflowRunProps) {
   async function runWorkflow() {
     setEvents([]);
     setError("");
+    setTaskId(null);
+    setPendingHuman(null);
+    setHumanInput("");
     setIsRunning(true);
 
     try {
@@ -94,7 +109,10 @@ export default function WorkflowRun({ definition }: WorkflowRunProps) {
         for (const chunk of chunks) {
           for (const data of readSseEvent(chunk)) {
             const event = JSON.parse(data) as WorkflowRunEvent;
-            setEvents((current) => [...current, event]);
+            handleRunEvent(event);
+            if (event.event !== "heartbeat") {
+              setEvents((current) => [...current, event]);
+            }
           }
         }
       }
@@ -103,13 +121,69 @@ export default function WorkflowRun({ definition }: WorkflowRunProps) {
       if (buffer.trim()) {
         for (const data of readSseEvent(buffer)) {
           const event = JSON.parse(data) as WorkflowRunEvent;
-          setEvents((current) => [...current, event]);
+          handleRunEvent(event);
+          if (event.event !== "heartbeat") {
+            setEvents((current) => [...current, event]);
+          }
         }
       }
     } catch (runError) {
       setError(runError instanceof Error ? runError.message : "工作流运行失败。");
     } finally {
       setIsRunning(false);
+    }
+  }
+
+  function handleRunEvent(event: WorkflowRunEvent) {
+    if (event.event === "workflow_meta" && event.task_id) {
+      setTaskId(event.task_id);
+    }
+    if (event.event === "human_intervention_pending") {
+      setPendingHuman({
+        nodeId: event.node_id ?? "",
+        nodeTitle: event.node_title ?? "人工介入",
+        prompt: event.prompt ?? "请补充人工输入。",
+        outputVariable: event.output_variable ?? "human_input",
+      });
+      setHumanInput("");
+    }
+    if (event.event === "node_end") {
+      setPendingHuman((current) =>
+        current?.nodeId === event.node_id ? null : current,
+      );
+    }
+    if (event.event === "workflow_end") {
+      setPendingHuman(null);
+      setHumanInput("");
+    }
+  }
+
+  async function resumeWorkflow() {
+    if (!taskId || !pendingHuman) return;
+    setError("");
+    setIsResuming(true);
+
+    try {
+      const response = await fetch(`/api/workflow/run/${taskId}/resume`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          input_text: humanInput,
+          node_id: pendingHuman.nodeId,
+        }),
+      });
+      if (!response.ok) {
+        const payload = (await response.json().catch(() => null)) as
+          | { error?: string; detail?: string }
+          | null;
+        throw new Error(payload?.error ?? payload?.detail ?? "人工输入提交失败。");
+      }
+    } catch (resumeError) {
+      setError(
+        resumeError instanceof Error ? resumeError.message : "人工输入提交失败。",
+      );
+    } finally {
+      setIsResuming(false);
     }
   }
 
@@ -144,6 +218,37 @@ export default function WorkflowRun({ definition }: WorkflowRunProps) {
         </button>
       </div>
 
+      {pendingHuman ? (
+        <div className="mx-4 mb-3 rounded-lg border border-sky-300/30 bg-sky-300/10 p-3 text-sky-50">
+          <div className="flex items-center justify-between gap-3">
+            <p className="text-sm font-semibold">{pendingHuman.nodeTitle}</p>
+            <span className="rounded-full border border-sky-200/25 bg-sky-200/10 px-2 py-0.5 text-[11px] text-sky-100">
+              等待人工输入
+            </span>
+          </div>
+          <p className="mt-2 whitespace-pre-wrap text-xs leading-5 text-sky-100">
+            {pendingHuman.prompt}
+          </p>
+          <p className="mt-2 text-[11px] text-sky-200/80">
+            写入变量：{pendingHuman.outputVariable}
+          </p>
+          <textarea
+            className="mt-3 min-h-24 w-full resize-none rounded-lg border border-sky-200/25 bg-slate-950/50 px-3 py-2 text-sm leading-6 text-white outline-none transition placeholder:text-slate-500 focus:border-sky-200/60 focus:ring-4 focus:ring-sky-300/10"
+            onChange={(event) => setHumanInput(event.target.value)}
+            placeholder="输入人工补充内容..."
+            value={humanInput}
+          />
+          <button
+            className="mt-3 w-full rounded-full bg-sky-200 px-4 py-2 text-sm font-semibold text-slate-950 transition hover:bg-sky-100 active:scale-[0.98] disabled:cursor-not-allowed disabled:bg-white/10 disabled:text-slate-500"
+            disabled={!taskId || isResuming}
+            onClick={() => void resumeWorkflow()}
+            type="button"
+          >
+            {isResuming ? "提交中..." : "提交并继续"}
+          </button>
+        </div>
+      ) : null}
+
       {error ? (
         <div className="mx-4 rounded-lg border border-rose-300/25 bg-rose-300/10 px-3 py-2 text-sm text-rose-100">
           {error}
@@ -170,9 +275,9 @@ export default function WorkflowRun({ definition }: WorkflowRunProps) {
                     {event.event}
                   </span>
                 </div>
-                {event.output || event.final_output || event.message ? (
+                {event.output || event.final_output || event.message || event.prompt ? (
                   <p className="mt-2 whitespace-pre-wrap text-xs leading-5 text-slate-300">
-                    {event.output ?? event.final_output ?? event.message}
+                    {event.output ?? event.final_output ?? event.message ?? event.prompt}
                   </p>
                 ) : null}
               </div>

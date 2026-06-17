@@ -2,7 +2,7 @@
 
 workflow-native 是模镜自研工作流引擎的渐进式实验线。它不会替换当前稳定的 `/workflow` Dify iframe 入口，也不会改动 `/rag`。当前阶段提供静态图校验能力，并在 classic 运行器中试点少量本地节点执行，让团队先把数据模型、API 契约、错误模型和测试流程立起来。
 
-最后更新日期：2026-06-16  
+最后更新日期：2026-06-17  
 维护人：模镜团队
 
 ## 目标与边界
@@ -89,6 +89,7 @@ interface NativeWorkflowDefinition extends WorkflowDefinition {
 | `parameter_extractor` | `parameter-extractor` | native 复用现有模型调用链，返回 JSON 字符串；无 Key 时降级为空对象。 |
 | `knowledge_retrieval` | `knowledge-retrieval` | native 复用本地 RAG 服务；索引未就绪时返回 warning，不中断流程。 |
 | `document_extractor` | `document-extractor` | native 仅读取受限目录内本地文件，不提供上传 UI。 |
+| `question_classifier` | `question-classifier` / 问题分类器 | native 仅支持关键词规则分类，可选 LLM 回退默认关闭。 |
 | `http_request` | `http-request` | native 仅支持 GET/POST 文本响应，默认关闭真实出站请求。 |
 | `list_operation` | `list-operator` | native 当前基于逗号分隔字符串，尚无完整数组变量系统。 |
 | `iteration` | `iteration` | native 当前只做节点内迭代，不执行跨节点子图。 |
@@ -96,7 +97,7 @@ interface NativeWorkflowDefinition extends WorkflowDefinition {
 
 参考点：Dify 工作流由节点、边、变量和运行态组成；native 当前只借鉴节点概念、拓扑顺序和静态校验分类，不复制 Dify 源码实现。
 
-暂不接入的节点：`agent`、问题理解、问题分类器、工具、人工介入。这些能力分别依赖 Agent 编排、异步人工回调或 MCP 工具协议，需要独立设计文档和测试护栏后再进入 native 实验线。
+暂不接入的节点：`agent`、问题理解、工具。这些能力分别依赖 Agent 编排、MCP 工具协议或新的异步交互模型，需要独立设计文档和测试护栏后再进入 native 实验线。
 
 ## API 契约
 
@@ -281,6 +282,124 @@ python -m pytest server/tests/ -q
 cd client
 npm.cmd run build
 ```
+
+## 2026-06-17 增量：人工介入节点
+
+`human_intervention` 已进入 workflow-native / classic 共享实验线。它对齐 Dify 的 Human-in-the-loop 概念，但保持 MVP 边界：仅支持文本输入、内存态暂停和 REST resume，不做持久化审批流、多人协作或权限系统。
+
+### 节点映射
+
+| Native 节点 | Dify 概念 | 当前差异 |
+| --- | --- | --- |
+| `human_intervention` | `human-in-the-loop` | native 运行器通过 SSE 暂停并等待 `/api/workflow/run/{task_id}/resume`，Dify 可提供更完整的人工审批和运行态管理。 |
+| `question_classifier` | `question-classifier` / 问题分类器 | native 仅支持关键词规则分类文本到预设类别，可选 LLM 回退；Dify 可扩展为分类模型。 |
+
+### 校验规则
+
+`human_intervention` 节点必须包含：
+
+- `prompt`：展示给用户的提示文案，支持 `{{variable}}`。
+- `outputVariable`：用户输入写入的变量名，必须是合法标识符。
+
+新增错误码：
+
+- `missing_prompt`
+- `missing_output_variable`
+- `invalid_human_intervention_output_variable`
+
+若 `prompt` 引用不存在的变量，沿用 `missing_template_variable`。
+
+### Classic 运行器事件
+
+`POST /api/workflow/run` 会在 SSE 第一条发送：
+
+```json
+{"event":"workflow_meta","task_id":"...","ttl_seconds":1800}
+```
+
+遇到 `human_intervention` 节点时，运行器发送：
+
+```json
+{
+  "event": "human_intervention_pending",
+  "task_id": "...",
+  "node_id": "human",
+  "node_title": "人工确认",
+  "node_type": "human_intervention",
+  "prompt": "请确认：...",
+  "output_variable": "human_input"
+}
+```
+
+在等待期间每 15 秒发送一次：
+
+```json
+{"event":"heartbeat","task_id":"...","node_id":"human","at":1780000000}
+```
+
+前端应消费 heartbeat，但默认不展示到运行日志。
+
+### Resume API
+
+```bash
+curl -X POST http://localhost:8000/api/workflow/run/<task_id>/resume \
+  -H "Content-Type: application/json" \
+  -d "{\"node_id\":\"human\",\"input_text\":\"确认继续\"}"
+```
+
+成功响应：
+
+```json
+{"ok":true,"task_id":"...","node_id":"human"}
+```
+
+任务不存在或 TTL 过期时返回 `404`；当前未暂停时返回 `400`；节点不匹配时返回 `409`。
+
+### Status API
+
+```bash
+curl http://localhost:8000/api/workflow/run/<task_id>/status
+```
+
+响应：
+
+```json
+{
+  "task_id": "...",
+  "paused": true,
+  "paused_node_id": "human",
+  "created_at": 1780000000.0,
+  "ttl_seconds_left": 1790.0
+}
+```
+
+### 运行态与回退
+
+- 任务状态仅存放在后端内存中，TTL 为 30 分钟。
+- 工作流结束、SSE 连接断开或 TTL 过期都会清理任务。
+- 若出现问题，可从前端隐藏 `human_intervention` 调色板条目，或在后端将 `WORKFLOW_HUMAN_INTERVENTION_ENABLED` 设为 `False` 降级。
+
+## 2026-06-17 增量：问题分类器节点
+
+`question_classifier` 已进入 workflow-native / classic 共享实验线。它对齐 Dify 的问题分类器概念，但保持 MVP 边界：默认仅使用关键词规则，不调用模型；只有用户显式设置 `useLlmFallback=true` 时才尝试一次轻量 LLM 回退。
+
+### 字段
+
+- `inputVariable`：待分类文本变量名。
+- `categories`：JSON 字符串，格式为 `{"类别":["关键词1","关键词2"]}`。
+- `outputVariable`：分类结果写入变量名。
+- `defaultCategory`：规则未命中或异常时写入的默认类别，默认 `未知`。
+- `matchMode`：`contains_any` 或 `contains_all`。
+- `caseSensitive`：`true` 或 `false`。
+- `useLlmFallback`：`true` 或 `false`，默认 `false`。
+- `modelId`：启用 LLM 回退时必填。
+- `llmFallbackPrompt`：可选回退提示词，支持 `{{variable}}`。
+
+### 安全边界
+
+- LLM 回退默认关闭，常规分类不产生模型调用成本。
+- 开启 LLM 回退但未配置 API Key 或 `modelId` 时，运行器会记录 `error` 事件并写入 `defaultCategory`，不会中断工作流。
+- `categories` 只接受 JSON 对象和字符串数组，不支持正则、脚本或 DSL。
 
 ## 回退方案
 

@@ -430,6 +430,125 @@ async def test_validate_document_extractor_required_fields(
 
 
 @pytest.mark.asyncio
+async def test_validate_human_intervention_required_fields(
+    client: httpx.AsyncClient,
+) -> None:
+    workflow = linear_workflow()
+    workflow["nodes"][1] = {
+        "id": "human",
+        "type": "human_intervention",
+        "data": {
+            "kind": "human_intervention",
+            "prompt": "请确认：{{user_input}}",
+            "outputVariable": "human_input",
+        },
+    }
+    workflow["nodes"][2]["data"]["outputVariable"] = "human_input"
+    workflow["edges"] = [
+        {"id": "e1", "source": "input", "target": "human"},
+        {"id": "e2", "source": "human", "target": "output"},
+    ]
+
+    data = await validate(client, workflow)
+
+    assert data["valid"] is True
+
+    workflow["nodes"][1]["data"].pop("prompt")
+    data = await validate(client, workflow)
+
+    assert data["valid"] is False
+    assert "missing_prompt" in issue_codes(data)
+
+    workflow["nodes"][1]["data"]["prompt"] = "请确认：{{user_input}}"
+    workflow["nodes"][1]["data"].pop("outputVariable")
+    data = await validate(client, workflow)
+
+    assert data["valid"] is False
+    assert "missing_output_variable" in issue_codes(data)
+
+
+@pytest.mark.asyncio
+async def test_validate_human_intervention_template_reference(
+    client: httpx.AsyncClient,
+) -> None:
+    workflow = linear_workflow()
+    workflow["nodes"][1] = {
+        "id": "human",
+        "type": "human-in-the-loop",
+        "data": {
+            "kind": "human-in-the-loop",
+            "prompt": "请确认：{{missing_value}}",
+            "outputVariable": "human_input",
+        },
+    }
+    workflow["nodes"][2]["data"]["outputVariable"] = "human_input"
+    workflow["edges"] = [
+        {"id": "e1", "source": "input", "target": "human"},
+        {"id": "e2", "source": "human", "target": "output"},
+    ]
+
+    data = await validate(client, workflow)
+
+    assert data["valid"] is False
+    assert "missing_template_variable" in issue_codes(data)
+
+
+@pytest.mark.asyncio
+async def test_validate_question_classifier_ok(client: httpx.AsyncClient) -> None:
+    workflow = linear_workflow()
+    workflow["nodes"][1] = {
+        "id": "classifier",
+        "type": "question_classifier",
+        "data": {
+            "kind": "question_classifier",
+            "inputVariable": "user_input",
+            "categories": '{"投诉":["差","投诉","退款"],"咨询":["咨询","如何","怎么"]}',
+            "outputVariable": "category",
+            "defaultCategory": "未知",
+            "matchMode": "contains_any",
+            "caseSensitive": "false",
+            "useLlmFallback": "false",
+        },
+    }
+    workflow["nodes"][2]["data"]["outputVariable"] = "category"
+    workflow["edges"] = [
+        {"id": "e1", "source": "input", "target": "classifier"},
+        {"id": "e2", "source": "classifier", "target": "output"},
+    ]
+
+    data = await validate(client, workflow)
+
+    assert data["valid"] is True
+
+
+@pytest.mark.asyncio
+async def test_validate_question_classifier_invalid_categories_json(
+    client: httpx.AsyncClient,
+) -> None:
+    workflow = linear_workflow()
+    workflow["nodes"][1] = {
+        "id": "classifier",
+        "type": "question_classifier",
+        "data": {
+            "kind": "question_classifier",
+            "inputVariable": "user_input",
+            "categories": "{invalid json",
+            "outputVariable": "category",
+        },
+    }
+    workflow["nodes"][2]["data"]["outputVariable"] = "category"
+    workflow["edges"] = [
+        {"id": "e1", "source": "input", "target": "classifier"},
+        {"id": "e2", "source": "classifier", "target": "output"},
+    ]
+
+    data = await validate(client, workflow)
+
+    assert data["valid"] is False
+    assert "invalid_categories_json" in issue_codes(data)
+
+
+@pytest.mark.asyncio
 async def test_templates_endpoint_returns_starter_template(
     client: httpx.AsyncClient,
 ) -> None:
