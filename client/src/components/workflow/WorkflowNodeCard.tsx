@@ -79,6 +79,13 @@ const nodeMeta = {
     bg: "bg-sky-300/10",
     text: "text-sky-100",
   },
+  question_classifier: {
+    icon: "🏷️",
+    label: "分类",
+    border: "border-yellow-300/40",
+    bg: "bg-yellow-300/10",
+    text: "text-yellow-100",
+  },
   http_request: {
     icon: "🌐",
     label: "外联工位",
@@ -135,6 +142,9 @@ function outputName(data: WorkflowNode["data"]) {
   }
   if (data.kind === "human_intervention") {
     return `等待输入 -> ${data.outputVariable ?? "human_input"}`;
+  }
+  if (data.kind === "question_classifier") {
+    return `分类 → ${data.outputVariable ?? "category"}`;
   }
   if (data.kind === "http_request") {
     return `${data.method ?? "GET"} ${data.url ?? "https://example.com"} -> ${data.outputVariable ?? "http_output"}`;

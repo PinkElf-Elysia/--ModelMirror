@@ -81,6 +81,7 @@ WORKFLOW_MAX_ITERATION_ITEMS = 50
 WORKFLOW_DOC_EXTRACTOR_ROOT = "server/rag"
 WORKFLOW_TASK_TTL_SECONDS = 1800
 WORKFLOW_HUMAN_INTERVENTION_ENABLED = True
+WORKFLOW_QUESTION_CLASSIFIER_ENABLED = True
 MAX_IMAGE_DATA_URL_BYTES = 5 * 1024 * 1024
 AGENTS_DATA_PATH = Path(__file__).parent / "data" / "agents.json"
 MAX_AGENT_PROMPT_CHARS = 6000
@@ -297,6 +298,7 @@ WorkflowNodeType = Literal[
     "knowledge_retrieval",
     "document_extractor",
     "human_intervention",
+    "question_classifier",
     "http_request",
     "list_operation",
     "iteration",
@@ -1009,6 +1011,7 @@ def workflow_node_kind(node: WorkflowNodePayload) -> WorkflowNodeType:
         "knowledge_retrieval",
         "document_extractor",
         "human_intervention",
+        "question_classifier",
         "http_request",
         "list_operation",
         "iteration",
@@ -1923,6 +1926,189 @@ async def run_workflow(payload: WorkflowRunRequest, request: Request):
                                 "node_type": kind,
                                 "output": output,
                                 "variable": output_variable,
+                            }
+                        )
+
+                elif kind == "question_classifier":
+                    output_variable = str(node.data.get("outputVariable") or "category")
+                    default_category = str(node.data.get("defaultCategory") or "未知")
+                    output = default_category
+                    try:
+                        input_variable = str(
+                            node.data.get("inputVariable") or "user_input"
+                        )
+                        categories_json = str(node.data.get("categories") or "{}")
+                        match_mode = str(
+                            node.data.get("matchMode") or "contains_any"
+                        ).strip()
+                        case_sensitive = (
+                            str(node.data.get("caseSensitive") or "false")
+                            .strip()
+                            .lower()
+                            == "true"
+                        )
+                        use_llm_fallback = (
+                            str(node.data.get("useLlmFallback") or "false")
+                            .strip()
+                            .lower()
+                            == "true"
+                        )
+                        model_id = str(node.data.get("modelId") or "").strip()
+                        text = variables.get(input_variable, "")
+
+                        if not WORKFLOW_QUESTION_CLASSIFIER_ENABLED:
+                            variables[output_variable] = default_category
+                            output = default_category
+                            yield sse_payload(
+                                {
+                                    "event": "node_delta",
+                                    "node_id": node.id,
+                                    "node_title": title,
+                                    "node_type": kind,
+                                    "output": (
+                                        "question_classifier disabled; "
+                                        f"default={default_category}"
+                                    ),
+                                    "variable": output_variable,
+                                }
+                            )
+                        else:
+                            try:
+                                raw_categories = json.loads(categories_json)
+                            except ValueError as exc:
+                                raise ValueError(f"分类规则 JSON 解析失败：{exc}") from exc
+                            if not isinstance(raw_categories, dict) or not raw_categories:
+                                raise ValueError("分类规则必须是非空 JSON 对象。")
+
+                            category_map: dict[str, list[str]] = {}
+                            for category_name, keywords in raw_categories.items():
+                                if not isinstance(category_name, str):
+                                    raise ValueError("分类名称必须是字符串。")
+                                if not isinstance(keywords, list):
+                                    raise ValueError("分类关键词必须是字符串数组。")
+                                clean_keywords = [
+                                    str(keyword).strip()
+                                    for keyword in keywords
+                                    if isinstance(keyword, str) and keyword.strip()
+                                ]
+                                if not clean_keywords:
+                                    raise ValueError(
+                                        f"分类 {category_name} 至少需要一个关键词。"
+                                    )
+                                category_map[category_name] = clean_keywords
+
+                            comparison_text = text if case_sensitive else text.lower()
+                            selected = ""
+                            matched_keyword = ""
+                            for category_name, keywords in category_map.items():
+                                comparison_keywords = (
+                                    keywords
+                                    if case_sensitive
+                                    else [keyword.lower() for keyword in keywords]
+                                )
+                                if match_mode == "contains_all":
+                                    matched = all(
+                                        keyword in comparison_text
+                                        for keyword in comparison_keywords
+                                    )
+                                    keyword_hint = ",".join(keywords)
+                                else:
+                                    hit_index = next(
+                                        (
+                                            index
+                                            for index, keyword in enumerate(
+                                                comparison_keywords
+                                            )
+                                            if keyword in comparison_text
+                                        ),
+                                        -1,
+                                    )
+                                    matched = hit_index >= 0
+                                    keyword_hint = (
+                                        keywords[hit_index] if hit_index >= 0 else ""
+                                    )
+                                if matched:
+                                    selected = category_name
+                                    matched_keyword = keyword_hint
+                                    break
+
+                            delta_output = ""
+                            if selected:
+                                output = selected
+                                delta_output = (
+                                    f"已分类：{selected}（关键词命中：{matched_keyword}）"
+                                )
+                            elif use_llm_fallback:
+                                if not API_KEY or not model_id:
+                                    raise ValueError(
+                                        "LLM 回退未配置 API Key 或 modelId。"
+                                    )
+                                fallback_prompt = str(
+                                    node.data.get("llmFallbackPrompt") or ""
+                                ).strip()
+                                if fallback_prompt:
+                                    prompt = render_workflow_template(
+                                        fallback_prompt,
+                                        variables,
+                                    )
+                                else:
+                                    prompt = (
+                                        "请从下列文本中判断它属于哪个已知类别："
+                                        f"{json.dumps(list(category_map.keys()), ensure_ascii=False)}。"
+                                        "只回答类别名，不要多余文字或解释。如无法判断则回答 "
+                                        '"未知"。\n\n文本：\n'
+                                        f"{text}"
+                                    )
+                                selected = (
+                                    await collect_chat_completion_text(
+                                        model_id,
+                                        [ChatMessage(role="user", content=prompt)],
+                                        temperature=0,
+                                        max_tokens=20,
+                                    )
+                                ).strip()
+                                output = selected or default_category
+                                delta_output = f"已分类：{output}（LLM 回退）"
+                                if output not in category_map:
+                                    yield sse_payload(
+                                        {
+                                            "event": "node_delta",
+                                            "node_id": node.id,
+                                            "node_title": title,
+                                            "node_type": kind,
+                                            "output": (
+                                                f'LLM 返回类别 "{output}" 不在预设集合中，'
+                                                "已原样输出。"
+                                            ),
+                                            "variable": output_variable,
+                                        }
+                                    )
+                            else:
+                                output = default_category
+                                delta_output = (
+                                    f"规则未命中，返回默认类别：{default_category}"
+                                )
+
+                            variables[output_variable] = output
+                            yield sse_payload(
+                                {
+                                    "event": "node_delta",
+                                    "node_id": node.id,
+                                    "node_title": title,
+                                    "node_type": kind,
+                                    "output": delta_output,
+                                    "variable": output_variable,
+                                }
+                            )
+                    except Exception as exc:
+                        logger.warning("Workflow question_classifier node failed: %s", exc)
+                        output = default_category
+                        variables[output_variable] = output
+                        yield sse_payload(
+                            {
+                                "event": "error",
+                                "node_id": node.id,
+                                "message": str(exc),
                             }
                         )
 

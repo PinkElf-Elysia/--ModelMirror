@@ -12,6 +12,7 @@ export type NativeNodeKind =
   | "knowledge_retrieval"
   | "document_extractor"
   | "human_intervention"
+  | "question_classifier"
   | "http_request"
   | "list_operation"
   | "iteration"
@@ -29,6 +30,7 @@ export type DifyConceptNodeKind =
   | "knowledge-retrieval"
   | "document-extractor"
   | "human-in-the-loop"
+  | "question-classifier"
   | "http-request"
   | "list-operator"
   | "iteration"
@@ -95,6 +97,11 @@ export const difyNodeMappings: DifyNodeMapping[] = [
     native: "human_intervention",
     dify: "human-in-the-loop",
     note: "Native human intervention pauses the SSE run until a resume input arrives.",
+  },
+  {
+    native: "question_classifier",
+    dify: "question-classifier",
+    note: "Native classifier uses keyword rules first; Dify can extend this with model-based classification.",
   },
   {
     native: "http_request",

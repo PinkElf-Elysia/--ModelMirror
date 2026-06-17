@@ -12,6 +12,7 @@ export type WorkflowNodeKind =
   | "knowledge_retrieval"
   | "document_extractor"
   | "human_intervention"
+  | "question_classifier"
   | "http_request"
   | "list_operation"
   | "iteration"
@@ -49,6 +50,12 @@ export interface WorkflowNodeData extends Record<string, unknown> {
   queryVariable?: string;
   top_k?: string;
   sourcePathVariable?: string;
+  categories?: string;
+  defaultCategory?: string;
+  matchMode?: string;
+  caseSensitive?: string;
+  useLlmFallback?: string;
+  llmFallbackPrompt?: string;
   url?: string;
   method?: HttpRequestMethod;
   headersJson?: string;

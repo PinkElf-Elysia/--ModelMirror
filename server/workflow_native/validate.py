@@ -38,6 +38,8 @@ NODE_KIND_ALIASES = {
     "human_intervention": "human_intervention",
     "human-intervention": "human_intervention",
     "human-in-the-loop": "human_intervention",
+    "question_classifier": "question_classifier",
+    "question-classifier": "question_classifier",
     "http_request": "http_request",
     "http-request": "http_request",
     "list_operation": "list_operation",
@@ -62,6 +64,7 @@ SUPPORTED_NODE_KINDS = {
     "knowledge_retrieval",
     "document_extractor",
     "human_intervention",
+    "question_classifier",
     "http_request",
     "list_operation",
     "iteration",
@@ -469,6 +472,130 @@ def validate_node_configuration(
                 )
             )
 
+    if kind == "question_classifier":
+        input_variable = str(data.get("inputVariable") or "").strip()
+        if not input_variable:
+            issues.append(
+                ValidationIssue(
+                    code="missing_input_variable",
+                    message="Question classifier node needs data.inputVariable.",
+                    node_id=node.id,
+                )
+            )
+        elif not is_variable_name(input_variable):
+            issues.append(
+                ValidationIssue(
+                    code="invalid_input_variable",
+                    message="Question classifier inputVariable must be an identifier.",
+                    node_id=node.id,
+                )
+            )
+
+        categories_json = str(data.get("categories") or "").strip()
+        if not categories_json:
+            issues.append(
+                ValidationIssue(
+                    code="missing_categories",
+                    message="Question classifier node needs data.categories.",
+                    node_id=node.id,
+                )
+            )
+        else:
+            try:
+                categories = json.loads(categories_json)
+            except ValueError:
+                categories = None
+                issues.append(
+                    ValidationIssue(
+                        code="invalid_categories_json",
+                        message="Question classifier categories must be valid JSON.",
+                        node_id=node.id,
+                    )
+                )
+            if categories is not None:
+                valid_schema = isinstance(categories, dict) and bool(categories)
+                if valid_schema:
+                    for category_name, keywords in categories.items():
+                        if not isinstance(category_name, str) or not category_name.strip():
+                            valid_schema = False
+                            break
+                        if not isinstance(keywords, list) or not keywords:
+                            valid_schema = False
+                            break
+                        if not all(
+                            isinstance(keyword, str) and keyword.strip()
+                            for keyword in keywords
+                        ):
+                            valid_schema = False
+                            break
+                if not valid_schema:
+                    issues.append(
+                        ValidationIssue(
+                            code="invalid_categories_schema",
+                            message=(
+                                "Question classifier categories must be a non-empty "
+                                "object of string arrays."
+                            ),
+                            node_id=node.id,
+                        )
+                    )
+
+        output_variable = str(data.get("outputVariable") or "").strip()
+        if not output_variable:
+            issues.append(
+                ValidationIssue(
+                    code="missing_output_variable",
+                    message="Question classifier node needs data.outputVariable.",
+                    node_id=node.id,
+                )
+            )
+        elif not is_variable_name(output_variable):
+            issues.append(
+                ValidationIssue(
+                    code="invalid_output_variable",
+                    message="Question classifier outputVariable must be an identifier.",
+                    node_id=node.id,
+                )
+            )
+
+        match_mode = str(data.get("matchMode") or "contains_any").strip()
+        if match_mode not in {"contains_any", "contains_all"}:
+            issues.append(
+                ValidationIssue(
+                    code="invalid_match_mode",
+                    message="Question classifier matchMode must be contains_any or contains_all.",
+                    node_id=node.id,
+                )
+            )
+
+        case_sensitive = str(data.get("caseSensitive") or "false").strip().lower()
+        if case_sensitive not in {"true", "false"}:
+            issues.append(
+                ValidationIssue(
+                    code="invalid_case_sensitive",
+                    message="Question classifier caseSensitive must be true or false.",
+                    node_id=node.id,
+                )
+            )
+
+        use_llm_fallback = str(data.get("useLlmFallback") or "false").strip().lower()
+        if use_llm_fallback not in {"true", "false"}:
+            issues.append(
+                ValidationIssue(
+                    code="invalid_use_llm_fallback",
+                    message="Question classifier useLlmFallback must be true or false.",
+                    node_id=node.id,
+                )
+            )
+        elif use_llm_fallback == "true" and not str(data.get("modelId") or "").strip():
+            issues.append(
+                ValidationIssue(
+                    code="missing_model_when_fallback",
+                    message="Question classifier needs data.modelId when LLM fallback is enabled.",
+                    node_id=node.id,
+                )
+            )
+
     if kind == "http_request":
         if not str(data.get("url") or "").strip():
             issues.append(
@@ -661,6 +788,7 @@ def collect_declared_variables(
             "knowledge_retrieval",
             "document_extractor",
             "human_intervention",
+            "question_classifier",
             "http_request",
             "list_operation",
             "iteration",
@@ -811,6 +939,33 @@ def validate_variable_references(
                     ValidationIssue(
                         code="missing_template_variable",
                         message=f"Human intervention prompt references undefined variable '{variable}'.",
+                        node_id=node.id,
+                    )
+                )
+
+    if kind == "question_classifier":
+        input_variable = str(data.get("inputVariable") or "").strip()
+        if input_variable and input_variable not in available_variables:
+            issues.append(
+                ValidationIssue(
+                    code="missing_question_classifier_input_variable_reference",
+                    message=(
+                        "Question classifier references undefined inputVariable "
+                        f"'{input_variable}'."
+                    ),
+                    node_id=node.id,
+                )
+            )
+        fallback_prompt = str(data.get("llmFallbackPrompt") or "")
+        for variable in sorted(extract_template_variables(fallback_prompt)):
+            if variable not in available_variables:
+                issues.append(
+                    ValidationIssue(
+                        code="missing_template_variable",
+                        message=(
+                            "Question classifier fallback prompt references "
+                            f"undefined variable '{variable}'."
+                        ),
                         node_id=node.id,
                     )
                 )

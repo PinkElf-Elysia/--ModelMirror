@@ -75,6 +75,12 @@ const paletteItems: PaletteItem[] = [
     description: "暂停流水线，等待用户补充文本后再继续执行。",
   },
   {
+    kind: "question_classifier",
+    icon: "🏷️",
+    title: "问题分类器",
+    description: "根据关键词规则把输入文本分类为预设类别。可与条件节点串联做分流。",
+  },
+  {
     kind: "http_request",
     icon: "🌐",
     title: "HTTP 请求",

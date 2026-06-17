@@ -157,6 +157,24 @@ function createNodeData(kind: WorkflowNodeKind): WorkflowNodeData {
     };
   }
 
+  if (kind === "question_classifier") {
+    return {
+      kind,
+      title: "问题分类",
+      description: "关键词规则分类",
+      inputVariable: "user_input",
+      categories:
+        '{"投诉":["差","投诉","退款"],"咨询":["咨询","如何","怎么"],"订单":["订单","下单","购买"],"售后":["售后","退货","换"]}',
+      outputVariable: "category",
+      defaultCategory: "未知",
+      matchMode: "contains_any",
+      caseSensitive: "false",
+      useLlmFallback: "false",
+      modelId: "",
+      llmFallbackPrompt: "",
+    };
+  }
+
   if (kind === "http_request") {
     return {
       kind,
@@ -654,6 +672,119 @@ function NodeConfig({ node, onChange }: NodeConfigProps) {
               value={data.outputVariable ?? ""}
             />
           </Field>
+        </>
+      ) : null}
+
+      {data.kind === "question_classifier" ? (
+        <>
+          <div className="rounded-lg border border-yellow-300/25 bg-yellow-300/10 px-3 py-2 text-xs leading-5 text-yellow-50">
+            默认只按关键词规则分类；LLM 回退关闭时不会产生模型调用。
+          </div>
+          <Field label="输入文本变量">
+            <input
+              className={textInputClass()}
+              onChange={(event) => update({ inputVariable: event.target.value })}
+              value={data.inputVariable ?? ""}
+            />
+          </Field>
+          <Field label="分类规则 JSON">
+            <textarea
+              className={`${textInputClass()} min-h-36 resize-none font-mono text-xs leading-5`}
+              onChange={(event) => update({ categories: event.target.value })}
+              placeholder='{"投诉":["差","投诉","退款"],"咨询":["咨询","如何","怎么"]}'
+              value={data.categories ?? ""}
+            />
+          </Field>
+          <Field label="输出变量">
+            <input
+              className={textInputClass()}
+              onChange={(event) => update({ outputVariable: event.target.value })}
+              value={data.outputVariable ?? ""}
+            />
+          </Field>
+          <Field label="默认类别">
+            <input
+              className={textInputClass()}
+              onChange={(event) => update({ defaultCategory: event.target.value })}
+              value={data.defaultCategory ?? ""}
+            />
+          </Field>
+          <Field label="匹配模式">
+            <select
+              className={textInputClass()}
+              onChange={(event) => update({ matchMode: event.target.value })}
+              value={data.matchMode ?? "contains_any"}
+            >
+              <option className="bg-slate-950" value="contains_any">
+                任一关键词命中
+              </option>
+              <option className="bg-slate-950" value="contains_all">
+                全部关键词命中
+              </option>
+            </select>
+          </Field>
+          <Field label="大小写敏感">
+            <select
+              className={textInputClass()}
+              onChange={(event) => update({ caseSensitive: event.target.value })}
+              value={data.caseSensitive ?? "false"}
+            >
+              <option className="bg-slate-950" value="false">
+                否
+              </option>
+              <option className="bg-slate-950" value="true">
+                是
+              </option>
+            </select>
+          </Field>
+          <Field label="启用 LLM 回退">
+            <select
+              className={textInputClass()}
+              onChange={(event) => update({ useLlmFallback: event.target.value })}
+              value={data.useLlmFallback ?? "false"}
+            >
+              <option className="bg-slate-950" value="false">
+                否
+              </option>
+              <option className="bg-slate-950" value="true">
+                是
+              </option>
+            </select>
+          </Field>
+          {data.useLlmFallback === "true" ? (
+            <>
+              <Field label="回退模型">
+                <select
+                  className={textInputClass()}
+                  onChange={(event) => update({ modelId: event.target.value })}
+                  value={data.modelId ?? ""}
+                >
+                  <option className="bg-slate-950" value="">
+                    请选择模型
+                  </option>
+                  {models.map((model) => (
+                    <option
+                      className="bg-slate-950"
+                      key={model.id}
+                      value={model.id}
+                    >
+                      {model.name}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+              <Field label="LLM 回退提示词（可选，支持 {{变量}}）">
+                <textarea
+                  className={`${textInputClass()} min-h-28 resize-none leading-6`}
+                  onChange={(event) =>
+                    update({ llmFallbackPrompt: event.target.value })
+                  }
+                  placeholder="留空则使用后端默认分类提示词。"
+                  value={data.llmFallbackPrompt ?? ""}
+                />
+              </Field>
+            </>
+          ) : null}
         </>
       ) : null}
 
