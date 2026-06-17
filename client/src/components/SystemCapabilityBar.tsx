@@ -11,26 +11,28 @@ interface CapabilityItem {
 
 const capabilities: CapabilityItem[] = [
   {
-    icon: "🧩",
-    title: "Dify 工作流",
-    description: "稳定版本继续通过 Dify 承载工作流编排、调试、发布和运行。",
-    badge: "稳定接入",
+    icon: "🛠️",
+    title: "工作流（经典自研）",
+    description: "默认使用模镜本地的 React Flow 画布，支持节点拖拽、静态图校验和本地运行。",
+    badge: "稳定路径",
     href: "/workflow",
     actionLabel: "进入工作流",
   },
   {
     icon: "📚",
     title: "RAG 资料库",
-    description: "文档上传、切分、检索测试和知识库问答由 Dify 知识库提供。",
+    description: "通过 Dify 知识库提供文档上传、切分、检索测试和 RAG 问答。",
     badge: "稳定接入",
     href: "/rag",
     actionLabel: "打开资料库",
   },
   {
-    icon: "⚙️",
+    icon: "🔌",
     title: "系统设置",
-    description: "偏好设置、通知管理和账号配置继续保留在服务台规划区。",
-    badge: "预留",
+    description: "外部网关与 API Key 统一管理入口（newAPI 占位）。",
+    badge: "占位",
+    href: "/settings",
+    actionLabel: "进入设置",
   },
 ];
 
@@ -89,7 +91,7 @@ export default function SystemCapabilityBar({
         <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-sm font-semibold text-white">
           <span>服务台 · 更多能力</span>
           <span className="rounded-full border border-hire-300/30 bg-hire-300/10 px-2.5 py-1 text-xs text-hire-100">
-            Dify 稳定接入
+            自研路径
           </span>
         </summary>
         <div className="mt-4 grid gap-3 sm:grid-cols-3">
@@ -107,7 +109,7 @@ export default function SystemCapabilityBar({
         <div>
           <p className="text-sm font-semibold text-white">模镜服务台</p>
           <p className="mt-1 text-xs leading-5 text-slate-400">
-            工作流和资料库已回退到 Dify 稳定集成，其他能力继续按模块扩展。
+            工作流默认使用经典自研画布，资料库通过 Dify 稳定集成，其他能力按模块持续扩展。
           </p>
         </div>
         <span className="rounded-full border border-hire-300/30 bg-hire-300/10 px-2.5 py-1 text-xs font-semibold text-hire-100">

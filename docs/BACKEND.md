@@ -34,7 +34,9 @@ server/
 
 | 变量 | 必填 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `OPENROUTER_API_KEY` | 是 | 空 | 模型网关密钥。 |
+| `LLM_GATEWAY_URL` | 推荐 | `http://localhost:3000/v1/chat/completions` | newAPI 或其他 OpenAI 兼容 LLM 网关地址。 |
+| `LLM_GATEWAY_KEY` | 推荐 | 空 | newAPI 网关统一 API Key。 |
+| `OPENROUTER_API_KEY` | 回退 | 空 | 直接访问 OpenRouter 的回退密钥，向后兼容。 |
 | `ALLOWED_ORIGINS` | 否 | 本地 5173/5174 | CORS 白名单。 |
 | `OPENROUTER_HTTP_REFERER` | 否 | `http://localhost:5173` | 请求 OpenRouter 的 Referer。 |
 | `OPENROUTER_APP_TITLE` | 否 | `ModelMirror` | 请求 OpenRouter 的应用名。 |
@@ -43,6 +45,32 @@ server/
 | `OPENROUTER_JUDGE_MODEL` | 否 | `openai/gpt-4o` | Fusion 裁判模型。 |
 | `DIFY_API_BASE_URL` | 否 | `http://localhost:5001/v1` | Dify API 地址。 |
 | `DIFY_API_KEY` | Dify 功能需要 | 空 | Dify App API Key。 |
+
+## LLM 网关配置
+
+模镜支持通过 newAPI 网关统一管理多个 AI 服务商。后端所有 OpenAI 兼容 Chat Completions 调用会先读取 `LLM_GATEWAY_URL` 和 `LLM_GATEWAY_KEY`；如果二者都存在，则请求 newAPI；否则回退到 `OPENROUTER_API_KEY` 和 OpenRouter 官方地址。
+
+优先级：
+
+1. `LLM_GATEWAY_URL` + `LLM_GATEWAY_KEY`：使用 newAPI 或其他 OpenAI 兼容网关。
+2. `OPENROUTER_API_KEY`：回退为直接访问 OpenRouter。
+3. 都未配置：接口返回 `LLM 网关未配置，请设置环境变量 LLM_GATEWAY_KEY 或 OPENROUTER_API_KEY。`
+
+本地示例：
+
+```bash
+LLM_GATEWAY_URL=http://localhost:3000/v1/chat/completions
+LLM_GATEWAY_KEY=your-new-api-key
+OPENROUTER_API_KEY=your-openrouter-key
+```
+
+Docker Compose 已包含 `new-api` 服务。容器内 server 使用服务名访问网关：
+
+```bash
+docker compose -p modelmirror up -d --build
+```
+
+启动后可访问 `http://localhost:3000` 进入 newAPI 管理界面，创建统一 API Key 后写入 `server/.env` 或部署环境变量。若暂不使用 newAPI，可不配置 `LLM_GATEWAY_KEY`，继续使用 `OPENROUTER_API_KEY` 回退。
 
 ## API 端点
 
@@ -62,7 +90,7 @@ curl http://localhost:8000/api/health
 
 ### POST `/api/chat`
 
-流式聊天接口，代理 OpenRouter Chat Completions。
+流式聊天接口，代理 OpenAI 兼容 Chat Completions。默认优先走 newAPI 网关，未配置网关时回退 OpenRouter。
 
 请求：
 

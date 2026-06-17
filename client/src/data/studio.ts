@@ -29,14 +29,15 @@ export function createInitialStudioState(): StudioState {
   return {
     apps: [
       {
-        id: "dify-workflow",
-        name: "Dify 工作流",
+        id: "workflow-canvas",
+        name: "工作流（经典自研）",
         kind: "workflow",
-        icon: "🧩",
+        icon: "🛠️",
         status: "stable",
-        description: "通过 Dify 社区版提供成熟的工作流编排、调试、发布和运行能力。",
+        description:
+          "模镜自研的 React Flow 工作流编辑器，支持节点拖拽、静态图校验和本地运行。",
         href: "/workflow",
-        tags: ["工作流", "稳定接入"],
+        tags: ["工作流", "稳定", "本地"],
       },
       {
         id: "dify-datasets",
@@ -49,38 +50,39 @@ export function createInitialStudioState(): StudioState {
         tags: ["RAG", "知识库"],
       },
       {
-        id: "classic-canvas",
-        name: "经典自研画布",
-        kind: "workflow",
-        icon: "🛠️",
-        status: "fallback",
-        description: "保留早期 React Flow MVP 作为实验入口，不再承担主路径稳定性。",
-        href: "/workflow/classic",
-        tags: ["实验", "备用"],
-      },
-      {
         id: "workflow-native",
         name: "自研工作流（实验）",
         kind: "workflow",
         icon: "WN",
         status: "planned",
         description:
-          "独立于 Dify 的 native 实验线，当前只开放静态图校验，不替代稳定 /workflow。",
+          "独立的 native 实验线，节点类型更丰富，支持条件分支、变量聚合、参数提取等能力。",
         href: "/workflow-native",
         tags: ["实验", "validate", "非 iframe"],
+      },
+      {
+        id: "newapi-gateway",
+        name: "newAPI 网关（占位）",
+        kind: "agent",
+        icon: "🔌",
+        status: "planned",
+        description:
+          "外部网关与 API Key 统一管理入口，后续工作流与对话可通过它接入更多服务商。",
+        href: "/settings",
+        tags: ["设置", "网关", "占位"],
       },
     ],
     activities: [
       {
-        id: "activity-dify-rollback",
-        title: "工作流和资料库已回退到 Dify 稳定集成",
-        detail: "主入口重新使用 iframe + 后端代理方案，自研替代路线暂缓到设计和测试补齐之后。",
+        id: "activity-workflow-refactor",
+        title: "工作流已切换为经典自研画布为默认路径",
+        detail: "删除了 Dify iframe 集成作为 /workflow 主入口；外部网关与 API Key 管理迁移到 /settings。",
         at: now,
       },
       {
-        id: "activity-docs",
-        title: "新增失败复盘与重试路线文档",
-        detail: "后续自研工作流必须按里程碑推进，并与 Dify 稳定路径并行运行。",
+        id: "activity-native-nodes",
+        title: "原生工作流节点持续扩展",
+        detail: "mcp_tool / time_tool / template_transform 等节点陆续到位，与 MCP 板块联动。",
         at: now,
       },
     ],

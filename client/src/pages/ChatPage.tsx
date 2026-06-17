@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import remarkGfm from "remark-gfm";
@@ -17,6 +17,13 @@ import { models } from "../data/models";
 import { recruitmentTheme } from "../theme/recruitmentTheme";
 import { compressImage } from "../utils/compressImage";
 import {
+  downloadImage,
+  extractImages,
+  filenameForImage,
+  svgDataUrlToPng,
+  type ExtractedImageKind,
+} from "../utils/extractImages";
+import {
   AGENT_DEFAULT_MODEL_NOTICE_KEY,
   type AgentInterviewPayload,
   readAgentInterview,
@@ -33,6 +40,14 @@ interface UploadedImage {
   id: string;
   name: string;
   url: string;
+}
+
+type LightboxKind = ExtractedImageKind | "upload";
+
+interface LightboxItem {
+  src: string;
+  kind: LightboxKind;
+  name: string;
 }
 
 interface ChatMessage {
@@ -205,7 +220,41 @@ function buildUserContent(
   ];
 }
 
-function markdownComponents(onImageClick: (src: string) => void, isUser: boolean) {
+function inferLightboxKind(src: string): LightboxKind {
+  if (src.startsWith("data:image/svg+xml")) return "svg";
+  if (src.startsWith("data:image/") || src.startsWith("blob:")) return "data";
+  return "url";
+}
+
+function extractedKindForLightbox(
+  kind: LightboxKind,
+  src: string,
+): ExtractedImageKind {
+  if (kind === "upload") return inferLightboxKind(src) === "svg" ? "svg" : "data";
+  return kind;
+}
+
+function lightboxFilename(item: LightboxItem): string {
+  if (item.kind === "upload" && /\.[A-Za-z0-9]+$/.test(item.name)) {
+    return item.name.replace(/[^A-Za-z0-9_.-]+/g, "_").slice(0, 80);
+  }
+  const kind = extractedKindForLightbox(item.kind, item.src);
+  return filenameForImage(
+    {
+      id: "lightbox",
+      kind,
+      name: item.name,
+      source: item.src,
+      raw: item.src,
+    },
+    1,
+  );
+}
+
+function markdownComponents(
+  onImageClick: (src: string, meta?: Partial<LightboxItem>) => void,
+  isUser: boolean,
+) {
   return {
     p: ({ children }: { children?: React.ReactNode }) => (
       <p className="mb-3 last:mb-0">{children}</p>
@@ -234,7 +283,13 @@ function markdownComponents(onImageClick: (src: string) => void, isUser: boolean
     img: ({ src, alt }: { src?: string; alt?: string }) => (
       <button
         className="my-2 block overflow-hidden rounded-lg border border-white/10 bg-white/[0.06] transition hover:border-brand-300/30"
-        onClick={() => src && onImageClick(src)}
+        onClick={() =>
+          src &&
+          onImageClick(src, {
+            kind: inferLightboxKind(src),
+            name: alt ?? "Markdown 图片",
+          })
+        }
         type="button"
       >
         <img
@@ -270,9 +325,13 @@ function MessageBubble({
 }: {
   message: ChatMessage;
   isSending: boolean;
-  onImageClick: (src: string) => void;
+  onImageClick: (src: string, meta?: Partial<LightboxItem>) => void;
 }) {
   const isUser = message.role === "user";
+  const { text: cleanedContent, images: extractedImages } = useMemo(
+    () => extractImages(message.displayContent),
+    [message.displayContent],
+  );
 
   return (
     <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
@@ -296,7 +355,12 @@ function MessageBubble({
               <button
                 className="overflow-hidden rounded-lg border border-white/20 bg-white/10 transition hover:border-brand-300/40"
                 key={image.id}
-                onClick={() => onImageClick(image.url)}
+                onClick={() =>
+                  onImageClick(image.url, {
+                    kind: "upload",
+                    name: image.name,
+                  })
+                }
                 type="button"
               >
                 <img
@@ -309,13 +373,52 @@ function MessageBubble({
           </div>
         ) : null}
 
-        {message.displayContent ? (
+        {extractedImages.length > 0 ? (
+          <div className="mb-3 flex flex-wrap gap-2">
+            {extractedImages.map((image, index) => (
+              <button
+                aria-label={`预览 ${image.name}`}
+                className="group overflow-hidden rounded-lg border border-white/15 bg-white/[0.055] text-left transition hover:border-brand-300/40 focus:outline-none focus:ring-4 focus:ring-brand-300/10"
+                key={image.id}
+                onClick={() =>
+                  onImageClick(image.source, {
+                    kind: image.kind,
+                    name: image.name,
+                  })
+                }
+                type="button"
+              >
+                <img
+                  alt={image.name}
+                  className="h-32 w-32 bg-ink-950/70 object-contain sm:h-40 sm:w-40"
+                  src={image.source}
+                />
+                <div className="border-t border-white/10 px-2 py-1">
+                  <p className="truncate text-[11px] font-semibold text-slate-100">
+                    {filenameForImage(image, index + 1)}
+                  </p>
+                  <p className="text-[10px] text-slate-400">
+                    {image.kind === "svg"
+                      ? "SVG"
+                      : image.kind === "data"
+                        ? "Data URL"
+                        : "URL"}
+                  </p>
+                </div>
+              </button>
+            ))}
+          </div>
+        ) : null}
+
+        {cleanedContent ? (
           <ReactMarkdown
             components={markdownComponents(onImageClick, isUser)}
             remarkPlugins={[remarkGfm]}
           >
-            {message.displayContent}
+            {cleanedContent}
           </ReactMarkdown>
+        ) : extractedImages.length > 0 ? (
+          <p className="text-xs text-slate-400">图片已从文本中分离，可点击预览或下载。</p>
         ) : isSending && !isUser ? (
           <span className="inline-flex items-center gap-2 text-slate-300">
             思考中
@@ -375,7 +478,7 @@ export default function ChatPage() {
   const [isUploadingImage, setIsUploadingImage] = useState(false);
   const [isDraggingImage, setIsDraggingImage] = useState(false);
   const [error, setError] = useState("");
-  const [lightboxImage, setLightboxImage] = useState<string | null>(null);
+  const [lightboxImage, setLightboxImage] = useState<LightboxItem | null>(null);
   const [promptSidebarOpen, setPromptSidebarOpen] = useState(false);
   const [superPromptMode, setSuperPromptMode] = useState(false);
   const [advancedParamsOpen, setAdvancedParamsOpen] = useState(
@@ -397,6 +500,17 @@ export default function ChatPage() {
   const messageViewportRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const openLightbox = useCallback(
+    (src: string, meta?: Partial<LightboxItem>) => {
+      setLightboxImage({
+        src,
+        kind: meta?.kind ?? inferLightboxKind(src),
+        name: meta?.name ?? "图片",
+      });
+    },
+    [],
+  );
 
   useEffect(() => {
     document.title = agentInterview
@@ -1055,7 +1169,7 @@ export default function ChatPage() {
                         isSending={isSending}
                         key={message.id}
                         message={message}
-                        onImageClick={setLightboxImage}
+                        onImageClick={openLightbox}
                       />
                     ))}
                     <div ref={scrollRef} />
@@ -1240,17 +1354,78 @@ export default function ChatPage() {
       </div>
 
       {lightboxImage ? (
-        <button
+        <div
           className="fixed inset-0 z-[70] flex cursor-zoom-out items-center justify-center bg-slate-950/90 p-4"
           onClick={() => setLightboxImage(null)}
-          type="button"
         >
-          <img
-            alt="放大预览"
-            className="max-h-full max-w-full rounded-lg object-contain shadow-2xl"
-            src={lightboxImage}
-          />
-        </button>
+          <div
+            className="flex max-h-full max-w-full cursor-default flex-col items-center"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="mb-3 flex w-full max-w-[92vw] flex-col gap-2 rounded-lg border border-white/10 bg-ink-950/90 px-3 py-2 text-sm text-slate-100 shadow-prism sm:flex-row sm:items-center sm:justify-between">
+              <div className="min-w-0">
+                <p className="truncate font-semibold">{lightboxImage.name}</p>
+                <p className="text-xs text-slate-400">
+                  {lightboxImage.kind === "upload"
+                    ? "上传图片"
+                    : lightboxImage.kind.toUpperCase()}
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  className="rounded-md border border-white/15 bg-white/5 px-3 py-1.5 text-xs font-semibold text-slate-100 transition hover:border-brand-300/40 hover:text-brand-100 focus:outline-none focus:ring-4 focus:ring-brand-300/10"
+                  onClick={() =>
+                    void downloadImage(
+                      lightboxImage.src,
+                      lightboxFilename(lightboxImage),
+                    )
+                  }
+                  type="button"
+                >
+                  保存原图
+                </button>
+                {lightboxImage.src.startsWith("data:image/svg+xml") ? (
+                  <button
+                    className="rounded-md border border-white/15 bg-white/5 px-3 py-1.5 text-xs font-semibold text-slate-100 transition hover:border-brand-300/40 hover:text-brand-100 focus:outline-none focus:ring-4 focus:ring-brand-300/10"
+                    onClick={() =>
+                      void (async () => {
+                        try {
+                          const pngSource = await svgDataUrlToPng(
+                            lightboxImage.src,
+                            2,
+                          );
+                          await downloadImage(
+                            pngSource,
+                            `${lightboxImage.name.replace(/[^A-Za-z0-9_-]+/g, "_") || "image"}.png`,
+                          );
+                        } catch {
+                          window.alert(
+                            "SVG 转 PNG 失败，可能包含外部资源。请先保存 SVG 原图后再处理。",
+                          );
+                        }
+                      })()
+                    }
+                    type="button"
+                  >
+                    保存为 PNG
+                  </button>
+                ) : null}
+                <button
+                  className="rounded-md border border-white/15 bg-white/5 px-3 py-1.5 text-xs font-semibold text-slate-100 transition hover:border-brand-300/40 hover:text-brand-100 focus:outline-none focus:ring-4 focus:ring-brand-300/10"
+                  onClick={() => setLightboxImage(null)}
+                  type="button"
+                >
+                  关闭
+                </button>
+              </div>
+            </div>
+            <img
+              alt={lightboxImage.name}
+              className="max-h-[85vh] max-w-[92vw] rounded-lg object-contain shadow-2xl"
+              src={lightboxImage.src}
+            />
+          </div>
+        </div>
       ) : null}
     </main>
   );

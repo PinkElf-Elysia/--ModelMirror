@@ -64,8 +64,17 @@ except ModuleNotFoundError:
 
 load_dotenv()
 
-API_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
+LLM_GATEWAY_URL = os.getenv(
+    "LLM_GATEWAY_URL",
+    "http://localhost:3000/v1/chat/completions",
+).strip()
+LLM_GATEWAY_KEY = os.getenv("LLM_GATEWAY_KEY", "").strip()
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
+API_KEY = OPENROUTER_API_KEY
 CHAT_COMPLETIONS_URL = "https://openrouter.ai/api/v1/chat/completions"
+LLM_GATEWAY_NOT_CONFIGURED_MESSAGE = (
+    "LLM 网关未配置，请设置环境变量 LLM_GATEWAY_KEY 或 OPENROUTER_API_KEY。"
+)
 APP_REFERER = os.getenv("OPENROUTER_HTTP_REFERER", "http://localhost:5173").strip()
 APP_TITLE = os.getenv("OPENROUTER_APP_TITLE", "ModelMirror").strip()
 FUSION_MODEL_ID = "openrouter/fusion"
@@ -588,14 +597,35 @@ def proxy_url() -> str | None:
     )
 
 
-def openrouter_headers() -> dict[str, str]:
+def get_llm_gateway_config() -> tuple[str, str]:
+    """Return the active OpenAI-compatible gateway URL and API key."""
+
+    if LLM_GATEWAY_URL and LLM_GATEWAY_KEY:
+        return LLM_GATEWAY_URL, LLM_GATEWAY_KEY
+    if API_KEY:
+        return CHAT_COMPLETIONS_URL, API_KEY
+    return "", ""
+
+
+def llm_gateway_headers(key: str) -> dict[str, str]:
+    """Build headers for newAPI or OpenRouter-compatible LLM gateways."""
+
+    referer = APP_REFERER or "https://modelmirror.local"
+    title = APP_TITLE or "ModelMirror"
     return {
-        "Authorization": f"Bearer {API_KEY}",
+        "Authorization": f"Bearer {key}",
         "Content-Type": "application/json",
-        "HTTP-Referer": APP_REFERER,
-        "X-Title": APP_TITLE,
-        "X-OpenRouter-Title": APP_TITLE,
+        "HTTP-Referer": referer,
+        "X-Title": title,
+        "X-OpenRouter-Title": title,
     }
+
+
+def openrouter_headers() -> dict[str, str]:
+    """Backward-compatible alias for legacy OpenRouter call sites."""
+
+    _, key = get_llm_gateway_config()
+    return llm_gateway_headers(key) if key else {}
 
 
 def build_upstream_payload(
@@ -670,13 +700,19 @@ def build_chat_payload_from_messages(
     return payload
 
 
-def openrouter_client_kwargs() -> dict[str, Any]:
+def llm_client_kwargs() -> dict[str, Any]:
     timeout = httpx.Timeout(connect=15, read=None, write=30, pool=10)
     client_kwargs: dict[str, Any] = {"timeout": timeout}
     proxy = proxy_url()
     if proxy:
         client_kwargs["proxy"] = proxy
     return client_kwargs
+
+
+def openrouter_client_kwargs() -> dict[str, Any]:
+    """Backward-compatible alias for legacy OpenRouter client settings."""
+
+    return llm_client_kwargs()
 
 
 def completion_text_from_payload(payload: dict[str, Any]) -> str:
@@ -706,6 +742,9 @@ async def collect_chat_completion_text(
     temperature: float = 0.7,
     max_tokens: int = 2048,
 ) -> str:
+    url, key = get_llm_gateway_config()
+    if not url:
+        raise RuntimeError(LLM_GATEWAY_NOT_CONFIGURED_MESSAGE)
     request_payload = build_chat_payload_from_messages(
         model_id,
         messages,
@@ -714,10 +753,10 @@ async def collect_chat_completion_text(
         max_tokens=max_tokens,
     )
 
-    async with httpx.AsyncClient(**openrouter_client_kwargs()) as client:
+    async with httpx.AsyncClient(**llm_client_kwargs()) as client:
         response = await client.post(
-            CHAT_COMPLETIONS_URL,
-            headers=openrouter_headers(),
+            url,
+            headers=llm_gateway_headers(key),
             json=request_payload,
         )
         if response.status_code >= 400:
@@ -740,6 +779,9 @@ async def stream_chat_text(
     max_tokens: int = 2048,
     extra: dict[str, Any] | None = None,
 ) -> AsyncIterator[str]:
+    url, key = get_llm_gateway_config()
+    if not url:
+        raise RuntimeError(LLM_GATEWAY_NOT_CONFIGURED_MESSAGE)
     request_payload = build_chat_payload_from_messages(
         model_id,
         messages,
@@ -749,12 +791,12 @@ async def stream_chat_text(
         extra=extra,
     )
 
-    async with httpx.AsyncClient(**openrouter_client_kwargs()) as client:
+    async with httpx.AsyncClient(**llm_client_kwargs()) as client:
         response = await client.send(
             client.build_request(
                 "POST",
-                CHAT_COMPLETIONS_URL,
-                headers=openrouter_headers(),
+                url,
+                headers=llm_gateway_headers(key),
                 json=request_payload,
             ),
             stream=True,
@@ -1202,11 +1244,9 @@ async def stream_workflow_llm_text(
     model_id: str,
     prompt: str,
 ) -> AsyncIterator[str]:
-    timeout = httpx.Timeout(connect=15, read=None, write=30, pool=10)
-    proxy = proxy_url()
-    client_kwargs: dict[str, Any] = {"timeout": timeout}
-    if proxy:
-        client_kwargs["proxy"] = proxy
+    url, key = get_llm_gateway_config()
+    if not url:
+        raise RuntimeError(LLM_GATEWAY_NOT_CONFIGURED_MESSAGE)
 
     messages = [ChatMessage(role="user", content=prompt)]
     chat_payload = ChatRequest(
@@ -1217,13 +1257,13 @@ async def stream_workflow_llm_text(
     )
     current_model_id = model_id
 
-    async with httpx.AsyncClient(**client_kwargs) as client:
+    async with httpx.AsyncClient(**llm_client_kwargs()) as client:
         async def open_stream(candidate_model_id: str) -> httpx.Response:
             return await client.send(
                 client.build_request(
                     "POST",
-                    CHAT_COMPLETIONS_URL,
-                    headers=openrouter_headers(),
+                    url,
+                    headers=llm_gateway_headers(key),
                     json=build_upstream_payload(chat_payload, candidate_model_id),
                 ),
                 stream=True,
@@ -1280,10 +1320,10 @@ async def run_workflow(payload: WorkflowRunRequest, request: Request):
         == "llm"
         for node in payload.workflow.nodes
     )
-    if requires_model and not API_KEY:
+    if requires_model and not get_llm_gateway_config()[0]:
         return JSONResponse(
             status_code=500,
-            content={"error": "后端密钥尚未配置，请先设置环境变量 OPENROUTER_API_KEY。"},
+            content={"error": LLM_GATEWAY_NOT_CONFIGURED_MESSAGE},
         )
 
     try:
@@ -1690,7 +1730,7 @@ async def run_workflow(payload: WorkflowRunRequest, request: Request):
                         schema = str(node.data.get("schema") or "")
                         model_id = str(node.data.get("modelId") or TEXT_FALLBACK_MODEL)
                         input_text = variables.get(input_variable, "")
-                        if not API_KEY:
+                        if not get_llm_gateway_config()[0]:
                             output = "{}"
                             variables[output_variable] = output
                             yield sse_payload(
@@ -1699,7 +1739,7 @@ async def run_workflow(payload: WorkflowRunRequest, request: Request):
                                     "node_id": node.id,
                                     "node_title": title,
                                     "node_type": kind,
-                                    "output": "LLM not configured; returned {}",
+                                    "output": "LLM gateway not configured; returned {}",
                                     "variable": output_variable,
                                 }
                             )
@@ -2051,9 +2091,9 @@ async def run_workflow(payload: WorkflowRunRequest, request: Request):
                                     f"已分类：{selected}（关键词命中：{matched_keyword}）"
                                 )
                             elif use_llm_fallback:
-                                if not API_KEY or not model_id:
+                                if not get_llm_gateway_config()[0] or not model_id:
                                     raise ValueError(
-                                        "LLM 回退未配置 API Key 或 modelId。"
+                                        "LLM 回退未配置网关或 modelId。"
                                     )
                                 fallback_prompt = str(
                                     node.data.get("llmFallbackPrompt") or ""
@@ -2178,8 +2218,8 @@ async def run_workflow(payload: WorkflowRunRequest, request: Request):
                             max_iterations = min(max(max_iterations, 1), 20)
 
                             async def run_direct_agent() -> str:
-                                if not API_KEY:
-                                    raise ValueError("OpenRouter API Key 未配置。")
+                                if not get_llm_gateway_config()[0]:
+                                    raise ValueError(LLM_GATEWAY_NOT_CONFIGURED_MESSAGE)
                                 return await collect_chat_completion_text(
                                     model_id,
                                     [ChatMessage(role="user", content=instruction)],
@@ -2267,8 +2307,8 @@ async def run_workflow(payload: WorkflowRunRequest, request: Request):
                                         ChatMessage(role="user", content=instruction),
                                     ]
                                     for iteration_index in range(max_iterations):
-                                        if not API_KEY:
-                                            raise ValueError("OpenRouter API Key 未配置。")
+                                        if not get_llm_gateway_config()[0]:
+                                            raise ValueError(LLM_GATEWAY_NOT_CONFIGURED_MESSAGE)
                                         raw_response = (
                                             await collect_chat_completion_text(
                                                 model_id,
@@ -2669,10 +2709,10 @@ async def get_workflow_task_status(task_id: str):
 
 @app.post("/api/fusion/chat")
 async def fusion_chat(payload: FusionChatRequest, request: Request):
-    if not API_KEY:
+    if not get_llm_gateway_config()[0]:
         return JSONResponse(
             status_code=500,
-            content={"error": "后端密钥尚未配置，请先设置环境变量 OPENROUTER_API_KEY。"},
+            content={"error": LLM_GATEWAY_NOT_CONFIGURED_MESSAGE},
         )
 
     try:
@@ -2834,10 +2874,10 @@ async def fusion_chat(payload: FusionChatRequest, request: Request):
 
 @app.post("/api/route-agent")
 async def route_agent(payload: RouteAgentRequest, request: Request):
-    if not API_KEY:
+    if not get_llm_gateway_config()[0]:
         return JSONResponse(
             status_code=500,
-            content={"error": "后端密钥尚未配置，请先设置环境变量 OPENROUTER_API_KEY。"},
+            content={"error": LLM_GATEWAY_NOT_CONFIGURED_MESSAGE},
         )
     if not AGENT_RECORDS:
         return JSONResponse(status_code=500, content={"error": "智能体索引尚未生成。"})
@@ -2914,10 +2954,10 @@ async def route_agent(payload: RouteAgentRequest, request: Request):
 
 @app.post("/api/team/chat")
 async def team_chat(payload: TeamChatRequest, request: Request):
-    if not API_KEY:
+    if not get_llm_gateway_config()[0]:
         return JSONResponse(
             status_code=500,
-            content={"error": "后端密钥尚未配置，请先设置环境变量 OPENROUTER_API_KEY。"},
+            content={"error": LLM_GATEWAY_NOT_CONFIGURED_MESSAGE},
         )
 
     try:
@@ -3194,10 +3234,11 @@ async def disconnect_mcp_server(session_id: str):
 
 @app.post("/api/chat")
 async def chat(payload: ChatRequest, request: Request):
-    if not API_KEY:
+    url, key = get_llm_gateway_config()
+    if not url:
         return JSONResponse(
             status_code=500,
-            content={"error": "后端密钥尚未配置，请先设置环境变量 OPENROUTER_API_KEY。"},
+            content={"error": LLM_GATEWAY_NOT_CONFIGURED_MESSAGE},
         )
 
     try:
@@ -3216,13 +3257,7 @@ async def chat(payload: ChatRequest, request: Request):
             content={"error": "后端校验请求时出错，请查看服务日志。"},
         )
 
-    timeout = httpx.Timeout(connect=15, read=None, write=30, pool=10)
-    proxy = proxy_url()
-    client_kwargs: dict[str, Any] = {"timeout": timeout}
-    if proxy:
-        client_kwargs["proxy"] = proxy
-
-    client = httpx.AsyncClient(**client_kwargs)
+    client = httpx.AsyncClient(**llm_client_kwargs())
     actual_model_id = payload.model_id
     fallback_notice = ""
 
@@ -3231,8 +3266,8 @@ async def chat(payload: ChatRequest, request: Request):
         return await client.send(
             client.build_request(
                 "POST",
-                CHAT_COMPLETIONS_URL,
-                headers=openrouter_headers(),
+                url,
+                headers=llm_gateway_headers(key),
                 json=build_upstream_payload(payload, model_id),
             ),
             stream=True,
