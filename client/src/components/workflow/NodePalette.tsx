@@ -81,6 +81,24 @@ const paletteItems: PaletteItem[] = [
     description: "根据关键词规则把输入文本分类为预设类别。可与条件节点串联做分流。",
   },
   {
+    kind: "agent",
+    icon: "🤖",
+    title: "Agent 节点",
+    description: "模型驱动的任务执行节点，支持工具循环和直接回答两种模式。",
+  },
+  {
+    kind: "mcp_tool",
+    icon: "🔧",
+    title: "MCP Tool",
+    description: "调用已连接 MCP Server 暴露的工具，参数支持 {{变量}} 模板。",
+  },
+  {
+    kind: "time_tool",
+    icon: "🕒",
+    title: "时间工具",
+    description: "获取当前时间、时间戳或按格式输出日期文本。",
+  },
+  {
     kind: "http_request",
     icon: "🌐",
     title: "HTTP 请求",

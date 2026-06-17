@@ -90,6 +90,9 @@ interface NativeWorkflowDefinition extends WorkflowDefinition {
 | `knowledge_retrieval` | `knowledge-retrieval` | native 复用本地 RAG 服务；索引未就绪时返回 warning，不中断流程。 |
 | `document_extractor` | `document-extractor` | native 仅读取受限目录内本地文件，不提供上传 UI。 |
 | `question_classifier` | `question-classifier` / 问题分类器 | native 仅支持关键词规则分类，可选 LLM 回退默认关闭。 |
+| `agent` | `agent` | native 提供 ReAct-Lite Agent，支持直接回答和 MCP 工具循环两种模式。 |
+| `mcp_tool` | `tool` / MCP 工具 | native 调用全局 MCP 工具注册表中已连接的工具，需先在 `/mcps` 建立 Server 会话。 |
+| `time_tool` | 时间工具 | native 获取当前时间、时间戳或格式化日期文本，不依赖外部服务。 |
 | `http_request` | `http-request` | native 仅支持 GET/POST 文本响应，默认关闭真实出站请求。 |
 | `list_operation` | `list-operator` | native 当前基于逗号分隔字符串，尚无完整数组变量系统。 |
 | `iteration` | `iteration` | native 当前只做节点内迭代，不执行跨节点子图。 |
@@ -97,7 +100,7 @@ interface NativeWorkflowDefinition extends WorkflowDefinition {
 
 参考点：Dify 工作流由节点、边、变量和运行态组成；native 当前只借鉴节点概念、拓扑顺序和静态校验分类，不复制 Dify 源码实现。
 
-暂不接入的节点：`agent`、问题理解、工具。这些能力分别依赖 Agent 编排、MCP 工具协议或新的异步交互模型，需要独立设计文档和测试护栏后再进入 native 实验线。
+暂不接入的节点：问题理解、复杂多 Agent 协作、人工介入之外的复杂审批流。这些能力依赖更完整的编排或新的异步交互模型，需要独立设计文档和测试护栏后再进入 native 实验线。
 
 ## API 契约
 
@@ -293,6 +296,7 @@ npm.cmd run build
 | --- | --- | --- |
 | `human_intervention` | `human-in-the-loop` | native 运行器通过 SSE 暂停并等待 `/api/workflow/run/{task_id}/resume`，Dify 可提供更完整的人工审批和运行态管理。 |
 | `question_classifier` | `question-classifier` / 问题分类器 | native 仅支持关键词规则分类文本到预设类别，可选 LLM 回退；Dify 可扩展为分类模型。 |
+| `agent` | `agent` | native 当前提供 ReAct-Lite：模型用 JSON 决策直接回答或调用已注册 MCP 工具；复杂多 Agent 编排后续独立设计。 |
 
 ### 校验规则
 
@@ -400,6 +404,36 @@ curl http://localhost:8000/api/workflow/run/<task_id>/status
 - LLM 回退默认关闭，常规分类不产生模型调用成本。
 - 开启 LLM 回退但未配置 API Key 或 `modelId` 时，运行器会记录 `error` 事件并写入 `defaultCategory`，不会中断工作流。
 - `categories` 只接受 JSON 对象和字符串数组，不支持正则、脚本或 DSL。
+
+## 2026-06-17 增量：MCP 工具与时间工具节点
+
+`mcp_tool` 与 `time_tool` 已进入 workflow-native / classic 共享实验线。
+
+- `mcp_tool` 字段：`toolName`、`argumentsJson`、`outputVariable`。运行前需要先在 `/mcps` 连接 MCP Server，工具进入全局注册表后才能被调用。`argumentsJson` 支持 `{{variable}}` 模板，模板替换后必须仍是 JSON 对象。
+- `time_tool` 字段：`operation`、`formatString`、`outputVariable`。`operation` 支持 `now_iso`、`now_epoch`、`format`。
+- 安全边界：`mcp_tool` 可通过 `WORKFLOW_MCP_TOOL_ENABLED=False` 降级为 no-op；`time_tool` 可通过 `WORKFLOW_TIME_TOOL_ENABLED=False` 降级为 no-op。工具调用失败时写入空字符串并继续后续节点。
+
+## 2026-06-17 增量：Agent 节点
+
+`agent` 已进入 workflow-native / classic 共享实验线。它不是完整 Dify Agent 复刻，而是 ReAct-Lite MVP：模型要么直接返回答案，要么返回一个 JSON 工具调用决策，运行器再通过全局 MCP 工具注册表调用对应工具。
+
+### 字段
+
+- `agentMode`：`tool_first` 或 `direct`。默认 `tool_first`。
+- `instruction`：任务指令，支持 `{{variable}}` 模板。
+- `modelId`：调用模型 ID。
+- `toolNames`：可选，逗号分隔的工具白名单；留空代表全部已注册工具。
+- `outputVariable`：Agent 最终输出变量。
+- `maxIterations`：工具循环上限，默认 5，运行器最多允许 20。
+- `temperature`：模型温度，范围 0-2。
+- `promptSuffix`：可选补充提示词，支持 `{{variable}}` 模板。
+
+### 安全边界
+
+- `agent` 可通过 `WORKFLOW_AGENT_ENABLED=False` 降级为 no-op。
+- `tool_first` 模式依赖 `/mcps` 已连接的 MCP Server；没有可用工具时会切换到直接回答。
+- 未配置 API Key、模型调用失败或工具调用失败时，运行器发出 `error` 事件并写入空字符串，不中断后续节点。
+- 当前只支持单 Agent 节点内的轻量工具循环，不实现复杂多 Agent 协作、记忆、长期任务或持久化运行态。
 
 ## 回退方案
 

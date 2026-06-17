@@ -13,6 +13,9 @@ export type WorkflowNodeKind =
   | "document_extractor"
   | "human_intervention"
   | "question_classifier"
+  | "agent"
+  | "mcp_tool"
+  | "time_tool"
   | "http_request"
   | "list_operation"
   | "iteration"
@@ -56,6 +59,17 @@ export interface WorkflowNodeData extends Record<string, unknown> {
   caseSensitive?: string;
   useLlmFallback?: string;
   llmFallbackPrompt?: string;
+  agentMode?: string;
+  instruction?: string;
+  toolNames?: string;
+  maxIterations?: string;
+  temperature?: string;
+  promptSuffix?: string;
+  toolName?: string;
+  argumentsJson?: string;
+  errorMode?: string;
+  operation?: string;
+  formatString?: string;
   url?: string;
   method?: HttpRequestMethod;
   headersJson?: string;

@@ -549,6 +549,125 @@ async def test_validate_question_classifier_invalid_categories_json(
 
 
 @pytest.mark.asyncio
+async def test_validate_mcp_tool_ok_and_invalid_json(
+    client: httpx.AsyncClient,
+) -> None:
+    workflow = linear_workflow()
+    workflow["nodes"][1] = {
+        "id": "mcp",
+        "type": "mcp_tool",
+        "data": {
+            "kind": "mcp_tool",
+            "toolName": "filesystem_read_file",
+            "argumentsJson": '{"path":"{{user_input}}"}',
+            "outputVariable": "mcp_output",
+        },
+    }
+    workflow["nodes"][2]["data"]["outputVariable"] = "mcp_output"
+    workflow["edges"] = [
+        {"id": "e1", "source": "input", "target": "mcp"},
+        {"id": "e2", "source": "mcp", "target": "output"},
+    ]
+
+    data = await validate(client, workflow)
+
+    assert data["valid"] is True
+
+    workflow["nodes"][1]["data"]["argumentsJson"] = "{invalid json"
+    data = await validate(client, workflow)
+
+    assert data["valid"] is False
+    assert "invalid_arguments_json" in issue_codes(data)
+
+
+@pytest.mark.asyncio
+async def test_validate_time_tool_ok_and_invalid_operation(
+    client: httpx.AsyncClient,
+) -> None:
+    workflow = linear_workflow()
+    workflow["nodes"][1] = {
+        "id": "time",
+        "type": "time_tool",
+        "data": {
+            "kind": "time_tool",
+            "operation": "now_iso",
+            "formatString": "%Y-%m-%d %H:%M:%S",
+            "outputVariable": "current_time",
+        },
+    }
+    workflow["nodes"][2]["data"]["outputVariable"] = "current_time"
+    workflow["edges"] = [
+        {"id": "e1", "source": "input", "target": "time"},
+        {"id": "e2", "source": "time", "target": "output"},
+    ]
+
+    data = await validate(client, workflow)
+
+    assert data["valid"] is True
+
+    workflow["nodes"][1]["data"]["operation"] = "unsupported_op"
+    data = await validate(client, workflow)
+
+    assert data["valid"] is False
+    assert "invalid_time_operation" in issue_codes(data)
+
+
+@pytest.mark.asyncio
+async def test_validate_agent_ok(client: httpx.AsyncClient) -> None:
+    workflow = linear_workflow()
+    workflow["nodes"][1] = {
+        "id": "agent",
+        "type": "agent",
+        "data": {
+            "kind": "agent",
+            "agentMode": "tool_first",
+            "instruction": "请处理：{{user_input}}",
+            "modelId": "deepseek/deepseek-chat",
+            "toolNames": "",
+            "outputVariable": "agent_output",
+            "maxIterations": "5",
+            "temperature": "0.7",
+            "promptSuffix": "",
+        },
+    }
+    workflow["nodes"][2]["data"]["outputVariable"] = "agent_output"
+    workflow["edges"] = [
+        {"id": "e1", "source": "input", "target": "agent"},
+        {"id": "e2", "source": "agent", "target": "output"},
+    ]
+
+    data = await validate(client, workflow)
+
+    assert data["valid"] is True
+
+
+@pytest.mark.asyncio
+async def test_validate_agent_invalid_mode(client: httpx.AsyncClient) -> None:
+    workflow = linear_workflow()
+    workflow["nodes"][1] = {
+        "id": "agent",
+        "type": "agent",
+        "data": {
+            "kind": "agent",
+            "agentMode": "autopilot",
+            "instruction": "请处理：{{user_input}}",
+            "modelId": "deepseek/deepseek-chat",
+            "outputVariable": "agent_output",
+        },
+    }
+    workflow["nodes"][2]["data"]["outputVariable"] = "agent_output"
+    workflow["edges"] = [
+        {"id": "e1", "source": "input", "target": "agent"},
+        {"id": "e2", "source": "agent", "target": "output"},
+    ]
+
+    data = await validate(client, workflow)
+
+    assert data["valid"] is False
+    assert "invalid_agent_mode" in issue_codes(data)
+
+
+@pytest.mark.asyncio
 async def test_templates_endpoint_returns_starter_template(
     client: httpx.AsyncClient,
 ) -> None:

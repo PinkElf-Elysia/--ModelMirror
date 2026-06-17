@@ -40,6 +40,13 @@ NODE_KIND_ALIASES = {
     "human-in-the-loop": "human_intervention",
     "question_classifier": "question_classifier",
     "question-classifier": "question_classifier",
+    "agent": "agent",
+    "mcp_tool": "mcp_tool",
+    "mcp-tool": "mcp_tool",
+    "tool": "mcp_tool",
+    "time_tool": "time_tool",
+    "time-tool": "time_tool",
+    "time": "time_tool",
     "http_request": "http_request",
     "http-request": "http_request",
     "list_operation": "list_operation",
@@ -65,6 +72,9 @@ SUPPORTED_NODE_KINDS = {
     "document_extractor",
     "human_intervention",
     "question_classifier",
+    "agent",
+    "mcp_tool",
+    "time_tool",
     "http_request",
     "list_operation",
     "iteration",
@@ -596,6 +606,171 @@ def validate_node_configuration(
                 )
             )
 
+    if kind == "agent":
+        instruction = str(data.get("instruction") or "").strip()
+        if not instruction:
+            issues.append(
+                ValidationIssue(
+                    code="missing_instruction",
+                    message="Agent node needs data.instruction.",
+                    node_id=node.id,
+                )
+            )
+
+        model_id = str(data.get("modelId") or "").strip()
+        if not model_id:
+            issues.append(
+                ValidationIssue(
+                    code="missing_model_id",
+                    message="Agent node needs data.modelId.",
+                    node_id=node.id,
+                )
+            )
+
+        output_variable = str(data.get("outputVariable") or "").strip()
+        if not output_variable:
+            issues.append(
+                ValidationIssue(
+                    code="missing_output_variable",
+                    message="Agent node needs data.outputVariable.",
+                    node_id=node.id,
+                )
+            )
+        elif not is_variable_name(output_variable):
+            issues.append(
+                ValidationIssue(
+                    code="invalid_output_variable",
+                    message="Agent outputVariable must be an identifier.",
+                    node_id=node.id,
+                )
+            )
+
+        agent_mode = str(data.get("agentMode") or "tool_first").strip()
+        if agent_mode not in {"tool_first", "direct"}:
+            issues.append(
+                ValidationIssue(
+                    code="invalid_agent_mode",
+                    message="Agent agentMode must be tool_first or direct.",
+                    node_id=node.id,
+                )
+            )
+
+        max_iterations = str(data.get("maxIterations") or "").strip()
+        if max_iterations:
+            try:
+                max_iterations_value = int(max_iterations)
+            except ValueError:
+                max_iterations_value = 0
+            if max_iterations_value < 1:
+                issues.append(
+                    ValidationIssue(
+                        code="invalid_max_iterations",
+                        message="Agent maxIterations must be a positive integer.",
+                        node_id=node.id,
+                    )
+                )
+
+        temperature = str(data.get("temperature") or "").strip()
+        if temperature:
+            try:
+                temperature_value = float(temperature)
+            except ValueError:
+                temperature_value = -1.0
+            if temperature_value < 0 or temperature_value > 2:
+                issues.append(
+                    ValidationIssue(
+                        code="invalid_temperature",
+                        message="Agent temperature must be between 0 and 2.",
+                        node_id=node.id,
+                    )
+                )
+
+    if kind == "mcp_tool":
+        tool_name = str(data.get("toolName") or "").strip()
+        if not tool_name:
+            issues.append(
+                ValidationIssue(
+                    code="missing_tool_name",
+                    message="MCP tool node needs data.toolName.",
+                    node_id=node.id,
+                )
+            )
+        arguments_json = str(data.get("argumentsJson") or "").strip()
+        if not arguments_json:
+            issues.append(
+                ValidationIssue(
+                    code="missing_arguments",
+                    message="MCP tool node needs data.argumentsJson.",
+                    node_id=node.id,
+                )
+            )
+        else:
+            try:
+                parsed_arguments = json.loads(arguments_json)
+            except ValueError:
+                parsed_arguments = None
+            if not isinstance(parsed_arguments, dict):
+                issues.append(
+                    ValidationIssue(
+                        code="invalid_arguments_json",
+                        message="MCP tool argumentsJson must be a JSON object.",
+                        node_id=node.id,
+                    )
+                )
+        output_variable = str(data.get("outputVariable") or "").strip()
+        if not output_variable:
+            issues.append(
+                ValidationIssue(
+                    code="missing_output_variable",
+                    message="MCP tool node needs data.outputVariable.",
+                    node_id=node.id,
+                )
+            )
+        elif not is_variable_name(output_variable):
+            issues.append(
+                ValidationIssue(
+                    code="invalid_output_variable",
+                    message="MCP tool outputVariable must be an identifier.",
+                    node_id=node.id,
+                )
+            )
+
+    if kind == "time_tool":
+        operation = str(data.get("operation") or "").strip()
+        if not operation:
+            issues.append(
+                ValidationIssue(
+                    code="missing_time_operation",
+                    message="Time tool node needs data.operation.",
+                    node_id=node.id,
+                )
+            )
+        elif operation not in {"now_iso", "now_epoch", "format"}:
+            issues.append(
+                ValidationIssue(
+                    code="invalid_time_operation",
+                    message="Time tool operation must be now_iso, now_epoch, or format.",
+                    node_id=node.id,
+                )
+            )
+        output_variable = str(data.get("outputVariable") or "").strip()
+        if not output_variable:
+            issues.append(
+                ValidationIssue(
+                    code="missing_output_variable",
+                    message="Time tool node needs data.outputVariable.",
+                    node_id=node.id,
+                )
+            )
+        elif not is_variable_name(output_variable):
+            issues.append(
+                ValidationIssue(
+                    code="invalid_output_variable",
+                    message="Time tool outputVariable must be an identifier.",
+                    node_id=node.id,
+                )
+            )
+
     if kind == "http_request":
         if not str(data.get("url") or "").strip():
             issues.append(
@@ -789,6 +964,9 @@ def collect_declared_variables(
             "document_extractor",
             "human_intervention",
             "question_classifier",
+            "agent",
+            "mcp_tool",
+            "time_tool",
             "http_request",
             "list_operation",
             "iteration",
@@ -970,6 +1148,43 @@ def validate_variable_references(
                     )
                 )
 
+    if kind == "agent":
+        instruction = str(data.get("instruction") or "")
+        for variable in sorted(extract_template_variables(instruction)):
+            if variable not in available_variables:
+                issues.append(
+                    ValidationIssue(
+                        code="missing_template_variable",
+                        message=f"Agent instruction references undefined variable '{variable}'.",
+                        node_id=node.id,
+                    )
+                )
+        prompt_suffix = str(data.get("promptSuffix") or "")
+        for variable in sorted(extract_template_variables(prompt_suffix)):
+            if variable not in available_variables:
+                issues.append(
+                    ValidationIssue(
+                        code="missing_template_variable",
+                        message=f"Agent promptSuffix references undefined variable '{variable}'.",
+                        node_id=node.id,
+                    )
+                )
+
+    if kind == "mcp_tool":
+        arguments_json = str(data.get("argumentsJson") or "")
+        for variable in sorted(extract_template_variables(arguments_json)):
+            if variable not in available_variables:
+                issues.append(
+                    ValidationIssue(
+                        code="missing_template_variable",
+                        message=(
+                            "MCP tool argumentsJson references undefined variable "
+                            f"'{variable}'."
+                        ),
+                        node_id=node.id,
+                    )
+                )
+
     if kind == "list_operation":
         input_variable = str(data.get("inputVariable") or "").strip()
         if input_variable and input_variable not in available_variables:
@@ -1074,11 +1289,14 @@ def topological_order(
 def extract_template_variables(template: str) -> set[str]:
     """Return variables referenced through the classic {{ variable }} syntax."""
 
-    formatter_variables = {
-        field_name
-        for _, field_name, _, _ in Formatter().parse(template)
-        if field_name and is_variable_name(field_name)
-    }
+    try:
+        formatter_variables = {
+            field_name
+            for _, field_name, _, _ in Formatter().parse(template)
+            if field_name and is_variable_name(field_name)
+        }
+    except ValueError:
+        formatter_variables = set()
     moustache_variables = {
         match.group(1).strip() for match in TEMPLATE_PATTERN.finditer(template)
     }

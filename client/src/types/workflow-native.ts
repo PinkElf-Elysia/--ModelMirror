@@ -13,6 +13,9 @@ export type NativeNodeKind =
   | "document_extractor"
   | "human_intervention"
   | "question_classifier"
+  | "agent"
+  | "mcp_tool"
+  | "time_tool"
   | "http_request"
   | "list_operation"
   | "iteration"
@@ -31,6 +34,9 @@ export type DifyConceptNodeKind =
   | "document-extractor"
   | "human-in-the-loop"
   | "question-classifier"
+  | "agent"
+  | "tool"
+  | "time"
   | "http-request"
   | "list-operator"
   | "iteration"
@@ -102,6 +108,21 @@ export const difyNodeMappings: DifyNodeMapping[] = [
     native: "question_classifier",
     dify: "question-classifier",
     note: "Native classifier uses keyword rules first; Dify can extend this with model-based classification.",
+  },
+  {
+    native: "agent",
+    dify: "agent",
+    note: "Native Agent supports ReAct tool loop and direct answer modes.",
+  },
+  {
+    native: "mcp_tool",
+    dify: "tool",
+    note: "Native MCP tool calls one registered MCP tool from the global tool registry.",
+  },
+  {
+    native: "time_tool",
+    dify: "time",
+    note: "Native time tool provides current time without external dependencies.",
   },
   {
     native: "http_request",
