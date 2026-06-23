@@ -10,7 +10,12 @@ worker task. Public manager methods communicate with that task through an
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+import re
+import shlex
+import shutil
+import subprocess
 import time
 import uuid
 from contextlib import AsyncExitStack
@@ -31,6 +36,10 @@ class MCPSessionNotFoundError(MCPClientError):
     """Raised when a session id is unknown or has already been disconnected."""
 
 
+class MCPInstallError(MCPClientError):
+    """Raised when one-click MCP server installation fails."""
+
+
 FORBIDDEN_COMMAND_TOKENS = (";", "&&", "||", "|", ">", "<", "`", "$(", "\n", "\r")
 SessionOperation = Literal["list_tools", "call_tool", "disconnect"]
 
@@ -46,6 +55,16 @@ def validate_server_command(server_command: list[str]) -> None:
     for part in server_command:
         if any(token in part for token in FORBIDDEN_COMMAND_TOKENS):
             raise ValueError("server_command 包含不允许的 shell 特殊字符。")
+
+    executable = server_command[0]
+    has_path_separator = os.sep in executable or (os.altsep and os.altsep in executable)
+    if has_path_separator:
+        if not Path(executable).exists():
+            raise ValueError("MCP Server 启动失败：启动命令路径不存在，请检查配置。")
+    elif shutil.which(executable) is None:
+        raise ValueError(
+            f"MCP Server 启动失败：服务器缺少 `{executable}` 命令；请确认后端容器已安装对应运行时。"
+        )
 
 
 @dataclass(slots=True)
@@ -315,6 +334,18 @@ class MCPClientManager:
                     except Exception as exc:
                         if not command_item.future.done():
                             command_item.future.set_exception(exc)
+        except FileNotFoundError as exc:
+            managed.status = "error"
+            friendly_error = MCPClientError(
+                f"MCP Server 启动失败：服务器缺少 `{managed.command[0]}` 命令；请确认后端容器已安装对应运行时。"
+            )
+            if not ready.done():
+                ready.set_exception(friendly_error)
+            while not managed.queue.empty():
+                command_item = managed.queue.get_nowait()
+                if not command_item.future.done():
+                    command_item.future.set_exception(friendly_error)
+            raise friendly_error from exc
         except Exception as exc:
             managed.status = "error"
             if not ready.done():
@@ -424,3 +455,196 @@ class MCPClientManager:
         env = {key: value for key, value in os.environ.items() if key in allowed_keys}
         env.setdefault("NO_COLOR", "1")
         return env
+
+
+class MCPInstaller:
+    """Install and persist local MCP server setup metadata."""
+
+    def __init__(
+        self,
+        *,
+        installed_root: Path | None = None,
+        command_timeout: float = 60,
+    ) -> None:
+        self.installed_root = (
+            installed_root
+            if installed_root is not None
+            else Path(__file__).resolve().parent / "installed"
+        )
+        self.command_timeout = command_timeout
+        self.installed_root.mkdir(parents=True, exist_ok=True)
+
+    def install(
+        self,
+        *,
+        project_id: str,
+        install_command: str,
+        server_command: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Install an MCP server package or persist its config snapshot."""
+
+        safe_project_id = self._safe_project_id(project_id)
+        project_dir = self.installed_root / safe_project_id
+        project_dir.mkdir(parents=True, exist_ok=True)
+
+        metadata: dict[str, Any] = {
+            "project_id": safe_project_id,
+            "install_command": install_command,
+            "server_command": server_command or [],
+            "installed_at": time.time(),
+        }
+
+        config = self._parse_json_config(install_command)
+        if config is not None:
+            config_path = project_dir / "mcp-config.json"
+            config_path.write_text(
+                json.dumps(config, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            metadata["config_path"] = str(config_path)
+
+        package_name = (
+            self._npm_package_from_server_command(server_command or [])
+            or self._npm_package_from_install_command(install_command)
+        )
+        if package_name:
+            self._npm_install_global(package_name)
+            metadata["npm_package"] = package_name
+            metadata["install_type"] = "npm_global"
+            message = f"Installed npm package {package_name}."
+        elif config is not None:
+            metadata["install_type"] = "config"
+            message = "Saved MCP config snapshot."
+        else:
+            metadata["install_type"] = "record_only"
+            message = "Recorded install command; no runnable package was detected."
+
+        installed_file = project_dir / "installed.json"
+        installed_file.write_text(
+            json.dumps(metadata, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        return {
+            "project_id": safe_project_id,
+            "installed": True,
+            "message": message,
+            "metadata": metadata,
+        }
+
+    def list_installed(self) -> list[dict[str, Any]]:
+        """Return persisted MCP install records."""
+
+        records: list[dict[str, Any]] = []
+        if not self.installed_root.exists():
+            return records
+        for installed_file in sorted(self.installed_root.glob("*/installed.json")):
+            try:
+                data = json.loads(installed_file.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    records.append(data)
+            except Exception:
+                continue
+        return records
+
+    def _safe_project_id(self, project_id: str) -> str:
+        safe = project_id.strip()
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,80}", safe):
+            raise MCPInstallError("Invalid MCP project_id.")
+        return safe
+
+    def _parse_json_config(self, install_command: str) -> dict[str, Any] | None:
+        stripped = install_command.strip()
+        if not stripped.startswith("{"):
+            return None
+        try:
+            config = json.loads(stripped)
+        except json.JSONDecodeError as exc:
+            raise MCPInstallError(f"Invalid MCP JSON install config: {exc}") from exc
+        if not isinstance(config, dict):
+            raise MCPInstallError("MCP install config must be a JSON object.")
+        return config
+
+    def _npm_package_from_server_command(self, server_command: list[str]) -> str | None:
+        if not server_command:
+            return None
+        executable = Path(server_command[0]).name.lower()
+        if executable not in {"npx", "npx.cmd", "npx.exe"}:
+            return None
+        return self._first_npx_package(server_command[1:])
+
+    def _npm_package_from_install_command(self, install_command: str) -> str | None:
+        config = self._parse_json_config(install_command)
+        if config is not None:
+            servers = config.get("mcpServers")
+            if isinstance(servers, dict):
+                for server_config in servers.values():
+                    if not isinstance(server_config, dict):
+                        continue
+                    command = str(server_config.get("command") or "")
+                    args = server_config.get("args") or []
+                    if isinstance(args, list):
+                        package = self._npm_package_from_server_command(
+                            [command, *[str(arg) for arg in args]]
+                        )
+                        if package:
+                            return package
+            return None
+
+        try:
+            parts = shlex.split(install_command, posix=os.name != "nt")
+        except ValueError:
+            return None
+        if not parts:
+            return None
+
+        executable = Path(parts[0]).name.lower()
+        if executable in {"npx", "npx.cmd", "npx.exe"}:
+            return self._first_npx_package(parts[1:])
+        if executable in {"npm", "npm.cmd", "npm.exe"} and "install" in parts:
+            return self._first_npm_install_package(parts)
+        return None
+
+    def _first_npx_package(self, args: list[str]) -> str | None:
+        skip_next = False
+        for index, arg in enumerate(args):
+            if skip_next:
+                skip_next = False
+                continue
+            if arg in {"--package", "-p"}:
+                next_index = index + 1
+                return args[next_index] if next_index < len(args) else None
+            if arg.startswith("-"):
+                continue
+            if "<" in arg or ">" in arg:
+                continue
+            return arg
+        return None
+
+    def _first_npm_install_package(self, args: list[str]) -> str | None:
+        after_install = False
+        for arg in args[1:]:
+            if arg == "install":
+                after_install = True
+                continue
+            if not after_install or arg.startswith("-"):
+                continue
+            return arg
+        return None
+
+    def _npm_install_global(self, package_name: str) -> None:
+        npm = shutil.which("npm") or shutil.which("npm.cmd")
+        if npm is None:
+            raise MCPInstallError("npm is not available on the server PATH.")
+        try:
+            subprocess.run(
+                [npm, "install", "-g", package_name],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=self.command_timeout,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise MCPInstallError(f"npm install timed out for {package_name}.") from exc
+        except subprocess.CalledProcessError as exc:
+            message = (exc.stderr or exc.stdout or str(exc)).strip()
+            raise MCPInstallError(f"npm install failed for {package_name}: {message}") from exc

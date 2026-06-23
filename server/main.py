@@ -1,8 +1,11 @@
 import asyncio
+import ast
 import json
 import logging
 import os
 import re
+import subprocess
+import sys
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -49,6 +52,8 @@ try:
     from server.mcp.manager import (
         MCPClientError,
         MCPClientManager,
+        MCPInstallError,
+        MCPInstaller,
         MCPSessionNotFoundError,
         validate_server_command,
     )
@@ -57,6 +62,8 @@ except ModuleNotFoundError:
     from mcp.manager import (
         MCPClientError,
         MCPClientManager,
+        MCPInstallError,
+        MCPInstaller,
         MCPSessionNotFoundError,
         validate_server_command,
     )
@@ -94,6 +101,8 @@ WORKFLOW_HUMAN_INTERVENTION_ENABLED = True
 WORKFLOW_QUESTION_CLASSIFIER_ENABLED = True
 WORKFLOW_MCP_TOOL_ENABLED = True
 WORKFLOW_TIME_TOOL_ENABLED = True
+WORKFLOW_PYTHON_TIMEOUT_SECONDS = 3
+WORKFLOW_PYTHON_SANDBOX_ROOT = Path(__file__).resolve().parent / "workflow_sandboxes"
 WORKFLOW_AGENT_ENABLED = True
 WORKFLOW_AGENT_MAX_ITERATIONS_DEFAULT = 5
 WORKFLOW_AGENT_MAX_TOKENS = 1024
@@ -162,6 +171,7 @@ app.include_router(workflow_native_router)
 request_windows: dict[str, deque[float]] = defaultdict(deque)
 mcp_connect_windows: dict[str, deque[float]] = defaultdict(deque)
 mcp_manager = MCPClientManager()
+mcp_installer = MCPInstaller()
 tool_registry = ToolRegistry()
 workflow_task_store: dict[str, dict[str, Any]] = {}
 
@@ -250,6 +260,23 @@ class MCPConnectRequest(BaseModel):
 class MCPConnectResponse(BaseModel):
     session_id: str
     tools_count: int
+
+
+class MCPInstallRequest(BaseModel):
+    project_id: str = Field(min_length=1, max_length=96)
+    install_command: str = Field(min_length=1, max_length=20_000)
+    server_command: list[str] | None = Field(default=None, max_length=32)
+
+
+class MCPInstallResponse(BaseModel):
+    project_id: str
+    installed: bool
+    message: str
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class MCPInstalledResponse(BaseModel):
+    installed: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class MCPSessionSummary(BaseModel):
@@ -1136,6 +1163,165 @@ def split_workflow_variable_names(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
+SAFE_PYTHON_BUILTINS = {
+    "print",
+    "len",
+    "range",
+    "str",
+    "int",
+    "float",
+    "list",
+    "dict",
+    "set",
+    "tuple",
+    "sum",
+    "min",
+    "max",
+    "sorted",
+    "reversed",
+    "abs",
+    "round",
+    "pow",
+    "enumerate",
+    "zip",
+    "map",
+    "filter",
+}
+FORBIDDEN_PYTHON_NAMES = {
+    "__builtins__",
+    "__import__",
+    "breakpoint",
+    "compile",
+    "eval",
+    "exec",
+    "globals",
+    "help",
+    "locals",
+    "open",
+    "os",
+    "pathlib",
+    "shutil",
+    "socket",
+    "subprocess",
+    "sys",
+    "vars",
+}
+FORBIDDEN_PYTHON_NODES = (
+    ast.AsyncFunctionDef,
+    ast.AsyncFor,
+    ast.AsyncWith,
+    ast.ClassDef,
+    ast.Delete,
+    ast.Global,
+    ast.Import,
+    ast.ImportFrom,
+    ast.Lambda,
+    ast.Nonlocal,
+    ast.With,
+)
+
+
+class SafePythonValidator(ast.NodeVisitor):
+    """Reject Python syntax that can break out of the workflow sandbox."""
+
+    def visit(self, node: ast.AST) -> Any:
+        if isinstance(node, FORBIDDEN_PYTHON_NODES):
+            raise ValueError(f"Python sandbox rejects {type(node).__name__}.")
+        return super().visit(node)
+
+    def visit_Attribute(self, node: ast.Attribute) -> Any:
+        if node.attr.startswith("__"):
+            raise ValueError("Python sandbox rejects dunder attribute access.")
+        self.generic_visit(node)
+
+    def visit_Name(self, node: ast.Name) -> Any:
+        if node.id.startswith("__") or node.id in FORBIDDEN_PYTHON_NAMES:
+            raise ValueError(f"Python sandbox rejects name `{node.id}`.")
+
+    def visit_Call(self, node: ast.Call) -> Any:
+        if isinstance(node.func, ast.Name) and node.func.id in FORBIDDEN_PYTHON_NAMES:
+            raise ValueError(f"Python sandbox rejects call `{node.func.id}`.")
+        if isinstance(node.func, ast.Attribute) and node.func.attr.startswith("__"):
+            raise ValueError("Python sandbox rejects dunder method calls.")
+        self.generic_visit(node)
+
+
+def render_python_code_template(template: str, variables: dict[str, str]) -> str:
+    """Render {{var}} references as Python string literals, not raw code."""
+
+    def replace(match: re.Match[str]) -> str:
+        variable_name = match.group(1).strip()
+        return repr(variables.get(variable_name, ""))
+
+    return re.sub(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}", replace, template)
+
+
+def validate_safe_python_code(code: str) -> None:
+    if not code.strip():
+        raise ValueError("Python code is empty.")
+    tree = ast.parse(code, mode="exec")
+    SafePythonValidator().visit(tree)
+
+
+def run_python_code_sandbox(
+    code: str,
+    variables: dict[str, str],
+    input_variable: str,
+) -> str:
+    """Run validated Python in an isolated child process with a short timeout."""
+
+    validate_safe_python_code(code)
+    WORKFLOW_PYTHON_SANDBOX_ROOT.mkdir(parents=True, exist_ok=True)
+    runner = """
+import builtins
+import contextlib
+import io
+import json
+import sys
+
+payload = json.load(sys.stdin)
+allowed = payload["allowed_builtins"]
+safe_builtins = {name: getattr(builtins, name) for name in allowed}
+variables = {str(key): str(value) for key, value in payload["variables"].items()}
+input_value = variables.get(payload.get("input_variable") or "", "")
+namespace = {
+    "__builtins__": safe_builtins,
+    "variables": variables,
+    "input": input_value,
+}
+stdout = io.StringIO()
+with contextlib.redirect_stdout(stdout):
+    exec(payload["code"], namespace, namespace)
+output = stdout.getvalue()
+if not output and "result" in namespace:
+    output = str(namespace["result"])
+print(output, end="")
+""".strip()
+    payload = {
+        "allowed_builtins": sorted(SAFE_PYTHON_BUILTINS),
+        "code": code,
+        "input_variable": input_variable,
+        "variables": variables,
+    }
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-I", "-S", "-c", runner],
+            input=json.dumps(payload, ensure_ascii=False),
+            text=True,
+            capture_output=True,
+            cwd=str(WORKFLOW_PYTHON_SANDBOX_ROOT),
+            timeout=WORKFLOW_PYTHON_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ValueError("Python code timed out after 3 seconds.") from exc
+
+    if completed.returncode != 0:
+        message = completed.stderr.strip() or completed.stdout.strip()
+        raise ValueError(f"Python code failed: {message}")
+    return completed.stdout[:20_000]
+
+
 def extract_json_object_text(value: str) -> str | None:
     match = re.search(r"\{.*\}", value, re.DOTALL)
     return match.group(0) if match else None
@@ -1194,6 +1380,12 @@ def run_safe_code_node(node: WorkflowNodePayload, variables: dict[str, str]) -> 
     input_variable = str(node.data.get("codeInputVariable") or "llm_output")
     source = variables.get(input_variable, "")
 
+    if operation == "python":
+        python_code = render_python_code_template(
+            str(node.data.get("pythonCode") or ""),
+            variables,
+        )
+        return run_python_code_sandbox(python_code, variables, input_variable)
     if operation == "upper":
         return source.upper()
     if operation == "lower":
@@ -1486,8 +1678,20 @@ async def run_workflow(payload: WorkflowRunRequest, request: Request):
 
                 elif kind == "code":
                     output_variable = str(node.data.get("codeOutputVariable") or "code_output")
-                    output = run_safe_code_node(node, variables)
-                    variables[output_variable] = output
+                    try:
+                        output = run_safe_code_node(node, variables)
+                        variables[output_variable] = output
+                    except Exception as exc:
+                        logger.warning("Workflow code node failed: %s", exc)
+                        output = f"Code node failed: {exc}"
+                        variables[output_variable] = output
+                        yield sse_payload(
+                            {
+                                "event": "error",
+                                "node_id": node.id,
+                                "message": output,
+                            }
+                        )
 
                 elif kind == "variable_assign":
                     try:
@@ -3198,6 +3402,28 @@ async def connect_mcp_server(payload: MCPConnectRequest, request: Request):
     except Exception as exc:
         logger.exception("MCP connect failed")
         raise HTTPException(status_code=400, detail=f"MCP Server 启动失败：{exc}") from exc
+
+
+@app.post("/api/mcp/install", response_model=MCPInstallResponse)
+async def install_mcp_project(payload: MCPInstallRequest):
+    try:
+        result = await asyncio.to_thread(
+            mcp_installer.install,
+            project_id=payload.project_id,
+            install_command=payload.install_command,
+            server_command=payload.server_command,
+        )
+        return MCPInstallResponse.model_validate(result)
+    except (MCPInstallError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("MCP install failed project=%s", payload.project_id)
+        raise HTTPException(status_code=500, detail=f"MCP 安装失败：{exc}") from exc
+
+
+@app.get("/api/mcp/installed", response_model=MCPInstalledResponse)
+async def list_installed_mcp_projects():
+    return MCPInstalledResponse(installed=mcp_installer.list_installed())
 
 
 @app.get("/api/mcp/sessions", response_model=MCPSessionsResponse)

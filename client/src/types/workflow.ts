@@ -23,7 +23,7 @@ export type WorkflowNodeKind =
 
 export type ConditionOperator = "equals" | "contains";
 
-export type CodeOperation = "upper" | "lower" | "replace" | "concat";
+export type CodeOperation = "upper" | "lower" | "replace" | "concat" | "python";
 
 export type HttpRequestMethod = "GET" | "POST";
 
@@ -46,6 +46,7 @@ export interface WorkflowNodeData extends Record<string, unknown> {
   replaceFrom?: string;
   replaceTo?: string;
   concatValue?: string;
+  pythonCode?: string;
   template?: string;
   variableNames?: string;
   outputTemplate?: string;

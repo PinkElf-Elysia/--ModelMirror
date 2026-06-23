@@ -4,6 +4,7 @@ import {
   BackgroundVariant,
   Controls,
   MiniMap,
+  Panel,
   ReactFlow,
   ReactFlowProvider,
   useEdgesState,
@@ -80,6 +81,7 @@ function createNodeData(kind: WorkflowNodeKind): WorkflowNodeData {
       replaceFrom: "",
       replaceTo: "",
       concatValue: "",
+      pythonCode: "print(input)",
     };
   }
 
@@ -534,6 +536,9 @@ function NodeConfig({ node, onChange }: NodeConfigProps) {
               <option className="bg-slate-950" value="concat">
                 拼接
               </option>
+              <option className="bg-slate-950" value="python">
+                Python sandbox
+              </option>
             </select>
           </Field>
           <Field label="输入变量">
@@ -579,6 +584,19 @@ function NodeConfig({ node, onChange }: NodeConfigProps) {
                 onChange={(event) => update({ concatValue: event.target.value })}
                 value={data.concatValue ?? ""}
               />
+            </Field>
+          ) : null}
+          {data.codeOperation === "python" ? (
+            <Field label="Python 代码">
+              <textarea
+                className={`${textInputClass()} min-h-40 resize-none font-mono text-xs leading-5`}
+                onChange={(event) => update({ pythonCode: event.target.value })}
+                placeholder="print(len(input.split()))"
+                value={data.pythonCode ?? ""}
+              />
+              <p className="mt-2 text-xs leading-5 text-slate-400">
+                可用变量：input（输入变量内容）和 variables（全部变量字典）。请用 print() 输出结果。
+              </p>
             </Field>
           ) : null}
         </>
@@ -1228,6 +1246,7 @@ function WorkflowCanvas({ workflowId }: WorkflowCanvasProps) {
     loadedDefinition.edges,
   );
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [saveNotice, setSaveNotice] = useState("");
   const { screenToFlowPosition } = useReactFlow();
 
@@ -1245,6 +1264,24 @@ function WorkflowCanvas({ workflowId }: WorkflowCanvasProps) {
   const selectedNode = useMemo(
     () => nodes.find((node) => node.id === selectedNodeId) ?? null,
     [nodes, selectedNodeId],
+  );
+
+  const renderedEdges = useMemo(
+    () =>
+      edges.map((edge) =>
+        edge.id === selectedEdgeId
+          ? {
+              ...edge,
+              className: `${edge.className ?? ""} modelmirror-workflow-edge-selected`.trim(),
+              style: {
+                ...edge.style,
+                stroke: "#fb923c",
+                strokeWidth: 3,
+              },
+            }
+          : edge,
+      ),
+    [edges, selectedEdgeId],
   );
 
   const handleConnect = useCallback(
@@ -1273,9 +1310,23 @@ function WorkflowCanvas({ workflowId }: WorkflowCanvasProps) {
   const handleEdgesChange = useCallback(
     (changes: EdgeChange<WorkflowEdge>[]) => {
       onEdgesChange(changes);
+      if (
+        selectedEdgeId &&
+        changes.some((change) => change.type === "remove" && change.id === selectedEdgeId)
+      ) {
+        setSelectedEdgeId(null);
+      }
     },
-    [onEdgesChange],
+    [onEdgesChange, selectedEdgeId],
   );
+
+  const deleteSelectedEdge = useCallback(() => {
+    if (!selectedEdgeId) return;
+    setEdges((currentEdges) =>
+      currentEdges.filter((edge) => edge.id !== selectedEdgeId),
+    );
+    setSelectedEdgeId(null);
+  }, [selectedEdgeId, setEdges]);
 
   function updateNodeData(nodeId: string, patch: Partial<WorkflowNodeData>) {
     setNodes((currentNodes) =>
@@ -1377,21 +1428,44 @@ function WorkflowCanvas({ workflowId }: WorkflowCanvasProps) {
           onDrop={onDrop}
         >
           <ReactFlow
-            edges={edges}
+            edges={renderedEdges}
             fitView
             nodeTypes={nodeTypes}
             nodes={nodes}
             onConnect={handleConnect}
+            onEdgeClick={(event, edge) => {
+              event.stopPropagation();
+              setSelectedNodeId(null);
+              setSelectedEdgeId(edge.id);
+            }}
             onEdgesChange={handleEdgesChange}
-            onNodeClick={(_, node) => setSelectedNodeId(node.id)}
+            onNodeClick={(_, node) => {
+              setSelectedEdgeId(null);
+              setSelectedNodeId(node.id);
+            }}
             onNodesChange={handleNodesChange}
+            onPaneClick={() => {
+              setSelectedEdgeId(null);
+              setSelectedNodeId(null);
+            }}
           >
             <Background
               color="rgba(253, 186, 116, 0.22)"
               gap={24}
               variant={BackgroundVariant.Dots}
             />
-            <Controls />
+            <Controls className="modelmirror-flow-controls" />
+            {selectedEdgeId ? (
+              <Panel position="bottom-left">
+                <button
+                  className="mb-16 rounded-full border border-rose-300/35 bg-rose-400/15 px-3 py-1.5 text-xs font-semibold text-rose-100 shadow-lg shadow-rose-950/30 transition hover:bg-rose-400/25"
+                  onClick={deleteSelectedEdge}
+                  type="button"
+                >
+                  × 删除连线
+                </button>
+              </Panel>
+            ) : null}
             <MiniMap
               maskColor="rgba(6, 9, 22, 0.68)"
               nodeColor={() => "rgba(251, 146, 60, 0.9)"}
