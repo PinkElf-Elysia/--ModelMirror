@@ -15,6 +15,17 @@ interface PendingHumanIntervention {
   outputVariable: string;
 }
 
+type RunStepStatus = "running" | "done" | "waiting" | "error";
+
+interface WorkflowRunStep {
+  id: string;
+  title: string;
+  type?: WorkflowRunEvent["node_type"];
+  status: RunStepStatus;
+  output: string;
+  variable?: string;
+}
+
 function serializeWorkflow(definition: WorkflowDefinition) {
   return {
     id: definition.id,
@@ -44,6 +55,105 @@ function readSseEvent(eventText: string) {
     .filter(Boolean);
 }
 
+function appendStepOutput(
+  current: string,
+  next: string | undefined,
+  nodeType: WorkflowRunEvent["node_type"],
+) {
+  if (!next) return current;
+  if (!current) return next;
+  if (nodeType === "llm") return `${current}${next}`;
+  return `${current}\n${next}`;
+}
+
+function statusCopy(status: RunStepStatus) {
+  if (status === "done") return "完成";
+  if (status === "waiting") return "等待输入";
+  if (status === "error") return "异常";
+  return "运行中";
+}
+
+function statusClass(status: RunStepStatus) {
+  if (status === "done") {
+    return "border-emerald-300/25 bg-emerald-300/10 text-emerald-100";
+  }
+  if (status === "waiting") {
+    return "border-sky-300/25 bg-sky-300/10 text-sky-100";
+  }
+  if (status === "error") {
+    return "border-rose-300/25 bg-rose-300/10 text-rose-100";
+  }
+  return "border-hire-300/25 bg-hire-300/10 text-hire-100";
+}
+
+function buildRunSteps(events: WorkflowRunEvent[]) {
+  const steps: WorkflowRunStep[] = [];
+  const byNodeId = new Map<string, WorkflowRunStep>();
+
+  function getStep(event: WorkflowRunEvent, index: number) {
+    const id = event.node_id ?? `workflow-${index}`;
+    const existing = byNodeId.get(id);
+    if (existing) {
+      existing.title = event.node_title ?? existing.title;
+      existing.type = event.node_type ?? existing.type;
+      return existing;
+    }
+
+    const step: WorkflowRunStep = {
+      id,
+      title: event.node_title ?? "工作流",
+      type: event.node_type,
+      status: "running",
+      output: "",
+      variable: event.variable ?? event.output_variable,
+    };
+    byNodeId.set(id, step);
+    steps.push(step);
+    return step;
+  }
+
+  events.forEach((event, index) => {
+    if (event.event === "workflow_meta" || event.event === "workflow_end") {
+      return;
+    }
+    if (event.event === "error" && !event.node_id) {
+      steps.push({
+        id: `workflow-error-${index}`,
+        title: "工作流",
+        status: "error",
+        output: event.message ?? "工作流运行异常。",
+      });
+      return;
+    }
+
+    const step = getStep(event, index);
+    if (event.event === "human_intervention_pending") {
+      step.status = "waiting";
+      step.output = appendStepOutput(step.output, event.prompt, step.type);
+      step.variable = event.output_variable ?? step.variable;
+      return;
+    }
+    if (event.event === "node_delta") {
+      step.output = appendStepOutput(step.output, event.output, step.type);
+      return;
+    }
+    if (event.event === "node_end") {
+      step.status = "done";
+      step.variable = event.variable ?? step.variable;
+      if (!step.output) {
+        step.output = appendStepOutput(step.output, event.output, step.type);
+      }
+      return;
+    }
+    if (event.event === "error") {
+      step.status = "error";
+      step.output = appendStepOutput(step.output, event.message, step.type);
+    }
+  });
+
+  return steps;
+}
+
 export default function WorkflowRun({ definition }: WorkflowRunProps) {
   const [input, setInput] = useState("请帮我把这个需求拆成三步执行计划。");
   const [events, setEvents] = useState<WorkflowRunEvent[]>([]);
@@ -55,6 +165,14 @@ export default function WorkflowRun({ definition }: WorkflowRunProps) {
   const [humanInput, setHumanInput] = useState("");
   const [isResuming, setIsResuming] = useState(false);
 
+  const inputVariable = useMemo(() => {
+    const inputNode = definition.nodes.find((node) => node.data.kind === "input");
+    const variableName = inputNode?.data.variableName;
+    return typeof variableName === "string" && variableName.trim()
+      ? variableName.trim()
+      : "user_input";
+  }, [definition.nodes]);
+
   const finalOutput = useMemo(() => {
     for (let index = events.length - 1; index >= 0; index -= 1) {
       if (events[index].event === "workflow_end") {
@@ -64,6 +182,8 @@ export default function WorkflowRun({ definition }: WorkflowRunProps) {
 
     return "";
   }, [events]);
+
+  const runSteps = useMemo(() => buildRunSteps(events), [events]);
 
   async function runWorkflow() {
     setEvents([]);
@@ -80,7 +200,8 @@ export default function WorkflowRun({ definition }: WorkflowRunProps) {
         body: JSON.stringify({
           workflow: serializeWorkflow(definition),
           inputs: {
-            user_input: input,
+            [inputVariable]: input,
+            ...(inputVariable === "user_input" ? {} : { user_input: input }),
           },
         }),
       });
@@ -199,7 +320,7 @@ export default function WorkflowRun({ definition }: WorkflowRunProps) {
       <div className="space-y-3 p-4">
         <label className="block">
           <span className="text-xs font-semibold text-slate-300">
-            user_input
+            {inputVariable}
           </span>
           <textarea
             className="mt-2 min-h-28 w-full resize-none rounded-lg border border-white/10 bg-white/[0.055] px-3 py-2 text-sm leading-6 text-white outline-none transition placeholder:text-slate-500 focus:border-brand-300/50 focus:ring-4 focus:ring-brand-300/10"
@@ -257,27 +378,36 @@ export default function WorkflowRun({ definition }: WorkflowRunProps) {
 
       <div className="min-h-0 flex-1 overflow-y-auto p-4">
         <div className="space-y-2">
-          {events.length === 0 ? (
+          {runSteps.length === 0 ? (
             <div className="rounded-lg border border-dashed border-white/15 bg-white/[0.035] px-4 py-8 text-center text-sm leading-6 text-slate-400">
-              暂无运行记录。点击“运行工作流”后，这里会像招聘会排班表一样逐项亮起。
+              {isRunning
+                ? "正在等待工作流事件..."
+                : "暂无运行记录。点击“运行工作流”后，这里会按节点汇总展示过程。"}
             </div>
           ) : (
-            events.map((event, index) => (
+            runSteps.map((step) => (
               <div
                 className="rounded-lg border border-white/10 bg-white/[0.045] px-3 py-2"
-                key={`${event.event}-${event.node_id ?? "workflow"}-${index}`}
+                key={step.id}
               >
                 <div className="flex items-center justify-between gap-3">
-                  <span className="text-xs font-semibold text-slate-200">
-                    {event.node_title ?? "工作流"}
-                  </span>
-                  <span className="rounded-full border border-white/10 bg-white/[0.055] px-2 py-0.5 text-[11px] text-slate-400">
-                    {event.event}
+                  <div className="min-w-0">
+                    <p className="truncate text-xs font-semibold text-slate-200">
+                      {step.title}
+                    </p>
+                    {step.variable ? (
+                      <p className="mt-0.5 truncate text-[11px] text-slate-500">
+                        写入变量：{step.variable}
+                      </p>
+                    ) : null}
+                  </div>
+                  <span className={`shrink-0 rounded-full border px-2 py-0.5 text-[11px] ${statusClass(step.status)}`}>
+                    {statusCopy(step.status)}
                   </span>
                 </div>
-                {event.output || event.final_output || event.message || event.prompt ? (
-                  <p className="mt-2 whitespace-pre-wrap text-xs leading-5 text-slate-300">
-                    {event.output ?? event.final_output ?? event.message ?? event.prompt}
+                {step.output ? (
+                  <p className="mt-2 max-h-40 overflow-y-auto whitespace-pre-wrap break-words rounded-md bg-slate-950/35 p-2 text-xs leading-5 text-slate-300">
+                    {step.output}
                   </p>
                 ) : null}
               </div>

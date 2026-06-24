@@ -51,14 +51,9 @@ export default function ModelListPage() {
   const [filters, setFilters] =
     useState<ModelFilterState>(defaultFilterState);
   const [searchTerm, setSearchTerm] = useState("");
-  const [showRegionHint, setShowRegionHint] = useState(false);
 
   useEffect(() => {
     document.title = "模镜 - AI 牛马招聘会";
-  }, []);
-
-  useEffect(() => {
-    setShowRegionHint(navigator.language.toLowerCase().startsWith("zh"));
   }, []);
 
   const seriesOptions = useMemo(
@@ -251,12 +246,6 @@ export default function ModelListPage() {
             ) : null}
           </div>
         </header>
-
-        {showRegionHint ? (
-          <div className="mt-5 rounded-lg border border-amber-300/25 bg-amber-300/10 px-4 py-3 text-sm leading-6 text-amber-50 shadow-[0_12px_40px_rgba(251,146,60,0.10)]">
-            服务台提醒：您所在地区部分海外模型可能无法使用。推荐优先面试 DeepSeek、Qwen、Moonshot、智谱 GLM 等国内可用候选人；若遇到地区限制，面试间会提供一键切换入口。
-          </div>
-        ) : null}
 
         <section className="mt-6">
           <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">

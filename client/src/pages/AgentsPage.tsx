@@ -38,11 +38,11 @@ const platformCapabilities: PlatformCapability[] = [
     icon: "元",
     title: "元智能体",
     summary:
-      "用自然语言描述需求，由 AI 自动设计工作流并分配智能体协作。",
+      "用自然语言生成可编辑 Agent 工作流，并直接接入模镜经典画布试运行。",
     detail:
-      "你只需要说“帮我做市场调研”，系统会拆成资料检索、竞品分析、报告撰写和复盘建议等岗位。当前仅展示入口，编排能力仍在建设。",
-    tag: "自然语言驱动 · 即将开放",
-    eta: "预计 2025 年下半年开放内测",
+      "输入目标后，元智能体会拆解子任务、推断变量依赖、生成原生 React Flow 工作流，并通过现有 /api/workflow/run 执行。",
+    tag: "自然语言驱动 · Beta",
+    eta: "已接入生成与运行工作台",
   },
   {
     id: "expert-squad",
@@ -121,6 +121,10 @@ export default function AgentsPage() {
   function openPlatformCapability(capability: PlatformCapability) {
     if (capability.id === "workflow-builder") {
       navigate("/workflow/new");
+      return;
+    }
+    if (capability.id === "meta-agent") {
+      navigate("/agents/meta-agent");
       return;
     }
     if (capability.id === "expert-squad") {
