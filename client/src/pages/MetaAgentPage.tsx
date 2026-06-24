@@ -1,0 +1,573 @@
+import {
+  Background,
+  BackgroundVariant,
+  Controls,
+  MiniMap,
+  ReactFlow,
+} from "@xyflow/react";
+import "@xyflow/react/dist/style.css";
+import { useEffect, useMemo, useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
+import PageContainer from "../components/PageContainer";
+import WorkflowNodeCard from "../components/workflow/WorkflowNodeCard";
+import WorkflowRun from "../components/workflow/WorkflowRun";
+import { models } from "../data/models";
+import {
+  type WorkflowDefinition,
+  type WorkflowEdge,
+  type WorkflowNode,
+  type WorkflowNodeData,
+} from "../types/workflow";
+import { saveStoredWorkflow } from "../utils/workflowStorage";
+
+interface MetaAgentParameter {
+  name: string;
+  type: string;
+  description: string;
+  required: boolean;
+}
+
+interface MetaAgentGeneratedAgent {
+  name: string;
+  description: string;
+  prompt: string;
+  tool_names: string[] | null;
+}
+
+interface MetaAgentSubTask {
+  name: string;
+  description: string;
+  reason?: string | null;
+  inputs: MetaAgentParameter[];
+  outputs: MetaAgentParameter[];
+  agent?: MetaAgentGeneratedAgent | null;
+  agents?: MetaAgentGeneratedAgent[] | null;
+}
+
+interface MetaAgentPlan {
+  thought: string;
+  sub_tasks: MetaAgentSubTask[];
+}
+
+interface ValidationIssue {
+  code: string;
+  message: string;
+  severity: "error" | "warning";
+  node_id?: string | null;
+  edge_id?: string | null;
+}
+
+interface MetaAgentValidation {
+  valid: boolean;
+  issues: ValidationIssue[];
+  order: string[];
+  node_count: number;
+  edge_count: number;
+}
+
+interface MetaAgentGenerateResponse {
+  goal: string;
+  plan: MetaAgentPlan;
+  workflow: WorkflowDefinition;
+  warnings: string[];
+  validation: MetaAgentValidation;
+}
+
+const nodeTypes = {
+  workflowNode: WorkflowNodeCard,
+};
+
+const goalTemplates = [
+  {
+    title: "市场调研",
+    goal: "为一款面向中小团队的 AI 模型浏览器生成市场调研工作流，输出竞品洞察、用户画像和行动建议。",
+  },
+  {
+    title: "发布计划",
+    goal: "为新增元智能体工作台制定发布计划，包含需求拆解、风险评估、验收标准和上线清单。",
+  },
+  {
+    title: "代码原型",
+    goal: "生成一个浏览器端待办事项应用的开发工作流，拆分需求、界面、实现、测试和交付说明。",
+  },
+];
+
+const plannerModelOptions = models
+  .filter(
+    (model) =>
+      model.active &&
+      model.input_modalities.includes("text") &&
+      model.capabilities.includes("text"),
+  )
+  .slice(0, 120);
+
+const defaultPlannerModel =
+  plannerModelOptions.find((model) => model.id === "deepseek/deepseek-chat")?.id ??
+  plannerModelOptions[0]?.id ??
+  "deepseek/deepseek-chat";
+
+function compactName(value: string) {
+  return value.replace(/_/g, " ");
+}
+
+function errorMessage(payload: unknown, fallback: string) {
+  if (!payload || typeof payload !== "object") return fallback;
+  const detail = "detail" in payload ? payload.detail : undefined;
+  const error = "error" in payload ? payload.error : undefined;
+  if (typeof error === "string") return error;
+  if (typeof detail === "string") return detail;
+  if (detail) return JSON.stringify(detail);
+  return fallback;
+}
+
+function nodeColor(node: WorkflowNode) {
+  const data = node.data as WorkflowNodeData;
+  if (data.kind === "input") return "rgba(16,185,129,0.92)";
+  if (data.kind === "agent") return "rgba(167,139,250,0.92)";
+  if (data.kind === "variable_aggregator") return "rgba(251,146,60,0.92)";
+  if (data.kind === "output") return "rgba(125,211,252,0.92)";
+  return "rgba(148,163,184,0.92)";
+}
+
+function GraphPreview({ workflow }: { workflow: WorkflowDefinition | null }) {
+  const nodes = useMemo(
+    () =>
+      (workflow?.nodes ?? []).map((node) => ({
+        ...node,
+        connectable: false,
+        draggable: false,
+        selectable: false,
+      })),
+    [workflow],
+  );
+  const edges = useMemo(
+    () =>
+      (workflow?.edges ?? []).map((edge) => ({
+        ...edge,
+        selectable: false,
+      })),
+    [workflow],
+  );
+
+  if (!workflow) {
+    return (
+      <div className="flex h-full min-h-[520px] items-center justify-center rounded-lg border border-dashed border-white/15 bg-white/[0.025] px-6 text-center">
+        <div className="max-w-sm">
+          <p className="text-sm font-semibold text-slate-200">等待生成</p>
+          <p className="mt-2 text-sm leading-6 text-slate-400">
+            输入目标后会在这里出现可导入的原生 React Flow 工作流草稿。
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <ReactFlow
+      edges={edges as WorkflowEdge[]}
+      elementsSelectable={false}
+      fitView
+      minZoom={0.35}
+      nodes={nodes as WorkflowNode[]}
+      nodesConnectable={false}
+      nodesDraggable={false}
+      nodeTypes={nodeTypes}
+      panOnDrag
+      panOnScroll
+      proOptions={{ hideAttribution: true }}
+      zoomOnScroll
+    >
+      <Background
+        color="rgba(253, 186, 116, 0.18)"
+        gap={24}
+        variant={BackgroundVariant.Dots}
+      />
+      <Controls className="modelmirror-flow-controls" />
+      <MiniMap
+        maskColor="rgba(6, 9, 22, 0.72)"
+        nodeColor={(node) => nodeColor(node as WorkflowNode)}
+        pannable
+        zoomable
+      />
+    </ReactFlow>
+  );
+}
+
+function VariableList({ items }: { items: MetaAgentParameter[] }) {
+  if (items.length === 0) {
+    return <span className="text-xs text-slate-500">none</span>;
+  }
+
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {items.map((item) => (
+        <span
+          className="rounded-md border border-white/10 bg-white/[0.055] px-2 py-1 text-[11px] font-semibold text-slate-200"
+          key={`${item.name}-${item.type}`}
+        >
+          {item.name}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+export default function MetaAgentPage() {
+  const navigate = useNavigate();
+  const [goal, setGoal] = useState(goalTemplates[1].goal);
+  const [modelId, setModelId] = useState(defaultPlannerModel);
+  const [temperature, setTemperature] = useState(0.3);
+  const [maxTasks, setMaxTasks] = useState(5);
+  const [result, setResult] = useState<MetaAgentGenerateResponse | null>(null);
+  const [error, setError] = useState("");
+  const [isGenerating, setIsGenerating] = useState(false);
+
+  useEffect(() => {
+    document.title = "模镜 - 元智能体工作台";
+  }, []);
+
+  async function generateWorkflow() {
+    const trimmedGoal = goal.trim();
+    if (trimmedGoal.length < 10) {
+      setError("目标至少需要 10 个字符。");
+      return;
+    }
+
+    setError("");
+    setIsGenerating(true);
+    try {
+      const response = await fetch("/api/meta-agent/generate-workflow", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          goal: trimmedGoal,
+          model_id: modelId,
+          temperature,
+          max_tasks: maxTasks,
+        }),
+      });
+      const payload = (await response.json().catch(() => null)) as
+        | MetaAgentGenerateResponse
+        | { error?: string; detail?: unknown }
+        | null;
+      if (!response.ok) {
+        throw new Error(errorMessage(payload, "生成失败，请检查模型网关配置。"));
+      }
+      setResult(payload as MetaAgentGenerateResponse);
+    } catch (generateError) {
+      setError(generateError instanceof Error ? generateError.message : "生成失败。");
+    } finally {
+      setIsGenerating(false);
+    }
+  }
+
+  function importWorkflow() {
+    if (!result) return;
+    const workflowId = `meta-agent-${Date.now()}`;
+    const imported: WorkflowDefinition = {
+      ...result.workflow,
+      id: workflowId,
+      title: result.workflow.title || "元智能体工作流",
+      updatedAt: new Date().toISOString(),
+    };
+    saveStoredWorkflow(imported);
+    navigate(`/workflow/${workflowId}`);
+  }
+
+  return (
+    <PageContainer
+      activeResource="agents"
+      contentClassName="min-w-0"
+      maxWidthClassName="max-w-[1880px]"
+      sidebar={
+        <div>
+          <p className="text-sm font-semibold text-white">元智能体 Beta</p>
+          <p className="mt-2 text-sm leading-6 text-slate-400">
+            基于目标生成可编辑工作流草稿，并沿用经典画布运行路径。
+          </p>
+          <Link
+            className="mt-4 inline-flex rounded-full border border-hire-300/30 bg-hire-300/10 px-3 py-1.5 text-xs font-semibold text-hire-100 transition hover:bg-hire-300/20"
+            to="/agents"
+          >
+            返回智能体
+          </Link>
+        </div>
+      }
+    >
+      <header className="mb-5 overflow-hidden rounded-lg border border-hire-300/20 bg-[linear-gradient(135deg,rgba(67,20,7,0.70),rgba(6,9,22,0.92)_48%,rgba(8,51,68,0.62))] p-5 shadow-prism sm:p-6">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+          <div>
+            <p className="text-sm font-semibold text-hire-100">EvoAgentX-inspired</p>
+            <h1 className="mt-2 text-3xl font-semibold text-white sm:text-4xl">
+              元智能体工作台
+            </h1>
+            <p className="mt-3 max-w-3xl text-sm leading-6 text-slate-300">
+              从自然语言目标生成 Agent 工作流草稿，校验后可导入经典画布继续编辑。
+            </p>
+          </div>
+          <div className="grid grid-cols-3 gap-2 text-center text-xs text-slate-300">
+            <div className="rounded-lg border border-white/10 bg-white/[0.045] px-3 py-2">
+              <p className="font-semibold text-white">{result?.plan.sub_tasks.length ?? 0}</p>
+              <p className="mt-1">任务</p>
+            </div>
+            <div className="rounded-lg border border-white/10 bg-white/[0.045] px-3 py-2">
+              <p className="font-semibold text-white">
+                {result?.workflow.nodes.length ?? 0}
+              </p>
+              <p className="mt-1">节点</p>
+            </div>
+            <div className="rounded-lg border border-white/10 bg-white/[0.045] px-3 py-2">
+              <p className="font-semibold text-white">
+                {result?.validation.valid ? "通过" : result ? "待修" : "待生成"}
+              </p>
+              <p className="mt-1">校验</p>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <div className="grid min-h-[760px] gap-5 xl:grid-cols-[320px_minmax(0,1fr)_380px]">
+        <section className="surface-panel rounded-lg p-4">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <p className="text-sm font-semibold text-white">目标</p>
+              <p className="mt-1 text-xs text-slate-400">
+                Goal {"->"} sub_tasks {"->"} workflow
+              </p>
+            </div>
+            <span className="rounded-full border border-cyan-300/25 bg-cyan-300/10 px-2.5 py-1 text-xs font-semibold text-cyan-100">
+              Beta
+            </span>
+          </div>
+
+          <div className="mt-4 grid grid-cols-3 gap-2">
+            {goalTemplates.map((template) => (
+              <button
+                className="rounded-lg border border-white/10 bg-white/[0.045] px-2 py-2 text-xs font-semibold text-slate-200 transition hover:border-hire-300/35 hover:bg-hire-300/10 hover:text-hire-100"
+                key={template.title}
+                onClick={() => setGoal(template.goal)}
+                type="button"
+              >
+                {template.title}
+              </button>
+            ))}
+          </div>
+
+          <label className="mt-4 block">
+            <span className="text-xs font-semibold text-slate-300">目标描述</span>
+            <textarea
+              className="mt-2 min-h-44 w-full resize-none rounded-lg border border-white/10 bg-white/[0.055] px-3 py-2 text-sm leading-6 text-white outline-none transition placeholder:text-slate-500 focus:border-hire-300/55 focus:ring-4 focus:ring-hire-300/10"
+              onChange={(event) => setGoal(event.target.value)}
+              value={goal}
+            />
+          </label>
+
+          <label className="mt-4 block">
+            <span className="text-xs font-semibold text-slate-300">规划模型</span>
+            <select
+              className="mt-2 h-10 w-full rounded-lg border border-white/10 bg-ink-950 px-3 text-sm text-white outline-none transition focus:border-brand-300/50 focus:ring-4 focus:ring-brand-300/10"
+              onChange={(event) => setModelId(event.target.value)}
+              value={modelId}
+            >
+              {plannerModelOptions.map((model) => (
+                <option key={model.id} value={model.id}>
+                  {model.name}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <div className="mt-4 grid grid-cols-2 gap-3">
+            <label className="block">
+              <span className="text-xs font-semibold text-slate-300">温度</span>
+              <input
+                className="mt-2 h-10 w-full rounded-lg border border-white/10 bg-white/[0.055] px-3 text-sm text-white outline-none transition focus:border-brand-300/50 focus:ring-4 focus:ring-brand-300/10"
+                max={1.2}
+                min={0}
+                onChange={(event) => setTemperature(Number(event.target.value))}
+                step={0.1}
+                type="number"
+                value={temperature}
+              />
+            </label>
+            <label className="block">
+              <span className="text-xs font-semibold text-slate-300">任务数</span>
+              <input
+                className="mt-2 h-10 w-full rounded-lg border border-white/10 bg-white/[0.055] px-3 text-sm text-white outline-none transition focus:border-brand-300/50 focus:ring-4 focus:ring-brand-300/10"
+                max={8}
+                min={1}
+                onChange={(event) => setMaxTasks(Number(event.target.value))}
+                type="number"
+                value={maxTasks}
+              />
+            </label>
+          </div>
+
+          <button
+            className="mt-5 w-full rounded-full bg-hire-300 px-4 py-2.5 text-sm font-semibold text-ink-950 shadow-[0_0_24px_rgba(251,146,60,0.18)] transition hover:bg-hire-200 active:scale-[0.98] disabled:cursor-not-allowed disabled:bg-white/10 disabled:text-slate-500"
+            disabled={isGenerating}
+            onClick={() => void generateWorkflow()}
+            type="button"
+          >
+            {isGenerating ? "生成中..." : "生成工作流"}
+          </button>
+
+          {error ? (
+            <div className="mt-4 rounded-lg border border-rose-300/25 bg-rose-300/10 px-3 py-2 text-sm leading-6 text-rose-100">
+              {error}
+            </div>
+          ) : null}
+        </section>
+
+        <section className="surface-panel min-h-[640px] overflow-hidden rounded-lg">
+          <div className="flex items-center justify-between gap-4 border-b border-white/10 px-4 py-3">
+            <div>
+              <p className="text-sm font-semibold text-white">工作流预览</p>
+              <p className="mt-1 text-xs text-slate-400">
+                {result?.workflow.title ?? "尚未生成草稿"}
+              </p>
+            </div>
+            {result ? (
+              <span className="rounded-full border border-emerald-300/25 bg-emerald-300/10 px-2.5 py-1 text-xs font-semibold text-emerald-100">
+                {result.workflow.edges.length} edges
+              </span>
+            ) : null}
+          </div>
+          <div className="h-[calc(100%-57px)] min-h-[580px]">
+            <GraphPreview workflow={result?.workflow ?? null} />
+          </div>
+        </section>
+
+        <aside className="min-h-0 space-y-4">
+          <section className="surface-panel rounded-lg p-4">
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-sm font-semibold text-white">计划</p>
+              {result ? (
+                <span className="rounded-full border border-white/10 bg-white/[0.055] px-2.5 py-1 text-xs text-slate-300">
+                  {result.plan.sub_tasks.length} steps
+                </span>
+              ) : null}
+            </div>
+            {result ? (
+              <div className="mt-3 max-h-72 space-y-3 overflow-y-auto pr-1">
+                {result.plan.thought ? (
+                  <p className="rounded-lg border border-white/10 bg-white/[0.045] p-3 text-xs leading-5 text-slate-300">
+                    {result.plan.thought}
+                  </p>
+                ) : null}
+                {result.plan.sub_tasks.map((task, index) => (
+                  <article
+                    className="rounded-lg border border-white/10 bg-white/[0.045] p-3"
+                    key={`${task.name}-${index}`}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="text-sm font-semibold text-white">
+                          {index + 1}. {compactName(task.name)}
+                        </p>
+                        <p className="mt-1 text-xs leading-5 text-slate-400">
+                          {task.description}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="mt-3 grid gap-2">
+                      <div>
+                        <p className="mb-1 text-[11px] font-semibold text-slate-500">
+                          Inputs
+                        </p>
+                        <VariableList items={task.inputs} />
+                      </div>
+                      <div>
+                        <p className="mb-1 text-[11px] font-semibold text-slate-500">
+                          Outputs
+                        </p>
+                        <VariableList items={task.outputs} />
+                      </div>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            ) : (
+              <p className="mt-3 text-sm leading-6 text-slate-400">
+                生成后会显示拆解任务、输入输出变量和 Agent 提示词来源。
+              </p>
+            )}
+          </section>
+
+          <section className="surface-panel rounded-lg p-4">
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-sm font-semibold text-white">校验与导入</p>
+              {result ? (
+                <span
+                  className={`rounded-full border px-2.5 py-1 text-xs font-semibold ${
+                    result.validation.valid
+                      ? "border-emerald-300/25 bg-emerald-300/10 text-emerald-100"
+                      : "border-rose-300/25 bg-rose-300/10 text-rose-100"
+                  }`}
+                >
+                  {result.validation.valid ? "valid" : "invalid"}
+                </span>
+              ) : null}
+            </div>
+
+            {result ? (
+              <div className="mt-3 space-y-3">
+                <div className="grid grid-cols-2 gap-2 text-xs">
+                  <div className="rounded-lg border border-white/10 bg-white/[0.045] p-3">
+                    <p className="text-slate-500">Nodes</p>
+                    <p className="mt-1 text-lg font-semibold text-white">
+                      {result.validation.node_count}
+                    </p>
+                  </div>
+                  <div className="rounded-lg border border-white/10 bg-white/[0.045] p-3">
+                    <p className="text-slate-500">Edges</p>
+                    <p className="mt-1 text-lg font-semibold text-white">
+                      {result.validation.edge_count}
+                    </p>
+                  </div>
+                </div>
+
+                {result.warnings.length ? (
+                  <div className="rounded-lg border border-amber-300/25 bg-amber-300/10 p-3 text-xs leading-5 text-amber-100">
+                    {result.warnings.map((warning) => (
+                      <p key={warning}>{warning}</p>
+                    ))}
+                  </div>
+                ) : null}
+
+                {result.validation.issues.length ? (
+                  <div className="max-h-36 space-y-2 overflow-y-auto">
+                    {result.validation.issues.map((issue) => (
+                      <div
+                        className="rounded-lg border border-rose-300/25 bg-rose-300/10 p-3 text-xs leading-5 text-rose-100"
+                        key={`${issue.code}-${issue.node_id ?? issue.edge_id ?? "graph"}`}
+                      >
+                        <p className="font-semibold">{issue.code}</p>
+                        <p className="mt-1">{issue.message}</p>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+
+                <button
+                  className="w-full rounded-full bg-hire-300 px-4 py-2.5 text-sm font-semibold text-ink-950 transition hover:bg-hire-200 active:scale-[0.98] disabled:cursor-not-allowed disabled:bg-white/10 disabled:text-slate-500"
+                  disabled={!result.validation.valid}
+                  onClick={importWorkflow}
+                  type="button"
+                >
+                  导入经典画布
+                </button>
+              </div>
+            ) : (
+              <p className="mt-3 text-sm leading-6 text-slate-400">
+                校验通过后可以保存为本地草稿，并进入经典画布继续编辑。
+              </p>
+            )}
+          </section>
+
+          {result ? <WorkflowRun definition={result.workflow} /> : null}
+        </aside>
+      </div>
+    </PageContainer>
+  );
+}

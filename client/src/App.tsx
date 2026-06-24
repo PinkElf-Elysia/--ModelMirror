@@ -4,6 +4,7 @@ import ChatPage from "./pages/ChatPage";
 import ComingSoonPage from "./pages/ComingSoonPage";
 import ExpertTeamPage from "./pages/ExpertTeamPage";
 import McpBrowserPage from "./pages/McpBrowserPage";
+import MetaAgentPage from "./pages/MetaAgentPage";
 import ModelListPage from "./pages/ModelListPage";
 import StudioHomePage from "./pages/StudioHomePage";
 import RagPage from "./pages/RagPage";
@@ -19,6 +20,7 @@ export default function App() {
       <Route element={<ModelListPage />} path="/models" />
       <Route element={<StudioHomePage />} path="/studio" />
       <Route element={<AgentsPage />} path="/agents" />
+      <Route element={<MetaAgentPage />} path="/agents/meta-agent" />
       <Route element={<ExpertTeamPage />} path="/expert-team" />
       <Route element={<McpBrowserPage />} path="/mcps" />
       <Route element={<SkillBrowserPage />} path="/skills" />

@@ -28,6 +28,7 @@ import {
   type WorkflowNodeData,
   type WorkflowNodeKind,
 } from "../../types/workflow";
+import { readStoredWorkflow, saveStoredWorkflow } from "../../utils/workflowStorage";
 import NodePalette from "./NodePalette";
 import WorkflowNodeCard from "./WorkflowNodeCard";
 import WorkflowRun from "./WorkflowRun";
@@ -35,8 +36,6 @@ import WorkflowRun from "./WorkflowRun";
 const nodeTypes = {
   workflowNode: WorkflowNodeCard,
 };
-
-const storagePrefix = "modelmirror-workflow:";
 
 function createNodeData(kind: WorkflowNodeKind): WorkflowNodeData {
   if (kind === "input") {
@@ -311,14 +310,7 @@ function initialDefinition(workflowId: string): WorkflowDefinition {
 }
 
 function loadDefinition(workflowId: string) {
-  const raw = window.localStorage.getItem(`${storagePrefix}${workflowId}`);
-  if (!raw) return initialDefinition(workflowId);
-
-  try {
-    return JSON.parse(raw) as WorkflowDefinition;
-  } catch {
-    return initialDefinition(workflowId);
-  }
+  return readStoredWorkflow(workflowId) ?? initialDefinition(workflowId);
 }
 
 function Field({
@@ -1349,10 +1341,7 @@ function WorkflowCanvas({ workflowId }: WorkflowCanvasProps) {
       ...definition,
       updatedAt: new Date().toISOString(),
     };
-    window.localStorage.setItem(
-      `${storagePrefix}${workflowId}`,
-      JSON.stringify(savedDefinition),
-    );
+    saveStoredWorkflow(savedDefinition);
     setSaveNotice("已保存到本地草稿箱");
     window.setTimeout(() => setSaveNotice(""), 1800);
   }

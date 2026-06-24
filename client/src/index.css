@@ -156,6 +156,39 @@ textarea {
     stroke: #fb923c !important;
   }
 
+  .modelmirror-flow-controls.react-flow__controls {
+    --xy-controls-button-background-color-default: rgba(15, 23, 42, 0.96);
+    --xy-controls-button-background-color-hover-default: rgba(253, 186, 116, 0.18);
+    --xy-controls-button-color-default: #fed7aa;
+    --xy-controls-button-color-hover-default: #fb923c;
+    --xy-controls-button-border-color-default: rgba(253, 186, 116, 0.24);
+    background: rgba(15, 23, 42, 0.96) !important;
+  }
+
+  .modelmirror-flow-controls .react-flow__controls-button {
+    background: rgba(15, 23, 42, 0.92) !important;
+    color: #fed7aa !important;
+  }
+
+  .modelmirror-flow-controls .react-flow__controls-button:hover {
+    background: rgba(253, 186, 116, 0.18) !important;
+    color: #fb923c !important;
+  }
+
+  .modelmirror-flow-controls .react-flow__controls-button svg,
+  .modelmirror-flow-controls .react-flow__controls-button svg * {
+    color: #fed7aa !important;
+    fill: #fed7aa !important;
+    stroke: #fed7aa !important;
+  }
+
+  .modelmirror-flow-controls .react-flow__controls-button:hover svg,
+  .modelmirror-flow-controls .react-flow__controls-button:hover svg * {
+    color: #fb923c !important;
+    fill: #fb923c !important;
+    stroke: #fb923c !important;
+  }
+
   .react-flow__minimap {
     overflow: hidden;
     border: 1px solid rgba(255, 255, 255, 0.1);

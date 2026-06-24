@@ -82,33 +82,33 @@ export default function StudioHomePage() {
         <div>
           <p className="text-sm font-semibold text-white">工作台入口</p>
           <p className="mt-2 text-sm leading-6 text-slate-400">
-            救援版本把工作流和资料库重新放回 Dify 稳定路径，自研路线只作为备用实验入口。
+            工作流默认使用经典自研画布，RAG本地知识库已开放，其他能力按模块持续扩展。
           </p>
           <div className="mt-4 space-y-2">
             <Link
               className="block rounded-lg border border-hire-300/25 bg-hire-300/10 px-3 py-2 text-sm font-semibold text-hire-100 transition hover:bg-hire-300/20"
               to="/workflow"
             >
-              进入 Dify 工作流
+              进入经典工作流
             </Link>
             <Link
               className="block rounded-lg border border-white/10 bg-white/[0.045] px-3 py-2 text-sm font-semibold text-slate-200 transition hover:border-hire-300/35 hover:bg-hire-300/10"
               to="/rag"
             >
-              打开 Dify 资料库
+              打开本地知识库
             </Link>
           </div>
         </div>
       }
     >
       <header className="mb-6 overflow-hidden rounded-lg border border-hire-300/20 bg-[linear-gradient(135deg,rgba(67,20,7,0.76),rgba(6,9,22,0.94)_52%,rgba(8,51,68,0.42))] p-6 shadow-prism">
-        <p className="text-sm font-semibold text-hire-100">稳定工作台</p>
+        <p className="text-sm font-semibold text-hire-100">本地工作台</p>
         <h1 className="mt-3 text-3xl font-semibold text-white sm:text-4xl">
-          模镜工作台已回退到 Dify 稳定集成
+          模镜工作台已切换到本地能力
         </h1>
         <p className="mt-3 max-w-3xl text-sm leading-6 text-slate-300">
-          这是救援后的总览页。工作流和资料库继续由 Dify 承载，未来自研替代会在
-          独立路由、独立测试和可回退开关下逐步推进。
+          工作流由经典自研画布承载，RAG 资料库使用本地知识库链路。后续能力继续按模块推进，
+          保持独立测试和可回退开关。
         </p>
       </header>
 
@@ -121,16 +121,16 @@ export default function StudioHomePage() {
       <section className="surface-card mt-6 rounded-lg p-5">
         <div className="flex items-center justify-between gap-3">
           <div>
-            <h2 className="text-xl font-semibold text-white">救援记录</h2>
+            <h2 className="text-xl font-semibold text-white">迭代记录</h2>
             <p className="mt-1 text-sm text-slate-400">
-              这里记录本次回退和后续治理动作。
+              这里记录本地工作流、RAG 与工具能力的推进状态。
             </p>
           </div>
           <Link
             className="rounded-full border border-hire-300/30 bg-hire-300/10 px-4 py-2 text-sm font-semibold text-hire-100 transition hover:bg-hire-300/20"
             to="/workflow/classic"
           >
-            查看备用画布
+            查看经典画布
           </Link>
         </div>
 

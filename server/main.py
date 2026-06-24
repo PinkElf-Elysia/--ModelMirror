@@ -42,6 +42,29 @@ except ModuleNotFoundError:
     from api.workflow_native import router as workflow_native_router
 
 try:
+    from server.meta_agent import (
+        MetaAgentGenerateRequest,
+        MetaAgentGenerateResponse,
+        build_meta_agent_prompt,
+        build_workflow_from_plan,
+        parse_meta_agent_plan,
+    )
+    from server.meta_agent.prompts import META_AGENT_SYSTEM_PROMPT
+    from server.workflow_native.schemas import NativeWorkflowDefinition
+    from server.workflow_native.validate import validate_workflow_graph
+except ModuleNotFoundError:
+    from meta_agent import (
+        MetaAgentGenerateRequest,
+        MetaAgentGenerateResponse,
+        build_meta_agent_prompt,
+        build_workflow_from_plan,
+        parse_meta_agent_plan,
+    )
+    from meta_agent.prompts import META_AGENT_SYSTEM_PROMPT
+    from workflow_native.schemas import NativeWorkflowDefinition
+    from workflow_native.validate import validate_workflow_graph
+
+try:
     from server.rag.document_parser import parse_document
     from server.rag.rag_service import RagService
 except ModuleNotFoundError:
@@ -68,6 +91,19 @@ except ModuleNotFoundError:
         validate_server_command,
     )
     from registry.tool_registry import ToolRegistry
+
+try:
+    from server.xpert_runtime import (
+        ModelCallRequest,
+        ModelCallResponse,
+        create_default_runtime,
+    )
+except ModuleNotFoundError:
+    from xpert_runtime import (
+        ModelCallRequest,
+        ModelCallResponse,
+        create_default_runtime,
+    )
 
 load_dotenv()
 
@@ -1545,6 +1581,66 @@ async def stream_workflow_llm_text(
 @app.get("/api/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.post("/api/meta-agent/generate-workflow", response_model=MetaAgentGenerateResponse)
+async def generate_meta_agent_workflow(
+    payload: MetaAgentGenerateRequest,
+    request: Request,
+):
+    if not get_llm_gateway_config()[0]:
+        return JSONResponse(
+            status_code=500,
+            content={"error": LLM_GATEWAY_NOT_CONFIGURED_MESSAGE},
+        )
+
+    try:
+        rate_limit_or_raise(client_ip(request))
+        validate_plain_message(payload.goal)
+    except HTTPException as exc:
+        return JSONResponse(status_code=exc.status_code, content={"error": str(exc.detail)})
+
+    try:
+        prompt = build_meta_agent_prompt(payload.goal, payload.max_tasks)
+        raw_plan = await collect_chat_completion_text(
+            payload.model_id,
+            [
+                ChatMessage(role="system", content=META_AGENT_SYSTEM_PROMPT),
+                ChatMessage(role="user", content=prompt),
+            ],
+            temperature=payload.temperature,
+            max_tokens=4096,
+        )
+        plan = parse_meta_agent_plan(raw_plan, max_tasks=payload.max_tasks)
+        workflow, warnings = build_workflow_from_plan(
+            goal=payload.goal,
+            plan=plan,
+            model_id=payload.model_id,
+        )
+        validation = validate_workflow_graph(
+            NativeWorkflowDefinition.model_validate(
+                {
+                    "id": workflow["id"],
+                    "title": workflow["title"],
+                    "version": "meta-agent-v1",
+                    "source": "workflow-native",
+                    "nodes": workflow["nodes"],
+                    "edges": workflow["edges"],
+                }
+            )
+        )
+        return MetaAgentGenerateResponse(
+            goal=payload.goal,
+            plan=plan,
+            workflow=workflow,
+            warnings=warnings,
+            validation=validation.model_dump(mode="json"),
+        )
+    except ValueError as exc:
+        return JSONResponse(status_code=422, content={"error": str(exc)})
+    except Exception as exc:
+        logger.exception("Meta-agent workflow generation failed")
+        return JSONResponse(status_code=500, content={"error": str(exc)})
 
 
 @app.post("/api/workflow/run")
@@ -3525,34 +3621,158 @@ async def chat(payload: ChatRequest, request: Request):
             content={"error": "后端校验请求时出错，请查看服务日志。"},
         )
 
+    runtime_pipeline = None
+    runtime_context = None
+    runtime_task_id = uuid.uuid4().hex
+    try:
+        runtime_pipeline, runtime_context = create_default_runtime()
+        runtime_context.task_id = runtime_task_id
+        runtime_context.trace_id = request.headers.get("x-trace-id") or runtime_task_id
+        runtime_context.metadata = {
+            "model_id": payload.model_id,
+            "message_count": len(payload.messages),
+        }
+        system_prompt = request.headers.get("x-system-prompt", "").strip()
+        if system_prompt:
+            runtime_context.metadata["system_prompt"] = system_prompt
+        await runtime_pipeline.before_agent(
+            {
+                "model_id": payload.model_id,
+                "messages": chat_messages_json(payload.messages),
+            },
+            runtime_context,
+        )
+    except Exception as exc:
+        runtime_pipeline = None
+        runtime_context = None
+        logger.warning("Xpert runtime chat setup failed; falling back direct path: %s", exc)
+
     client = httpx.AsyncClient(**llm_client_kwargs())
     actual_model_id = payload.model_id
     fallback_notice = ""
 
-    async def send_to_upstream(model_id: str) -> httpx.Response:
+    async def finalize_runtime(
+        status: str,
+        model_id: str,
+        text: str = "",
+        error: str | None = None,
+    ) -> None:
+        if runtime_pipeline is None or runtime_context is None:
+            return
+        try:
+            await runtime_pipeline.after_model(
+                ModelCallResponse(
+                    text=text,
+                    metadata={
+                        "model_id": model_id,
+                        "status": status,
+                        "error": error,
+                    },
+                ),
+                runtime_context,
+            )
+            await runtime_pipeline.after_agent(
+                {
+                    "model_id": model_id,
+                    "messages": chat_messages_json(payload.messages),
+                    "status": status,
+                    "error": error,
+                },
+                runtime_context,
+            )
+        except Exception as exc:
+            logger.warning("Xpert runtime chat finalize failed: %s", exc)
+
+    async def send_prepared_to_upstream(
+        model_id: str,
+        request_payload: dict[str, Any],
+    ) -> httpx.Response:
         logger.info("Sending chat request to model=%s", model_id)
         return await client.send(
             client.build_request(
                 "POST",
                 url,
                 headers=llm_gateway_headers(key),
-                json=build_upstream_payload(payload, model_id),
+                json=request_payload,
             ),
             stream=True,
         )
+
+    async def send_to_upstream(model_id: str) -> httpx.Response:
+        request_payload = build_upstream_payload(payload, model_id)
+        if runtime_pipeline is None or runtime_context is None:
+            return await send_prepared_to_upstream(model_id, request_payload)
+
+        handler_started = False
+        try:
+            runtime_request = ModelCallRequest(
+                model_id=model_id,
+                messages=chat_messages_json(payload.messages),
+                params={
+                    "temperature": payload.temperature,
+                    "top_p": payload.top_p,
+                    "max_tokens": payload.max_tokens,
+                    "seed": payload.seed,
+                    "stop": payload.stop,
+                    "stream": True,
+                },
+            )
+            prepared = await runtime_pipeline.before_model(runtime_request, runtime_context)
+            runtime_payload = payload.model_copy(
+                update={
+                    "messages": [
+                        ChatMessage.model_validate(message)
+                        for message in prepared.messages
+                    ]
+                }
+            )
+            request_payload = build_upstream_payload(runtime_payload, model_id)
+
+            async def runtime_model_handler(
+                request_for_model: ModelCallRequest,
+            ) -> ModelCallResponse:
+                nonlocal handler_started
+                handler_started = True
+                upstream_response = await send_prepared_to_upstream(
+                    request_for_model.model_id,
+                    request_payload,
+                )
+                return ModelCallResponse(
+                    text="",
+                    raw=upstream_response,
+                    metadata={"model_id": request_for_model.model_id, "streaming": True},
+                )
+
+            wrapped_response = await runtime_pipeline.wrap_model_call(
+                prepared,
+                runtime_model_handler,
+                runtime_context,
+            )
+            if isinstance(wrapped_response.raw, httpx.Response):
+                return wrapped_response.raw
+            logger.warning("Xpert runtime model wrapper returned no upstream response.")
+        except Exception as exc:
+            if handler_started:
+                raise
+            logger.warning("Xpert runtime chat prepare failed; using direct path: %s", exc)
+
+        return await send_prepared_to_upstream(model_id, request_payload)
 
     try:
         response = await send_to_upstream(actual_model_id)
     except httpx.TimeoutException:
         logger.exception("OpenRouter request timed out model=%s", actual_model_id)
+        await finalize_runtime("error", actual_model_id, error="timeout")
         await client.aclose()
         return JSONResponse(status_code=504, content={"error": "模型响应超时，请稍后重试。"})
     except httpx.HTTPError as exc:
         logger.exception("OpenRouter connection failed model=%s error=%s", actual_model_id, exc)
+        await finalize_runtime("error", actual_model_id, error=str(exc))
         await client.aclose()
         return JSONResponse(status_code=502, content={"error": "模型服务暂时无法连接，请检查网络或代理配置。"})
     except Exception:
         logger.exception("Unexpected error before upstream stream model=%s", actual_model_id)
+        await finalize_runtime("error", actual_model_id, error="unexpected upstream error")
         await client.aclose()
         return JSONResponse(status_code=500, content={"error": "后端代理请求时出错，请查看服务日志。"})
 
@@ -3577,6 +3797,11 @@ async def chat(payload: ChatRequest, request: Request):
         ):
             fallback_model_id = fallback_model_for(payload.messages)
             if any(message_has_image(message.content) for message in payload.messages) and not model_supports_image_input(fallback_model_id):
+                await finalize_runtime(
+                    "error",
+                    actual_model_id,
+                    error="no multimodal fallback model",
+                )
                 await client.aclose()
                 return JSONResponse(
                     status_code=response.status_code,
@@ -3591,10 +3816,12 @@ async def chat(payload: ChatRequest, request: Request):
                 )
             except httpx.TimeoutException:
                 logger.exception("Fallback model timed out model=%s", fallback_model_id)
+                await finalize_runtime("error", fallback_model_id, error="fallback timeout")
                 await client.aclose()
                 return JSONResponse(status_code=504, content={"error": "兜底模型响应超时，请稍后重试。"})
             except httpx.HTTPError as exc:
                 logger.exception("Fallback model connection failed model=%s error=%s", fallback_model_id, exc)
+                await finalize_runtime("error", fallback_model_id, error=str(exc))
                 await client.aclose()
                 return JSONResponse(status_code=502, content={"error": "当前模型和兜底模型都暂时无法连接。"})
 
@@ -3603,6 +3830,7 @@ async def chat(payload: ChatRequest, request: Request):
                 await response.aclose()
                 await client.aclose()
                 fallback_message, _ = parse_upstream_error(response.status_code, fallback_body)
+                await finalize_runtime("error", fallback_model_id, error=fallback_message)
                 logger.warning(
                     "Fallback model also failed status=%s model=%s message=%s",
                     response.status_code,
@@ -3614,6 +3842,7 @@ async def chat(payload: ChatRequest, request: Request):
                     content={"error": f"{message}；兜底模型也暂不可用：{fallback_message}"},
                 )
         else:
+            await finalize_runtime("error", actual_model_id, error=message)
             await client.aclose()
             return JSONResponse(
                 status_code=response.status_code,
@@ -3622,12 +3851,16 @@ async def chat(payload: ChatRequest, request: Request):
 
     async def stream_response():
         buffer = ""
+        accumulated_chunks: list[str] = []
+        runtime_status = "completed"
+        runtime_error: str | None = None
         try:
             if fallback_notice:
                 payload_json = json.dumps(
                     {"choices": [{"delta": {"content": fallback_notice}}]},
                     ensure_ascii=False,
                 )
+                accumulated_chunks.append(fallback_notice)
                 yield f"data: {payload_json}\n\n".encode("utf-8")
 
             async for chunk in response.aiter_text():
@@ -3646,23 +3879,35 @@ async def chat(payload: ChatRequest, request: Request):
                 for line in complete_lines:
                     if line.lstrip().startswith(":"):
                         continue
+                    accumulated_chunks.extend(sse_delta_text(line))
                     yield line.encode("utf-8")
                 await asyncio.sleep(0)
         except httpx.HTTPError:
+            runtime_status = "error"
+            runtime_error = "stream interrupted"
             logger.exception("OpenRouter stream interrupted model=%s", actual_model_id)
             yield (
                 'data: {"error":{"message":"模型服务连接中断，请稍后重试。"}}\n\n'
             ).encode("utf-8")
         except Exception:
+            runtime_status = "error"
+            runtime_error = "stream proxy failed"
             logger.exception("Unexpected stream error model=%s", actual_model_id)
             yield (
                 'data: {"error":{"message":"后端转发流式响应时出错，请查看服务日志。"}}\n\n'
             ).encode("utf-8")
         finally:
             if buffer and not buffer.lstrip().startswith(":"):
+                accumulated_chunks.extend(sse_delta_text(buffer))
                 yield buffer.encode("utf-8")
             await response.aclose()
             await client.aclose()
+            await finalize_runtime(
+                runtime_status,
+                actual_model_id,
+                "".join(accumulated_chunks),
+                runtime_error,
+            )
 
     return StreamingResponse(
         stream_response(),
