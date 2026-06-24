@@ -1,3 +1,9 @@
+import { useEffect, useState } from "react";
+
+import {
+  fetchRuntimeMiddlewareNodes,
+  type RuntimeMiddlewareNode,
+} from "../../types/runtimeMiddleware";
 import { type WorkflowNodeKind } from "../../types/workflow";
 
 interface PaletteItem {
@@ -124,7 +130,52 @@ const paletteItems: PaletteItem[] = [
   },
 ];
 
+const middlewareIconMap: Record<string, string> = {
+  Activity: "〽",
+  ClipboardList: "▦",
+  MessageSquare: "◇",
+  Puzzle: "▣",
+  Shield: "◇",
+};
+
+function MiddlewareIcon({ icon }: { icon: string }) {
+  return <span aria-hidden="true">{middlewareIconMap[icon] ?? "▣"}</span>;
+}
+
 export default function NodePalette() {
+  const [middlewareNodes, setMiddlewareNodes] = useState<RuntimeMiddlewareNode[]>([]);
+  const [middlewareLoading, setMiddlewareLoading] = useState(false);
+  const [middlewareError, setMiddlewareError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let isMounted = true;
+    setMiddlewareLoading(true);
+    fetchRuntimeMiddlewareNodes()
+      .then((nodes) => {
+        if (!isMounted) {
+          return;
+        }
+        setMiddlewareNodes(nodes.filter((node) => node.enabled));
+        setMiddlewareError(null);
+      })
+      .catch((error) => {
+        console.error("Failed to load middleware nodes:", error);
+        if (!isMounted) {
+          return;
+        }
+        setMiddlewareError("加载中间件节点失败");
+      })
+      .finally(() => {
+        if (isMounted) {
+          setMiddlewareLoading(false);
+        }
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
   return (
     <div className="space-y-3">
       {paletteItems.map((item) => (
@@ -153,6 +204,68 @@ export default function NodePalette() {
           </span>
         </button>
       ))}
+
+      <div className="pt-3">
+        <div className="mb-2 flex items-center justify-between">
+          <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+            智能体中间件
+          </h3>
+          {middlewareLoading ? (
+            <span className="text-[11px] text-slate-500">加载中...</span>
+          ) : null}
+        </div>
+
+        {middlewareError ? (
+          <p className="rounded-lg border border-amber-300/20 bg-amber-300/10 px-3 py-2 text-xs leading-5 text-amber-100">
+            {middlewareError}，原有节点可继续使用。
+          </p>
+        ) : null}
+
+        {!middlewareError && middlewareNodes.length > 0 ? (
+          <div className="space-y-3">
+            {middlewareNodes.map((node) => (
+              <button
+                className="group w-full rounded-lg border border-white/10 bg-white/[0.045] p-3 text-left transition duration-200 hover:-translate-y-0.5 hover:border-hire-300/35 hover:bg-hire-300/10"
+                draggable
+                key={node.id}
+                onDragStart={(event) => {
+                  const payload = {
+                    kind: "runtime_middleware",
+                    runtimeMiddlewareId: node.id,
+                    runtimeMiddlewareKind: node.kind,
+                    title: node.title,
+                    description: node.description,
+                    fields: node.fields,
+                    metadata: node.metadata ?? {},
+                  };
+                  const serialized = JSON.stringify(payload);
+                  event.dataTransfer.setData("application/modelmirror-node", serialized);
+                  event.dataTransfer.setData(
+                    "application/modelmirror-runtime-middleware",
+                    serialized,
+                  );
+                  event.dataTransfer.effectAllowed = "move";
+                }}
+                type="button"
+              >
+                <span className="flex items-start gap-3">
+                  <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-hire-300/25 bg-hire-300/10 text-hire-100">
+                    <MiddlewareIcon icon={node.icon} />
+                  </span>
+                  <span className="min-w-0">
+                    <span className="block text-sm font-semibold text-white">
+                      {node.title}
+                    </span>
+                    <span className="mt-1 block text-xs leading-5 text-slate-400">
+                      {node.description}
+                    </span>
+                  </span>
+                </span>
+              </button>
+            ))}
+          </div>
+        ) : null}
+      </div>
     </div>
   );
 }

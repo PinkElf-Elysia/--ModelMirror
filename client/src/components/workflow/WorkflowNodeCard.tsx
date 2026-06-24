@@ -128,6 +128,13 @@ const nodeMeta = {
     bg: "bg-violet-300/10",
     text: "text-violet-100",
   },
+  runtime_middleware: {
+    icon: "▣",
+    label: "中间件",
+    border: "border-indigo-300/40",
+    bg: "bg-indigo-300/10",
+    text: "text-indigo-100",
+  },
   output: {
     icon: "📤",
     label: "交付工位",
@@ -184,6 +191,9 @@ function outputName(data: WorkflowNode["data"]) {
   }
   if (data.kind === "iteration") {
     return `${data.inputVariable ?? "items"} as ${data.iterationVariable ?? "item"} -> ${data.outputVariable ?? "iteration_output"}`;
+  }
+  if (data.kind === "runtime_middleware") {
+    return `${data.runtimeMiddlewareId ?? "middleware"} → ${data.runtimeMiddlewareKind ?? "runtime"}`;
   }
   if (data.kind === "output") return data.outputVariable ?? "final_output";
   return data.outputVariable ?? "llm_output";

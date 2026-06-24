@@ -668,6 +668,58 @@ async def test_validate_agent_invalid_mode(client: httpx.AsyncClient) -> None:
 
 
 @pytest.mark.asyncio
+async def test_validate_runtime_middleware_ok(client: httpx.AsyncClient) -> None:
+    workflow = linear_workflow()
+    workflow["nodes"][1] = {
+        "id": "middleware",
+        "type": "runtime_middleware",
+        "data": {
+            "kind": "runtime_middleware",
+            "title": "系统提示词注入器",
+            "description": "运行时中间件原型节点。",
+            "runtimeMiddlewareId": "system_prompt_injector",
+            "runtimeMiddlewareKind": "runtime_middleware.system_prompt_injector",
+            "runtimeMiddlewareConfig": {"system_prompt": "你是助手。"},
+        },
+    }
+    workflow["nodes"][2]["data"]["outputVariable"] = "user_input"
+    workflow["edges"] = [
+        {"id": "e1", "source": "input", "target": "middleware"},
+        {"id": "e2", "source": "middleware", "target": "output"},
+    ]
+
+    data = await validate(client, workflow)
+
+    assert data["valid"] is True
+
+
+@pytest.mark.asyncio
+async def test_validate_runtime_middleware_missing_metadata(
+    client: httpx.AsyncClient,
+) -> None:
+    workflow = linear_workflow()
+    workflow["nodes"][1] = {
+        "id": "middleware",
+        "type": "runtime_middleware",
+        "data": {
+            "kind": "runtime_middleware",
+            "title": "中间件节点",
+        },
+    }
+    workflow["edges"] = [
+        {"id": "e1", "source": "input", "target": "middleware"},
+        {"id": "e2", "source": "middleware", "target": "output"},
+    ]
+
+    data = await validate(client, workflow)
+
+    assert data["valid"] is False
+    codes = issue_codes(data)
+    assert "missing_runtime_middleware_id" in codes
+    assert "missing_runtime_middleware_kind" in codes
+
+
+@pytest.mark.asyncio
 async def test_templates_endpoint_returns_starter_template(
     client: httpx.AsyncClient,
 ) -> None:

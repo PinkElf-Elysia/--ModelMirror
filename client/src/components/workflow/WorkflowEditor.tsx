@@ -28,6 +28,7 @@ import {
   type WorkflowNodeData,
   type WorkflowNodeKind,
 } from "../../types/workflow";
+import { type RuntimeMiddlewareField } from "../../types/runtimeMiddleware";
 import { readStoredWorkflow, saveStoredWorkflow } from "../../utils/workflowStorage";
 import NodePalette from "./NodePalette";
 import WorkflowNodeCard from "./WorkflowNodeCard";
@@ -37,7 +38,90 @@ const nodeTypes = {
   workflowNode: WorkflowNodeCard,
 };
 
-function createNodeData(kind: WorkflowNodeKind): WorkflowNodeData {
+interface RuntimeMiddlewareDragPayload {
+  kind: "runtime_middleware";
+  runtimeMiddlewareId?: string;
+  runtimeMiddlewareKind?: string;
+  title?: string;
+  description?: string;
+  fields?: RuntimeMiddlewareField[];
+  metadata?: Record<string, unknown>;
+}
+
+const runtimeMiddlewareFieldTypes = new Set([
+  "text",
+  "textarea",
+  "select",
+  "boolean",
+  "number",
+  "json",
+]);
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function isRuntimeMiddlewareField(value: unknown): value is RuntimeMiddlewareField {
+  return (
+    isRecord(value) &&
+    typeof value.name === "string" &&
+    typeof value.label === "string" &&
+    typeof value.type === "string" &&
+    runtimeMiddlewareFieldTypes.has(value.type)
+  );
+}
+
+function parseRuntimeMiddlewarePayload(
+  raw: string,
+): RuntimeMiddlewareDragPayload | null {
+  if (!raw.trim().startsWith("{")) {
+    return null;
+  }
+
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!isRecord(parsed) || parsed.kind !== "runtime_middleware") {
+      return null;
+    }
+
+    return {
+      kind: "runtime_middleware",
+      runtimeMiddlewareId:
+        typeof parsed.runtimeMiddlewareId === "string"
+          ? parsed.runtimeMiddlewareId
+          : undefined,
+      runtimeMiddlewareKind:
+        typeof parsed.runtimeMiddlewareKind === "string"
+          ? parsed.runtimeMiddlewareKind
+          : undefined,
+      title: typeof parsed.title === "string" ? parsed.title : undefined,
+      description:
+        typeof parsed.description === "string" ? parsed.description : undefined,
+      fields: Array.isArray(parsed.fields)
+        ? parsed.fields.filter(isRuntimeMiddlewareField)
+        : [],
+      metadata: isRecord(parsed.metadata) ? parsed.metadata : {},
+    };
+  } catch {
+    return null;
+  }
+}
+
+function createRuntimeMiddlewareConfig(
+  fields: RuntimeMiddlewareField[],
+): Record<string, unknown> {
+  return fields.reduce<Record<string, unknown>>((config, field) => {
+    if (field.default !== undefined) {
+      config[field.name] = field.default;
+    }
+    return config;
+  }, {});
+}
+
+function createNodeData(
+  kind: WorkflowNodeKind,
+  payload?: RuntimeMiddlewareDragPayload,
+): WorkflowNodeData {
   if (kind === "input") {
     return {
       kind,
@@ -252,6 +336,23 @@ function createNodeData(kind: WorkflowNodeKind): WorkflowNodeData {
     };
   }
 
+  if (kind === "runtime_middleware") {
+    const fields = payload?.fields ?? [];
+    const middlewareId = payload?.runtimeMiddlewareId ?? "unknown";
+    const middlewareKind =
+      payload?.runtimeMiddlewareKind ?? "runtime_middleware.unknown";
+    return {
+      kind,
+      title: payload?.title ?? "中间件节点",
+      description: payload?.description ?? "运行时中间件原型节点。",
+      runtimeMiddlewareId: middlewareId,
+      runtimeMiddlewareKind: middlewareKind,
+      runtimeMiddlewareFields: fields,
+      runtimeMiddlewareMetadata: payload?.metadata ?? {},
+      runtimeMiddlewareConfig: createRuntimeMiddlewareConfig(fields),
+    };
+  }
+
   return {
     kind,
     title: "最终交付",
@@ -260,12 +361,17 @@ function createNodeData(kind: WorkflowNodeKind): WorkflowNodeData {
   };
 }
 
-function createNode(kind: WorkflowNodeKind, x: number, y: number): WorkflowNode {
+function createNode(
+  kind: WorkflowNodeKind,
+  x: number,
+  y: number,
+  payload?: RuntimeMiddlewareDragPayload,
+): WorkflowNode {
   return {
     id: `${kind}-${Date.now()}-${Math.random().toString(16).slice(2, 7)}`,
     type: "workflowNode",
     position: { x, y },
-    data: createNodeData(kind),
+    data: createNodeData(kind, payload),
   };
 }
 
@@ -330,6 +436,47 @@ function Field({
 
 function textInputClass() {
   return "w-full rounded-lg border border-white/10 bg-white/[0.055] px-3 py-2 text-sm text-white outline-none transition placeholder:text-slate-500 focus:border-brand-300/50 focus:ring-4 focus:ring-brand-300/10";
+}
+
+function runtimeMiddlewareFieldValue(
+  config: Record<string, unknown> | undefined,
+  field: RuntimeMiddlewareField,
+): unknown {
+  if (config && Object.prototype.hasOwnProperty.call(config, field.name)) {
+    return config[field.name];
+  }
+  return field.default;
+}
+
+function runtimeMiddlewareStringValue(
+  config: Record<string, unknown> | undefined,
+  field: RuntimeMiddlewareField,
+): string {
+  const value = runtimeMiddlewareFieldValue(config, field);
+  if (value === undefined || value === null) {
+    return "";
+  }
+  if (typeof value === "string") {
+    return value;
+  }
+  if (typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  return JSON.stringify(value, null, 2);
+}
+
+function runtimeMiddlewareBooleanValue(
+  config: Record<string, unknown> | undefined,
+  field: RuntimeMiddlewareField,
+): boolean {
+  const value = runtimeMiddlewareFieldValue(config, field);
+  if (typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "string") {
+    return value.toLowerCase() === "true";
+  }
+  return false;
 }
 
 interface RegistryToolOption {
@@ -399,6 +546,13 @@ function NodeConfig({ node, onChange }: NodeConfigProps) {
 
   const data = node.data;
   const update = (patch: Partial<WorkflowNodeData>) => onChange(node.id, patch);
+  const updateRuntimeMiddlewareConfig = (fieldName: string, value: unknown) =>
+    update({
+      runtimeMiddlewareConfig: {
+        ...(data.runtimeMiddlewareConfig ?? {}),
+        [fieldName]: value,
+      },
+    });
 
   return (
     <div className="space-y-4">
@@ -1211,6 +1365,169 @@ function NodeConfig({ node, onChange }: NodeConfigProps) {
         </>
       ) : null}
 
+      {data.kind === "runtime_middleware" ? (
+        <div className="space-y-4">
+          <div className="rounded-lg border border-indigo-300/25 bg-indigo-300/10 px-3 py-2 text-xs leading-5 text-indigo-50">
+            当前为中间件原型节点：运行时会记录并跳过实际编排，下一轮接入真实 MiddlewarePipeline。
+          </div>
+          <div className="rounded-lg border border-white/10 bg-white/[0.035] px-3 py-2">
+            <p className="text-xs font-semibold text-slate-200">
+              {data.runtimeMiddlewareKind ?? "runtime_middleware.unknown"}
+            </p>
+            <p className="mt-1 text-[11px] leading-5 text-slate-500">
+              ID：{data.runtimeMiddlewareId ?? "unknown"}
+            </p>
+          </div>
+          {(data.runtimeMiddlewareFields ?? []).length === 0 ? (
+            <p className="rounded-lg border border-dashed border-white/15 bg-white/[0.035] px-3 py-4 text-sm leading-6 text-slate-400">
+              此中间件暂无可配置字段。
+            </p>
+          ) : (
+            <>
+              <p className="text-xs font-semibold text-slate-300">中间件配置</p>
+              {(data.runtimeMiddlewareFields ?? []).map((field) => (
+                <Field
+                  key={field.name}
+                  label={`${field.label}${field.required ? " *" : ""}`}
+                >
+                  {field.type === "text" ? (
+                    <input
+                      className={textInputClass()}
+                      onChange={(event) =>
+                        updateRuntimeMiddlewareConfig(
+                          field.name,
+                          event.target.value,
+                        )
+                      }
+                      placeholder={field.placeholder}
+                      value={runtimeMiddlewareStringValue(
+                        data.runtimeMiddlewareConfig,
+                        field,
+                      )}
+                    />
+                  ) : null}
+
+                  {field.type === "textarea" ? (
+                    <textarea
+                      className={`${textInputClass()} min-h-24 resize-none leading-6`}
+                      onChange={(event) =>
+                        updateRuntimeMiddlewareConfig(
+                          field.name,
+                          event.target.value,
+                        )
+                      }
+                      placeholder={field.placeholder}
+                      rows={field.rows ?? 3}
+                      value={runtimeMiddlewareStringValue(
+                        data.runtimeMiddlewareConfig,
+                        field,
+                      )}
+                    />
+                  ) : null}
+
+                  {field.type === "boolean" ? (
+                    <label className="flex items-start gap-3 rounded-lg border border-white/10 bg-white/[0.045] px-3 py-2 text-sm text-slate-200">
+                      <input
+                        checked={runtimeMiddlewareBooleanValue(
+                          data.runtimeMiddlewareConfig,
+                          field,
+                        )}
+                        className="mt-1 h-4 w-4 rounded border-white/20 bg-slate-950 text-brand-300"
+                        onChange={(event) =>
+                          updateRuntimeMiddlewareConfig(
+                            field.name,
+                            event.target.checked,
+                          )
+                        }
+                        type="checkbox"
+                      />
+                      <span className="leading-6">
+                        {field.description ?? field.label}
+                      </span>
+                    </label>
+                  ) : null}
+
+                  {field.type === "number" ? (
+                    <input
+                      className={textInputClass()}
+                      max={field.maxValue ?? field.max_value}
+                      min={field.minValue ?? field.min_value}
+                      onChange={(event) =>
+                        updateRuntimeMiddlewareConfig(
+                          field.name,
+                          event.target.value === ""
+                            ? ""
+                            : Number(event.target.value),
+                        )
+                      }
+                      placeholder={field.placeholder}
+                      type="number"
+                      value={runtimeMiddlewareStringValue(
+                        data.runtimeMiddlewareConfig,
+                        field,
+                      )}
+                    />
+                  ) : null}
+
+                  {field.type === "select" ? (
+                    <select
+                      className={textInputClass()}
+                      onChange={(event) =>
+                        updateRuntimeMiddlewareConfig(
+                          field.name,
+                          event.target.value,
+                        )
+                      }
+                      value={runtimeMiddlewareStringValue(
+                        data.runtimeMiddlewareConfig,
+                        field,
+                      )}
+                    >
+                      <option className="bg-slate-950" value="">
+                        请选择
+                      </option>
+                      {(field.options ?? []).map((option) => (
+                        <option
+                          className="bg-slate-950"
+                          key={option}
+                          value={option}
+                        >
+                          {option}
+                        </option>
+                      ))}
+                    </select>
+                  ) : null}
+
+                  {field.type === "json" ? (
+                    <textarea
+                      className={`${textInputClass()} min-h-28 resize-none font-mono text-xs leading-5`}
+                      onChange={(event) =>
+                        updateRuntimeMiddlewareConfig(
+                          field.name,
+                          event.target.value,
+                        )
+                      }
+                      placeholder={field.placeholder ?? '{"key":"value"}'}
+                      rows={field.rows ?? 4}
+                      value={runtimeMiddlewareStringValue(
+                        data.runtimeMiddlewareConfig,
+                        field,
+                      )}
+                    />
+                  ) : null}
+
+                  {field.description && field.type !== "boolean" ? (
+                    <p className="mt-2 text-xs leading-5 text-slate-500">
+                      {field.description}
+                    </p>
+                  ) : null}
+                </Field>
+              ))}
+            </>
+          )}
+        </div>
+      ) : null}
+
       {data.kind === "output" ? (
         <Field label="最终输出变量">
           <input
@@ -1348,15 +1665,46 @@ function WorkflowCanvas({ workflowId }: WorkflowCanvasProps) {
 
   function onDrop(event: React.DragEvent<HTMLDivElement>) {
     event.preventDefault();
-    const kind = event.dataTransfer.getData(
-      "application/modelmirror-node",
-    ) as WorkflowNodeKind;
-    if (!kind) return;
-
     const position = screenToFlowPosition({
       x: event.clientX,
       y: event.clientY,
     });
+
+    const runtimeMiddlewareRaw = event.dataTransfer.getData(
+      "application/modelmirror-runtime-middleware",
+    );
+    const runtimeMiddlewarePayload = runtimeMiddlewareRaw
+      ? parseRuntimeMiddlewarePayload(runtimeMiddlewareRaw)
+      : null;
+    if (runtimeMiddlewarePayload) {
+      const nextNode = createNode(
+        "runtime_middleware",
+        position.x,
+        position.y,
+        runtimeMiddlewarePayload,
+      );
+      setNodes((currentNodes) => [...currentNodes, nextNode]);
+      setSelectedNodeId(nextNode.id);
+      return;
+    }
+
+    const rawKind = event.dataTransfer.getData("application/modelmirror-node");
+    const fallbackPayload = parseRuntimeMiddlewarePayload(rawKind);
+    if (fallbackPayload) {
+      const nextNode = createNode(
+        "runtime_middleware",
+        position.x,
+        position.y,
+        fallbackPayload,
+      );
+      setNodes((currentNodes) => [...currentNodes, nextNode]);
+      setSelectedNodeId(nextNode.id);
+      return;
+    }
+
+    const kind = rawKind as WorkflowNodeKind;
+    if (!kind) return;
+
     const nextNode = createNode(kind, position.x, position.y);
     setNodes((currentNodes) => [...currentNodes, nextNode]);
     setSelectedNodeId(nextNode.id);

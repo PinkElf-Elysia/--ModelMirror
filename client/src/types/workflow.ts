@@ -1,4 +1,5 @@
 import { type Edge, type Node } from "@xyflow/react";
+import { type RuntimeMiddlewareField } from "./runtimeMiddleware";
 
 export type WorkflowNodeKind =
   | "input"
@@ -19,6 +20,7 @@ export type WorkflowNodeKind =
   | "http_request"
   | "list_operation"
   | "iteration"
+  | "runtime_middleware"
   | "output";
 
 export type ConditionOperator = "equals" | "contains";
@@ -80,6 +82,11 @@ export interface WorkflowNodeData extends Record<string, unknown> {
   joinSeparator?: string;
   iterationVariable?: string;
   itemTemplate?: string;
+  runtimeMiddlewareId?: string;
+  runtimeMiddlewareKind?: string;
+  runtimeMiddlewareFields?: RuntimeMiddlewareField[];
+  runtimeMiddlewareMetadata?: Record<string, unknown>;
+  runtimeMiddlewareConfig?: Record<string, unknown>;
 }
 
 export type WorkflowNode = Node<WorkflowNodeData, "workflowNode">;

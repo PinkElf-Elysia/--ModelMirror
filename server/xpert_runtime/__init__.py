@@ -9,6 +9,13 @@ from .capabilities import CapabilityRegistry, RuntimeCapability
 from .defaults import create_default_runtime, event_recorder, system_prompt_injector
 from .events import RuntimeEventStore
 from .middleware import AgentMiddleware, MiddlewarePipeline
+from .middleware_registry import (
+    RuntimeMiddlewareField,
+    RuntimeMiddlewareNode,
+    RuntimeMiddlewareRegistry,
+    register_builtin_middleware_nodes,
+    runtime_middleware_registry,
+)
 from .models import (
     MiddlewareContext,
     ModelCallRequest,
@@ -17,6 +24,12 @@ from .models import (
     RuntimeTask,
     ToolCallRequest,
     ToolCallResponse,
+)
+from .tool_policy import (
+    InMemoryToolAuditStore,
+    ToolAuditRecord,
+    ToolAuditStatus,
+    ToolPermissionPolicy,
 )
 from .toolset import (
     MCPToolsetProvider,
@@ -27,12 +40,14 @@ from .toolset import (
     ToolsetProvider,
     register_mcp_toolset_capability,
 )
+from .tool_runner import run_tool_with_runtime
 
 __all__ = [
     "AgentMiddleware",
     "CapabilityRegistry",
     "create_default_runtime",
     "event_recorder",
+    "InMemoryToolAuditStore",
     "MCPToolsetProvider",
     "MiddlewareContext",
     "MiddlewarePipeline",
@@ -41,14 +56,23 @@ __all__ = [
     "RuntimeCapability",
     "RuntimeEvent",
     "RuntimeEventStore",
+    "RuntimeMiddlewareField",
+    "RuntimeMiddlewareNode",
+    "RuntimeMiddlewareRegistry",
     "RuntimeTask",
     "RuntimeTool",
     "RuntimeToolCall",
     "RuntimeToolError",
     "RuntimeToolResult",
+    "run_tool_with_runtime",
+    "runtime_middleware_registry",
     "system_prompt_injector",
     "ToolCallRequest",
     "ToolCallResponse",
+    "ToolAuditRecord",
+    "ToolAuditStatus",
     "ToolsetProvider",
+    "ToolPermissionPolicy",
+    "register_builtin_middleware_nodes",
     "register_mcp_toolset_capability",
 ]
