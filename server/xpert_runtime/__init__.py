@@ -6,6 +6,7 @@ runtime primitives without adding more orchestration logic to ``server/main.py``
 """
 
 from .capabilities import CapabilityRegistry, RuntimeCapability
+from .agent_tasks import AgentHandoff, AgentTask, AgentTaskStore
 from .defaults import create_default_runtime, event_recorder, system_prompt_injector
 from .events import RuntimeEventStore
 from .middleware import AgentMiddleware, MiddlewarePipeline
@@ -44,6 +45,9 @@ from .tool_runner import run_tool_with_runtime
 
 __all__ = [
     "AgentMiddleware",
+    "AgentHandoff",
+    "AgentTask",
+    "AgentTaskStore",
     "CapabilityRegistry",
     "create_default_runtime",
     "event_recorder",
