@@ -447,6 +447,8 @@ Agent Task Runtime 包含三层：
 
 后端已开放最小 API：`POST /api/runtime/agent-tasks` 创建任务，`GET /api/runtime/agent-tasks/{task_id}` 查询任务，`POST /api/runtime/agent-tasks/{task_id}/cancel` 取消任务，`GET /api/runtime/agent-tasks` 列出任务。当前不做真实多 Agent 编排、不接数据库、不接 Redis/Celery 队列；下一步再把 workflow `agent_task` 节点接入该 store，并逐步扩展 handoff queue、agent selection、持久化与前端任务面板。
 
+前端现阶段复用已有 `/agents/meta-agent` 元智能体入口，不新建多 Agent 页面。该页面新增“任务工作台”卡片：加载最近 AgentTask、查看任务详情、取消任务，并在每次成功生成 workflow 草稿后自动创建一条 `source_agent="meta-agent"`、`assigned_agent="workflow-planner"` 的 AgentTask。当前只做任务可见和取消，不做真实调度；后续 Xpert 对齐完成后，再在同一入口上扩展 handoff、专家分工和多 Agent 协作。
+
 ## 2026-06-17 增量：Agent 节点
 
 `agent` 已进入 workflow-native / classic 共享实验线。它不是完整 Dify Agent 复刻，而是 ReAct-Lite MVP：模型要么直接返回答案，要么返回一个 JSON 工具调用决策，运行器再通过全局 MCP 工具注册表调用对应工具。
