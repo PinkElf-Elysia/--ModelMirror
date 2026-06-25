@@ -4,6 +4,36 @@ import {
   type WorkflowRunEvent,
 } from "../../types/workflow";
 
+interface WorkflowObservationEvent {
+  id: string;
+  type: string;
+  payload: Record<string, unknown>;
+  task_id?: string | null;
+  trace_id?: string | null;
+  severity: string;
+  created_at: number;
+}
+
+interface WorkflowToolAuditRecord {
+  record_id: string;
+  tool_name: string;
+  status: string;
+  started_at: number;
+  finished_at: number | null;
+  duration_ms: number | null;
+  output_length: number | null;
+  content_types?: string[];
+  error: string | null;
+}
+
+interface WorkflowObservationData {
+  task_id: string;
+  events: WorkflowObservationEvent[];
+  event_count: number;
+  tool_audit_records: WorkflowToolAuditRecord[];
+  tool_audit_count: number;
+}
+
 interface WorkflowRunProps {
   definition: WorkflowDefinition;
 }
@@ -86,6 +116,32 @@ function statusClass(status: RunStepStatus) {
   return "border-hire-300/25 bg-hire-300/10 text-hire-100";
 }
 
+function formatObservationTime(value: number | null | undefined) {
+  if (!value) return "";
+  return new Date(value * 1000).toLocaleTimeString();
+}
+
+function observationPayloadSummary(payload: Record<string, unknown>) {
+  const toolName = payload.tool_name;
+  const outputLength = payload.output_length;
+  const contentTypes = payload.content_types;
+  const error = payload.error;
+  const parts: string[] = [];
+  if (typeof toolName === "string" && toolName) {
+    parts.push(`tool=${toolName}`);
+  }
+  if (typeof outputLength === "number") {
+    parts.push(`output=${outputLength}`);
+  }
+  if (Array.isArray(contentTypes) && contentTypes.length > 0) {
+    parts.push(`types=${contentTypes.join(",")}`);
+  }
+  if (typeof error === "string" && error) {
+    parts.push(`error=${error}`);
+  }
+  return parts.join(" · ");
+}
+
 function buildRunSteps(events: WorkflowRunEvent[]) {
   const steps: WorkflowRunStep[] = [];
   const byNodeId = new Map<string, WorkflowRunStep>();
@@ -164,6 +220,10 @@ export default function WorkflowRun({ definition }: WorkflowRunProps) {
     useState<PendingHumanIntervention | null>(null);
   const [humanInput, setHumanInput] = useState("");
   const [isResuming, setIsResuming] = useState(false);
+  const [showObservation, setShowObservation] = useState(false);
+  const [observationData, setObservationData] =
+    useState<WorkflowObservationData | null>(null);
+  const [observationLoading, setObservationLoading] = useState(false);
 
   const inputVariable = useMemo(() => {
     const inputNode = definition.nodes.find((node) => node.data.kind === "input");
@@ -191,6 +251,9 @@ export default function WorkflowRun({ definition }: WorkflowRunProps) {
     setTaskId(null);
     setPendingHuman(null);
     setHumanInput("");
+    setShowObservation(false);
+    setObservationData(null);
+    setObservationLoading(false);
     setIsRunning(true);
 
     try {
@@ -308,6 +371,31 @@ export default function WorkflowRun({ definition }: WorkflowRunProps) {
     }
   }
 
+  async function fetchObservation() {
+    if (!taskId) return;
+    setObservationLoading(true);
+    try {
+      const response = await fetch(`/api/workflow/runtime-events/${taskId}`);
+      if (!response.ok) return;
+      const payload = (await response.json()) as WorkflowObservationData;
+      setObservationData(payload);
+    } catch {
+      // Observability is best-effort; workflow execution output remains primary.
+    } finally {
+      setObservationLoading(false);
+    }
+  }
+
+  function toggleObservation() {
+    setShowObservation((current) => {
+      const next = !current;
+      if (next && taskId && !observationData && !observationLoading) {
+        void fetchObservation();
+      }
+      return next;
+    });
+  }
+
   return (
     <aside className="surface-panel flex min-h-0 flex-col rounded-lg">
       <div className="border-b border-white/10 p-4">
@@ -415,6 +503,125 @@ export default function WorkflowRun({ definition }: WorkflowRunProps) {
           )}
         </div>
       </div>
+
+      {taskId ? (
+        <div className="border-t border-white/10">
+          <button
+            className="flex w-full items-center justify-between px-4 py-3 text-left text-xs font-semibold text-slate-300 transition hover:bg-white/5"
+            onClick={toggleObservation}
+            type="button"
+          >
+            <span>运行观测</span>
+            <span className="text-[11px] text-slate-500">
+              {showObservation ? "收起" : "展开"}
+            </span>
+          </button>
+          {showObservation ? (
+            <div className="space-y-3 px-4 pb-4">
+              {observationLoading ? (
+                <p className="rounded-lg border border-white/10 bg-white/[0.035] px-3 py-2 text-xs text-slate-400">
+                  加载中...
+                </p>
+              ) : observationData ? (
+                <>
+                  <div className="rounded-lg border border-white/10 bg-white/[0.035] p-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <p className="text-xs font-semibold text-slate-200">
+                        运行事件
+                      </p>
+                      <span className="text-[11px] text-slate-500">
+                        {observationData.event_count}
+                      </span>
+                    </div>
+                    {observationData.events.length === 0 ? (
+                      <p className="mt-2 text-xs text-slate-500">暂无事件。</p>
+                    ) : (
+                      <div className="mt-2 max-h-44 space-y-1 overflow-y-auto">
+                        {observationData.events.slice(0, 30).map((event) => {
+                          const summary = observationPayloadSummary(event.payload);
+                          return (
+                            <div
+                              className="rounded-md bg-slate-950/35 px-2 py-1.5"
+                              key={event.id}
+                            >
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="truncate text-[11px] font-semibold text-hire-100">
+                                  {event.type}
+                                </span>
+                                <span className="shrink-0 text-[10px] uppercase text-slate-500">
+                                  {event.severity}
+                                </span>
+                              </div>
+                              <p className="mt-1 truncate text-[11px] text-slate-500">
+                                {formatObservationTime(event.created_at)}
+                                {summary ? ` · ${summary}` : ""}
+                              </p>
+                            </div>
+                          );
+                        })}
+                        {observationData.event_count > 30 ? (
+                          <p className="text-[11px] text-slate-500">
+                            仅展示前 30 条，共 {observationData.event_count} 条。
+                          </p>
+                        ) : null}
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="rounded-lg border border-white/10 bg-white/[0.035] p-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <p className="text-xs font-semibold text-slate-200">
+                        工具调用审计
+                      </p>
+                      <span className="text-[11px] text-slate-500">
+                        {observationData.tool_audit_count}
+                      </span>
+                    </div>
+                    {observationData.tool_audit_records.length === 0 ? (
+                      <p className="mt-2 text-xs text-slate-500">
+                        暂无工具调用记录。
+                      </p>
+                    ) : (
+                      <div className="mt-2 max-h-40 space-y-1 overflow-y-auto">
+                        {observationData.tool_audit_records
+                          .slice(0, 20)
+                          .map((record) => (
+                            <div
+                              className="rounded-md bg-slate-950/35 px-2 py-1.5"
+                              key={record.record_id}
+                            >
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="truncate text-[11px] font-semibold text-slate-200">
+                                  {record.tool_name}
+                                </span>
+                                <span className="shrink-0 text-[10px] uppercase text-slate-500">
+                                  {record.status}
+                                </span>
+                              </div>
+                              <p className="mt-1 truncate text-[11px] text-slate-500">
+                                {record.duration_ms != null
+                                  ? `${record.duration_ms.toFixed(0)}ms`
+                                  : "duration n/a"}
+                                {record.output_length != null
+                                  ? ` · ${record.output_length} chars`
+                                  : ""}
+                                {record.error ? ` · ${record.error}` : ""}
+                              </p>
+                            </div>
+                          ))}
+                      </div>
+                    )}
+                  </div>
+                </>
+              ) : (
+                <p className="rounded-lg border border-white/10 bg-white/[0.035] px-3 py-2 text-xs text-slate-400">
+                  展开后会读取本次运行的 runtime events 和工具审计摘要。
+                </p>
+              )}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
 
       {finalOutput ? (
         <div className="border-t border-white/10 p-4">
