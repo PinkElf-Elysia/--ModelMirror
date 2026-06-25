@@ -427,9 +427,13 @@ Runtime Toolset 还提供了内存态的 `ToolPermissionPolicy` 与 `InMemoryToo
 
 `runtime_middleware` 当前是可视化 + 渐进执行阶段：前端支持从 `NodePalette` 拖拽“智能体中间件”节点到画布，右侧配置面板会根据 `RuntimeMiddlewareField` 动态渲染 `text`、`textarea`、`boolean`、`number`、`select`、`json` 六类基础字段。后端 validate 已最小支持 `runtimeMiddlewareId` 与 `runtimeMiddlewareKind`，classic `workflow_stream` 会为中间件节点发出 `node_delta`，并按已支持的 middleware id 逐步启用真实效果。
 
-`system_prompt_injector` 已具备最小真实执行：节点读取 `runtimeMiddlewareConfig.system_prompt`，先用当前 workflow 变量渲染 `{{variable}}` 模板，再写入运行态上下文；后续 `llm` 节点调用模型时会 prepend 一条 `system` message。若同一条路径上出现多个系统提示词注入器，后执行的节点覆盖前一个。`event_recorder`、`tool_audit`、`mcp_tools` 等中间件节点仍保持 no-op 原型，后续再接入 `MiddlewarePipeline` 的真实编排与审计能力。
+`system_prompt_injector` 已具备最小真实执行：节点读取 `runtimeMiddlewareConfig.system_prompt`，先用当前 workflow 变量渲染 `{{variable}}` 模板，再写入运行态上下文；后续 `llm` 节点调用模型时会 prepend 一条 `system` message。若同一条路径上出现多个系统提示词注入器，后执行的节点覆盖前一个。`mcp_tools` 等中间件节点仍保持 no-op 原型，后续再接入 `MiddlewarePipeline` 的真实编排能力。
 
 `tool_policy` 已进入最小真实执行：节点读取 `runtimeMiddlewareConfig.denied_tools`、`allowed_tools` 与 `allow_by_default`，支持换行或逗号分隔工具名，并创建 `ToolPermissionPolicy` 写入 `workflow_runtime_context`。后续 `mcp_tool` 节点优先使用 workflow 级 policy；无 `tool_policy` 节点时回退全局 `workflow_tool_policy`（默认 `allow_by_default=True`）。当 `denied_tools` 命中或 `allow_by_default=False` 且工具不在白名单时，`run_tool_with_runtime` 会抛出 `RuntimeToolError(code="tool_denied")`，classic workflow 记录 error event、写入空输出并继续后续节点。当前作用范围仅 classic workflow 的 `mcp_tool`，不做持久化权限系统或用户级/workspace 级权限。
+
+`event_recorder` 已进入最小真实可见状态：classic workflow 每个 task 会创建独立 `RuntimeEventStore`，`mcp_tool` 节点通过 `MiddlewareContext.store` 将该 store 传入 `MiddlewarePipeline`，因此 `event_recorder.wrap_tool_call` 会记录 `tool.call.started`、`tool.call.finished`、`tool.call.failed`。事件按 `task_id` 隔离，并可通过 `GET /api/workflow/runtime-events/{task_id}` 查询；前端 `WorkflowRun` 的“运行观测”折叠区会展示事件类型、severity、工具名、输出长度和错误摘要。
+
+`tool_audit` 当前是原型可见状态：每个 workflow task 默认拥有独立 `InMemoryToolAuditStore`，工具调用会记录 `tool_name`、`status`、`started_at`、`finished_at`、`duration_ms`、`output_length`、`content_types` 与 `error`。`runtime_middleware.tool_audit` 节点可读取 `runtimeMiddlewareConfig.max_records`，为本次运行重建指定上限的审计 store；观测 API 返回当前 task 的审计记录。该能力仍为内存态，后续再扩展 per-user/per-workspace 过滤、持久化审计与图形化 trace。
 
 ## 2026-06-17 增量：Agent 节点
 

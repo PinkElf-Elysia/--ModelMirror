@@ -102,6 +102,7 @@ try:
         MiddlewarePipeline,
         ModelCallRequest,
         ModelCallResponse,
+        RuntimeEventStore,
         RuntimeToolCall,
         ToolPermissionPolicy,
         create_default_runtime,
@@ -118,6 +119,7 @@ except ModuleNotFoundError:
         MiddlewarePipeline,
         ModelCallRequest,
         ModelCallResponse,
+        RuntimeEventStore,
         RuntimeToolCall,
         ToolPermissionPolicy,
         create_default_runtime,
@@ -1764,6 +1766,8 @@ async def run_workflow(payload: WorkflowRunRequest, request: Request):
         "paused_node_id": None,
         "created_at": time.monotonic(),
         "ttl": WORKFLOW_TASK_TTL_SECONDS,
+        "runtime_event_store": RuntimeEventStore(),
+        "tool_audit_store": InMemoryToolAuditStore(),
     }
     workflow_task_store[task_id] = task_state
 
@@ -2928,6 +2932,7 @@ async def run_workflow(payload: WorkflowRunRequest, request: Request):
                                     task_id=task_id,
                                     trace_id=task_id,
                                     capabilities=runtime_capabilities,
+                                    store=task_state["runtime_event_store"],
                                     metadata={
                                         "node_id": node.id,
                                         "node_title": title,
@@ -2938,7 +2943,10 @@ async def run_workflow(payload: WorkflowRunRequest, request: Request):
                                     workflow_runtime_context.get("tool_policy")
                                     or workflow_tool_policy
                                 ),
-                                audit_store=workflow_tool_audit_store,
+                                audit_store=(
+                                    task_state.get("tool_audit_store")
+                                    or workflow_tool_audit_store
+                                ),
                             )
                             content_types = call_result.metadata.get("content_types", [])
                             non_text_types = [
@@ -3081,6 +3089,23 @@ async def run_workflow(payload: WorkflowRunRequest, request: Request):
                             "已启用工具权限策略"
                             f"（{allowed_info}；{denied_info}；{default_info}）"
                         )
+                    elif middleware_id == "tool_audit":
+                        raw_max_records = middleware_config.get("max_records")
+                        try:
+                            max_records = int(raw_max_records or 10000)
+                        except (TypeError, ValueError):
+                            max_records = 10000
+                        max_records = max(100, min(max_records, 100000))
+                        task_state["tool_audit_store"] = InMemoryToolAuditStore(
+                            max_records=max_records
+                        )
+                        workflow_runtime_context["active_middlewares"].append(
+                            middleware_id
+                        )
+                        output = (
+                            "已启用工具审计记录器"
+                            f"（本次运行最多保留 {max_records} 条工具记录）"
+                        )
                     elif middleware_id == "system_prompt_injector":
                         raw_system_prompt = str(
                             middleware_config.get("system_prompt")
@@ -3173,7 +3198,7 @@ async def run_workflow(payload: WorkflowRunRequest, request: Request):
             logger.exception("Workflow run failed workflow=%s", payload.workflow.id)
             yield sse_payload({"event": "error", "message": str(exc)})
         finally:
-            workflow_task_store.pop(task_id, None)
+            task_state["completed_at"] = time.monotonic()
 
     return StreamingResponse(
         workflow_stream(),
@@ -3228,6 +3253,61 @@ async def get_workflow_task_status(task_id: str):
         created_at=created_at,
         ttl_seconds_left=ttl_seconds_left,
     )
+
+
+@app.get("/api/workflow/runtime-events/{task_id}")
+async def get_workflow_runtime_events(task_id: str):
+    task = get_workflow_task_or_none(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="工作流任务不存在或已过期。")
+
+    event_store = task.get("runtime_event_store")
+    events: list[dict[str, Any]] = []
+    if isinstance(event_store, RuntimeEventStore):
+        event_list = await event_store.list_events(task_id=task_id)
+        events = [
+            {
+                "id": event.id,
+                "type": event.type,
+                "payload": dict(event.payload or {}),
+                "task_id": event.task_id,
+                "trace_id": event.trace_id,
+                "severity": event.severity,
+                "created_at": event.created_at,
+            }
+            for event in event_list
+        ]
+
+    audit_store = task.get("tool_audit_store")
+    if not isinstance(audit_store, InMemoryToolAuditStore):
+        audit_store = workflow_tool_audit_store
+    audit_records: list[dict[str, Any]] = []
+    try:
+        record_list = await audit_store.list_records()
+        audit_records = [
+            {
+                "record_id": record.record_id,
+                "tool_name": record.tool_name,
+                "status": record.status,
+                "started_at": record.started_at,
+                "finished_at": record.finished_at,
+                "duration_ms": record.duration_ms,
+                "output_length": record.output_length,
+                "content_types": record.content_types,
+                "error": record.error,
+            }
+            for record in record_list
+        ]
+    except Exception as exc:
+        logger.warning("Workflow runtime audit listing failed: %s", exc)
+
+    return {
+        "task_id": task_id,
+        "events": events,
+        "event_count": len(events),
+        "tool_audit_records": audit_records,
+        "tool_audit_count": len(audit_records),
+    }
 
 
 @app.post("/api/fusion/chat")
