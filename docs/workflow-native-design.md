@@ -435,6 +435,18 @@ Runtime Toolset 还提供了内存态的 `ToolPermissionPolicy` 与 `InMemoryToo
 
 `tool_audit` 当前是原型可见状态：每个 workflow task 默认拥有独立 `InMemoryToolAuditStore`，工具调用会记录 `tool_name`、`status`、`started_at`、`finished_at`、`duration_ms`、`output_length`、`content_types` 与 `error`。`runtime_middleware.tool_audit` 节点可读取 `runtimeMiddlewareConfig.max_records`，为本次运行重建指定上限的审计 store；观测 API 返回当前 task 的审计记录。该能力仍为内存态，后续再扩展 per-user/per-workspace 过滤、持久化审计与图形化 trace。
 
+### Agent Task Runtime（Xpert / EvoAgentX 对齐）
+
+当前为最小底座原型阶段，参考 EvoAgentX `AgentManager` 的 agent 状态管理思路，以及 `Environment` 的执行轨迹/任务历史思想，在 ModelMirror 内原生重写为 `server/xpert_runtime/agent_tasks.py`。源码策略是“参考架构，不复制实现”：不搬运 EvoAgentX 原文件，不保留原项目版权头，不引入不兼容协议代码。
+
+Agent Task Runtime 包含三层：
+
+- `AgentTask`：任务实体，包含 `title`、`input`、`status`、`result`、`error`、`source_agent`、`assigned_agent`、`metadata` 与时间戳。
+- `AgentHandoff`：Agent 间任务移交记录，包含 `source_agent`、`target_agent`、`reason`、`status` 与 metadata。
+- `AgentTaskStore`：内存态任务存储，支持 `create/get/list/update/cancel` 与 `create_handoff/list_handoffs`，并将 `agent.task.created`、`agent.task.updated`、`agent.task.cancelled`、`agent.handoff.created` 写入 `RuntimeEventStore`。
+
+后端已开放最小 API：`POST /api/runtime/agent-tasks` 创建任务，`GET /api/runtime/agent-tasks/{task_id}` 查询任务，`POST /api/runtime/agent-tasks/{task_id}/cancel` 取消任务，`GET /api/runtime/agent-tasks` 列出任务。当前不做真实多 Agent 编排、不接数据库、不接 Redis/Celery 队列；下一步再把 workflow `agent_task` 节点接入该 store，并逐步扩展 handoff queue、agent selection、持久化与前端任务面板。
+
 ## 2026-06-17 增量：Agent 节点
 
 `agent` 已进入 workflow-native / classic 共享实验线。它不是完整 Dify Agent 复刻，而是 ReAct-Lite MVP：模型要么直接返回答案，要么返回一个 JSON 工具调用决策，运行器再通过全局 MCP 工具注册表调用对应工具。

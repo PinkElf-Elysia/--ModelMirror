@@ -95,6 +95,7 @@ except ModuleNotFoundError:
 
 try:
     from server.xpert_runtime import (
+        AgentTaskStore,
         CapabilityRegistry,
         InMemoryToolAuditStore,
         MCPToolsetProvider,
@@ -112,6 +113,7 @@ try:
     )
 except ModuleNotFoundError:
     from xpert_runtime import (
+        AgentTaskStore,
         CapabilityRegistry,
         InMemoryToolAuditStore,
         MCPToolsetProvider,
@@ -237,6 +239,8 @@ runtime_capabilities = CapabilityRegistry()
 workflow_mcp_pipeline = MiddlewarePipeline([event_recorder])
 workflow_tool_policy = ToolPermissionPolicy(allow_by_default=True)
 workflow_tool_audit_store = InMemoryToolAuditStore()
+runtime_event_store = RuntimeEventStore()
+agent_task_store = AgentTaskStore(event_store=runtime_event_store)
 runtime_capabilities.register(
     "mcp_tools",
     workflow_mcp_provider,
@@ -3803,6 +3807,87 @@ async def list_registered_tools():
             for tool in await tool_registry.list_tools()
         ]
     )
+
+
+@app.post("/api/runtime/agent-tasks")
+async def create_agent_task(payload: dict[str, Any]):
+    title = str(payload.get("title") or "").strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="Agent task title is required.")
+    input_text = str(payload.get("input") or "")
+    metadata = payload.get("metadata")
+    if metadata is not None and not isinstance(metadata, dict):
+        raise HTTPException(status_code=400, detail="Agent task metadata must be an object.")
+    task = await agent_task_store.create_task(
+        title=title,
+        input_text=input_text,
+        source_agent=payload.get("source_agent"),
+        assigned_agent=payload.get("assigned_agent"),
+        metadata=metadata,
+    )
+    return {
+        "task_id": task.task_id,
+        "title": task.title,
+        "status": task.status,
+        "created_at": task.created_at,
+    }
+
+
+@app.get("/api/runtime/agent-tasks")
+async def list_agent_tasks(status: str | None = None, limit: int = 50):
+    valid_statuses = {"pending", "running", "completed", "failed", "cancelled"}
+    if status is not None and status not in valid_statuses:
+        raise HTTPException(status_code=400, detail="Invalid agent task status.")
+    tasks = await agent_task_store.list_tasks(
+        status=status,  # type: ignore[arg-type]
+        limit=max(1, min(limit, 200)),
+    )
+    return [
+        {
+            "task_id": task.task_id,
+            "title": task.title,
+            "status": task.status,
+            "assigned_agent": task.assigned_agent,
+            "created_at": task.created_at,
+            "updated_at": task.updated_at,
+        }
+        for task in tasks
+    ]
+
+
+@app.get("/api/runtime/agent-tasks/{task_id}")
+async def get_agent_task(task_id: str):
+    task = await agent_task_store.get_task(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Agent task not found.")
+    return {
+        "task_id": task.task_id,
+        "title": task.title,
+        "input": task.input,
+        "status": task.status,
+        "result": task.result,
+        "error": task.error,
+        "source_agent": task.source_agent,
+        "assigned_agent": task.assigned_agent,
+        "metadata": task.metadata,
+        "created_at": task.created_at,
+        "updated_at": task.updated_at,
+    }
+
+
+@app.post("/api/runtime/agent-tasks/{task_id}/cancel")
+async def cancel_agent_task(task_id: str, payload: dict[str, Any] | None = None):
+    task = await agent_task_store.get_task(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Agent task not found.")
+    reason = str((payload or {}).get("reason") or "cancelled")
+    cancelled = await agent_task_store.cancel_task(task_id, reason=reason)
+    return {
+        "task_id": cancelled.task_id,
+        "status": cancelled.status,
+        "error": cancelled.error,
+        "updated_at": cancelled.updated_at,
+    }
 
 
 @app.get("/api/runtime/middleware-nodes", response_model=list[dict[str, Any]])
