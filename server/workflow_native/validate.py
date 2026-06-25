@@ -970,6 +970,44 @@ def validate_node_configuration(
                         node_id=node.id,
                     )
                 )
+        if middleware_id == "tool_policy":
+            config = data.get("runtimeMiddlewareConfig")
+            if not isinstance(config, dict):
+                issues.append(
+                    ValidationIssue(
+                        code="invalid_runtime_middleware_config",
+                        message="tool_policy needs data.runtimeMiddlewareConfig as a dict.",
+                        node_id=node.id,
+                    )
+                )
+            else:
+                allow_by_default_raw = config.get("allow_by_default")
+                if allow_by_default_raw is not None:
+                    if isinstance(allow_by_default_raw, bool):
+                        pass
+                    elif isinstance(allow_by_default_raw, str):
+                        if allow_by_default_raw.lower() not in {"true", "false"}:
+                            issues.append(
+                                ValidationIssue(
+                                    code="invalid_runtime_middleware_tool_policy",
+                                    message=(
+                                        "tool_policy allow_by_default must be a "
+                                        "boolean or the string 'true'/'false'."
+                                    ),
+                                    node_id=node.id,
+                                )
+                            )
+                    else:
+                        issues.append(
+                            ValidationIssue(
+                                code="invalid_runtime_middleware_tool_policy",
+                                message=(
+                                    "tool_policy allow_by_default must be a "
+                                    "boolean or the string 'true'/'false'."
+                                ),
+                                node_id=node.id,
+                            )
+                        )
 
     return issues
 
