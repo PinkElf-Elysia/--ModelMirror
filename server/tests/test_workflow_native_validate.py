@@ -679,7 +679,7 @@ async def test_validate_runtime_middleware_ok(client: httpx.AsyncClient) -> None
             "description": "运行时中间件原型节点。",
             "runtimeMiddlewareId": "system_prompt_injector",
             "runtimeMiddlewareKind": "runtime_middleware.system_prompt_injector",
-            "runtimeMiddlewareConfig": {"system_prompt": "你是助手。"},
+            "runtimeMiddlewareConfig": {"system_prompt": "请基于 {{user_input}} 用一句话回答。"},
         },
     }
     workflow["nodes"][2]["data"]["outputVariable"] = "user_input"
@@ -691,6 +691,62 @@ async def test_validate_runtime_middleware_ok(client: httpx.AsyncClient) -> None
     data = await validate(client, workflow)
 
     assert data["valid"] is True
+
+
+@pytest.mark.asyncio
+async def test_validate_system_prompt_injector_missing_prompt(
+    client: httpx.AsyncClient,
+) -> None:
+    workflow = linear_workflow()
+    workflow["nodes"][1] = {
+        "id": "middleware",
+        "type": "runtime_middleware",
+        "data": {
+            "kind": "runtime_middleware",
+            "runtimeMiddlewareId": "system_prompt_injector",
+            "runtimeMiddlewareKind": "runtime_middleware.system_prompt_injector",
+            "runtimeMiddlewareConfig": {},
+        },
+    }
+    workflow["nodes"][2]["data"]["outputVariable"] = "user_input"
+    workflow["edges"] = [
+        {"id": "e1", "source": "input", "target": "middleware"},
+        {"id": "e2", "source": "middleware", "target": "output"},
+    ]
+
+    data = await validate(client, workflow)
+
+    assert data["valid"] is False
+    assert "missing_runtime_middleware_system_prompt" in issue_codes(data)
+
+
+@pytest.mark.asyncio
+async def test_validate_system_prompt_injector_template_reference(
+    client: httpx.AsyncClient,
+) -> None:
+    workflow = linear_workflow()
+    workflow["nodes"][1] = {
+        "id": "middleware",
+        "type": "runtime_middleware",
+        "data": {
+            "kind": "runtime_middleware",
+            "runtimeMiddlewareId": "system_prompt_injector",
+            "runtimeMiddlewareKind": "runtime_middleware.system_prompt_injector",
+            "runtimeMiddlewareConfig": {
+                "system_prompt": "请基于 {{missing_value}} 用一句话回答。",
+            },
+        },
+    }
+    workflow["nodes"][2]["data"]["outputVariable"] = "user_input"
+    workflow["edges"] = [
+        {"id": "e1", "source": "input", "target": "middleware"},
+        {"id": "e2", "source": "middleware", "target": "output"},
+    ]
+
+    data = await validate(client, workflow)
+
+    assert data["valid"] is False
+    assert "missing_runtime_middleware_template_variable" in issue_codes(data)
 
 
 @pytest.mark.asyncio

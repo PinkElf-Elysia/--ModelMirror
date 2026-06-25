@@ -546,10 +546,13 @@ function NodeConfig({ node, onChange }: NodeConfigProps) {
 
   const data = node.data;
   const update = (patch: Partial<WorkflowNodeData>) => onChange(node.id, patch);
+  const runtimeMiddlewareConfig = isRecord(data.runtimeMiddlewareConfig)
+    ? data.runtimeMiddlewareConfig
+    : undefined;
   const updateRuntimeMiddlewareConfig = (fieldName: string, value: unknown) =>
     update({
       runtimeMiddlewareConfig: {
-        ...(data.runtimeMiddlewareConfig ?? {}),
+        ...(runtimeMiddlewareConfig ?? {}),
         [fieldName]: value,
       },
     });
@@ -1401,7 +1404,7 @@ function NodeConfig({ node, onChange }: NodeConfigProps) {
                       }
                       placeholder={field.placeholder}
                       value={runtimeMiddlewareStringValue(
-                        data.runtimeMiddlewareConfig,
+                        runtimeMiddlewareConfig,
                         field,
                       )}
                     />
@@ -1419,7 +1422,7 @@ function NodeConfig({ node, onChange }: NodeConfigProps) {
                       placeholder={field.placeholder}
                       rows={field.rows ?? 3}
                       value={runtimeMiddlewareStringValue(
-                        data.runtimeMiddlewareConfig,
+                        runtimeMiddlewareConfig,
                         field,
                       )}
                     />
@@ -1429,7 +1432,7 @@ function NodeConfig({ node, onChange }: NodeConfigProps) {
                     <label className="flex items-start gap-3 rounded-lg border border-white/10 bg-white/[0.045] px-3 py-2 text-sm text-slate-200">
                       <input
                         checked={runtimeMiddlewareBooleanValue(
-                          data.runtimeMiddlewareConfig,
+                          runtimeMiddlewareConfig,
                           field,
                         )}
                         className="mt-1 h-4 w-4 rounded border-white/20 bg-slate-950 text-brand-300"
@@ -1463,7 +1466,7 @@ function NodeConfig({ node, onChange }: NodeConfigProps) {
                       placeholder={field.placeholder}
                       type="number"
                       value={runtimeMiddlewareStringValue(
-                        data.runtimeMiddlewareConfig,
+                        runtimeMiddlewareConfig,
                         field,
                       )}
                     />
@@ -1479,7 +1482,7 @@ function NodeConfig({ node, onChange }: NodeConfigProps) {
                         )
                       }
                       value={runtimeMiddlewareStringValue(
-                        data.runtimeMiddlewareConfig,
+                        runtimeMiddlewareConfig,
                         field,
                       )}
                     >
@@ -1510,7 +1513,7 @@ function NodeConfig({ node, onChange }: NodeConfigProps) {
                       placeholder={field.placeholder ?? '{"key":"value"}'}
                       rows={field.rows ?? 4}
                       value={runtimeMiddlewareStringValue(
-                        data.runtimeMiddlewareConfig,
+                        runtimeMiddlewareConfig,
                         field,
                       )}
                     />
@@ -1837,3 +1840,4 @@ export default function WorkflowEditor({ workflowId }: WorkflowCanvasProps) {
     </ReactFlowProvider>
   );
 }
+
