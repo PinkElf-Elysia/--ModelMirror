@@ -1230,6 +1230,39 @@ def split_workflow_variable_names(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
+def parse_workflow_tool_policy_list(value: Any) -> set[str]:
+    """Parse a textarea or list value into a normalized tool-name set."""
+
+    if value is None:
+        return set()
+    if isinstance(value, (list, tuple, set)):
+        return {str(item).strip() for item in value if str(item).strip()}
+    if not isinstance(value, str):
+        return set()
+    return {
+        item.strip()
+        for item in re.split(r"[,，\r\n]+", value)
+        if item.strip()
+    }
+
+
+def parse_workflow_bool(value: Any, *, default: bool = True) -> bool:
+    """Parse workflow form booleans while preserving a safe default."""
+
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "off"}:
+            return False
+        return default
+    return bool(value)
+
+
 SAFE_PYTHON_BUILTINS = {
     "print",
     "len",
@@ -1744,6 +1777,7 @@ async def run_workflow(payload: WorkflowRunRequest, request: Request):
             "system_prompt": None,
             "override_system_prompt": False,
             "active_middlewares": [],
+            "tool_policy": None,
         }
 
         try:
@@ -2900,7 +2934,10 @@ async def run_workflow(payload: WorkflowRunRequest, request: Request):
                                         "workflow": True,
                                     },
                                 ),
-                                policy=workflow_tool_policy,
+                                policy=(
+                                    workflow_runtime_context.get("tool_policy")
+                                    or workflow_tool_policy
+                                ),
                                 audit_store=workflow_tool_audit_store,
                             )
                             content_types = call_result.metadata.get("content_types", [])
@@ -3010,7 +3047,41 @@ async def run_workflow(payload: WorkflowRunRequest, request: Request):
                     middleware_config = node.data.get("runtimeMiddlewareConfig")
                     if not isinstance(middleware_config, dict):
                         middleware_config = {}
-                    if middleware_id == "system_prompt_injector":
+                    if middleware_id == "tool_policy":
+                        allowed_tools = parse_workflow_tool_policy_list(
+                            middleware_config.get("allowed_tools")
+                        )
+                        denied_tools = parse_workflow_tool_policy_list(
+                            middleware_config.get("denied_tools")
+                        )
+                        allow_by_default = parse_workflow_bool(
+                            middleware_config.get("allow_by_default"),
+                            default=True,
+                        )
+                        workflow_runtime_context["tool_policy"] = ToolPermissionPolicy(
+                            allowed_tools=allowed_tools,
+                            denied_tools=denied_tools,
+                            allow_by_default=allow_by_default,
+                        )
+                        workflow_runtime_context["active_middlewares"].append(
+                            middleware_id
+                        )
+                        allowed_info = (
+                            f"允许工具: {', '.join(sorted(allowed_tools))}"
+                            if allowed_tools
+                            else "无白名单"
+                        )
+                        denied_info = (
+                            f"拒绝工具: {', '.join(sorted(denied_tools))}"
+                            if denied_tools
+                            else "无拒绝列表"
+                        )
+                        default_info = "默认允许" if allow_by_default else "默认拒绝"
+                        output = (
+                            "已启用工具权限策略"
+                            f"（{allowed_info}；{denied_info}；{default_info}）"
+                        )
+                    elif middleware_id == "system_prompt_injector":
                         raw_system_prompt = str(
                             middleware_config.get("system_prompt")
                             or middleware_config.get("systemPrompt")

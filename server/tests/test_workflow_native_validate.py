@@ -4,7 +4,8 @@ import httpx
 import pytest
 import pytest_asyncio
 
-from server.main import app
+from server.main import app, parse_workflow_tool_policy_list
+from server.xpert_runtime.tool_policy import ToolPermissionPolicy
 
 
 @pytest_asyncio.fixture
@@ -773,6 +774,99 @@ async def test_validate_runtime_middleware_missing_metadata(
     codes = issue_codes(data)
     assert "missing_runtime_middleware_id" in codes
     assert "missing_runtime_middleware_kind" in codes
+
+
+@pytest.mark.asyncio
+async def test_valid_tool_policy_middleware(client: httpx.AsyncClient) -> None:
+    workflow = linear_workflow()
+    workflow["nodes"][1] = {
+        "id": "policy",
+        "type": "runtime_middleware",
+        "data": {
+            "kind": "runtime_middleware",
+            "runtimeMiddlewareId": "tool_policy",
+            "runtimeMiddlewareKind": "runtime_middleware.tool_policy",
+            "runtimeMiddlewareConfig": {
+                "denied_tools": "bad_tool",
+                "allow_by_default": True,
+            },
+        },
+    }
+    workflow["nodes"][2]["data"]["outputVariable"] = "user_input"
+    workflow["edges"] = [
+        {"id": "e1", "source": "input", "target": "policy"},
+        {"id": "e2", "source": "policy", "target": "output"},
+    ]
+
+    data = await validate(client, workflow)
+
+    assert data["valid"] is True
+    assert "invalid_runtime_middleware_tool_policy" not in issue_codes(data)
+
+
+@pytest.mark.asyncio
+async def test_invalid_tool_policy_allow_by_default(
+    client: httpx.AsyncClient,
+) -> None:
+    workflow = linear_workflow()
+    workflow["nodes"][1] = {
+        "id": "policy",
+        "type": "runtime_middleware",
+        "data": {
+            "kind": "runtime_middleware",
+            "runtimeMiddlewareId": "tool_policy",
+            "runtimeMiddlewareKind": "runtime_middleware.tool_policy",
+            "runtimeMiddlewareConfig": {
+                "allow_by_default": "not_a_boolean",
+            },
+        },
+    }
+    workflow["nodes"][2]["data"]["outputVariable"] = "user_input"
+    workflow["edges"] = [
+        {"id": "e1", "source": "input", "target": "policy"},
+        {"id": "e2", "source": "policy", "target": "output"},
+    ]
+
+    data = await validate(client, workflow)
+
+    assert data["valid"] is False
+    assert "invalid_runtime_middleware_tool_policy" in issue_codes(data)
+
+
+def test_tool_policy_textarea_tool_list_parser() -> None:
+    assert parse_workflow_tool_policy_list("fetch\nsearch, read，write") == {
+        "fetch",
+        "search",
+        "read",
+        "write",
+    }
+    assert parse_workflow_tool_policy_list(["fetch", " search "]) == {
+        "fetch",
+        "search",
+    }
+    assert parse_workflow_tool_policy_list(None) == set()
+
+
+def test_tool_policy_denied_tools_rejected() -> None:
+    policy = ToolPermissionPolicy(
+        denied_tools={"bad_tool"},
+        allow_by_default=True,
+    )
+
+    assert policy.is_allowed("good_tool") is True
+    assert policy.is_allowed("bad_tool") is False
+    assert policy.is_allowed("unknown_tool") is True
+
+
+def test_tool_policy_allow_by_default_false() -> None:
+    policy = ToolPermissionPolicy(
+        allowed_tools={"good_tool"},
+        allow_by_default=False,
+    )
+
+    assert policy.is_allowed("good_tool") is True
+    assert policy.is_allowed("bad_tool") is False
+    assert policy.is_allowed("unknown_tool") is False
 
 
 @pytest.mark.asyncio
