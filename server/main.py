@@ -1544,12 +1544,17 @@ def sse_delta_text(event_text: str) -> list[str]:
 async def stream_workflow_llm_text(
     model_id: str,
     prompt: str,
+    *,
+    system_prompt: str | None = None,
 ) -> AsyncIterator[str]:
     url, key = get_llm_gateway_config()
     if not url:
         raise RuntimeError(LLM_GATEWAY_NOT_CONFIGURED_MESSAGE)
 
-    messages = [ChatMessage(role="user", content=prompt)]
+    messages = []
+    if system_prompt and system_prompt.strip():
+        messages.append(ChatMessage(role="system", content=system_prompt.strip()))
+    messages.append(ChatMessage(role="user", content=prompt))
     chat_payload = ChatRequest(
         model_id=model_id,
         messages=messages,
@@ -1735,6 +1740,11 @@ async def run_workflow(payload: WorkflowRunRequest, request: Request):
         queued: set[str] = task_state["queued"]
         executed: set[str] = task_state["executed"]
         final_output = ""
+        workflow_runtime_context: dict[str, Any] = {
+            "system_prompt": None,
+            "override_system_prompt": False,
+            "active_middlewares": [],
+        }
 
         try:
             yield sse_payload(
@@ -1780,7 +1790,17 @@ async def run_workflow(payload: WorkflowRunRequest, request: Request):
                         variables,
                     )
                     output_variable = str(node.data.get("outputVariable") or "llm_output")
-                    async for delta in stream_workflow_llm_text(model_id, prompt):
+                    active_system_prompt = workflow_runtime_context.get("system_prompt")
+                    system_prompt = (
+                        active_system_prompt
+                        if isinstance(active_system_prompt, str)
+                        else None
+                    )
+                    async for delta in stream_workflow_llm_text(
+                        model_id,
+                        prompt,
+                        system_prompt=system_prompt,
+                    ):
                         output += delta
                         yield sse_payload(
                             {
@@ -2987,10 +3007,43 @@ async def run_workflow(payload: WorkflowRunRequest, request: Request):
                         node.data.get("runtimeMiddlewareKind")
                         or "runtime_middleware.unknown"
                     )
-                    output = (
-                        f"[原型节点] {title}（{middleware_kind} / {middleware_id}）"
-                        "已跳过实际执行。"
-                    )
+                    middleware_config = node.data.get("runtimeMiddlewareConfig")
+                    if not isinstance(middleware_config, dict):
+                        middleware_config = {}
+                    if middleware_id == "system_prompt_injector":
+                        raw_system_prompt = str(
+                            middleware_config.get("system_prompt")
+                            or middleware_config.get("systemPrompt")
+                            or ""
+                        )
+                        system_prompt = render_workflow_template(
+                            raw_system_prompt,
+                            variables,
+                        ).strip()
+                        override_system_prompt = middleware_config.get("override")
+                        if isinstance(override_system_prompt, str):
+                            override_system_prompt = (
+                                override_system_prompt.lower() == "true"
+                            )
+                        else:
+                            override_system_prompt = bool(override_system_prompt)
+                        workflow_runtime_context["system_prompt"] = system_prompt
+                        workflow_runtime_context["override_system_prompt"] = (
+                            override_system_prompt
+                        )
+                        workflow_runtime_context["active_middlewares"].append(
+                            middleware_id
+                        )
+                        output = (
+                            "已启用系统提示词注入器。"
+                            if system_prompt
+                            else "系统提示词注入器未配置提示词，已跳过。"
+                        )
+                    else:
+                        output = (
+                            f"[原型节点] {title}（{middleware_kind} / {middleware_id}）"
+                            "已跳过实际执行。"
+                        )
                     yield sse_payload(
                         {
                             "event": "node_delta",

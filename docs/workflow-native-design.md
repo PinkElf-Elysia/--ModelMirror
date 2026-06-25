@@ -425,9 +425,9 @@ Runtime Toolset 还提供了内存态的 `ToolPermissionPolicy` 与 `InMemoryToo
 
 ### 运行时中间件节点（Runtime Middleware Node）
 
-`runtime_middleware` 当前是可视化 + no-op 原型阶段：前端支持从 `NodePalette` 拖拽“智能体中间件”节点到画布，右侧配置面板会根据 `RuntimeMiddlewareField` 动态渲染 `text`、`textarea`、`boolean`、`number`、`select`、`json` 六类基础字段。后端 validate 已最小支持 `runtimeMiddlewareId` 与 `runtimeMiddlewareKind`，classic `workflow_stream` 执行时会发出 `node_delta` 并跳过真实 middleware 编排逻辑。
+`runtime_middleware` 当前是可视化 + 渐进执行阶段：前端支持从 `NodePalette` 拖拽“智能体中间件”节点到画布，右侧配置面板会根据 `RuntimeMiddlewareField` 动态渲染 `text`、`textarea`、`boolean`、`number`、`select`、`json` 六类基础字段。后端 validate 已最小支持 `runtimeMiddlewareId` 与 `runtimeMiddlewareKind`，classic `workflow_stream` 会为中间件节点发出 `node_delta`，并按已支持的 middleware id 逐步启用真实效果。
 
-后续路线是将该节点接入 `MiddlewarePipeline`，让 `system_prompt_injector`、`event_recorder`、`tool_policy`、`tool_audit`、`mcp_tools` 等 registry 节点逐步具备真实运行效果。当前先以 no-op 方式完成拖拽、配置、保存、运行的护栏验收，避免在前端体验未稳定前叠加编排语义。
+`system_prompt_injector` 已具备最小真实执行：节点读取 `runtimeMiddlewareConfig.system_prompt`，先用当前 workflow 变量渲染 `{{variable}}` 模板，再写入运行态上下文；后续 `llm` 节点调用模型时会 prepend 一条 `system` message。若同一条路径上出现多个系统提示词注入器，后执行的节点覆盖前一个。`event_recorder`、`tool_policy`、`tool_audit`、`mcp_tools` 等中间件节点仍保持 no-op 原型，后续再接入 `MiddlewarePipeline` 的真实编排、工具权限和审计能力。
 
 ## 2026-06-17 增量：Agent 节点
 

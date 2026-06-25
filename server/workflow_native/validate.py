@@ -950,6 +950,26 @@ def validate_node_configuration(
                     node_id=node.id,
                 )
             )
+        if middleware_id == "system_prompt_injector":
+            config = data.get("runtimeMiddlewareConfig")
+            if not isinstance(config, dict):
+                issues.append(
+                    ValidationIssue(
+                        code="missing_runtime_middleware_config",
+                        message="system_prompt_injector needs data.runtimeMiddlewareConfig.",
+                        node_id=node.id,
+                    )
+                )
+                config = {}
+            system_prompt = str(config.get("system_prompt") or "").strip()
+            if not system_prompt:
+                issues.append(
+                    ValidationIssue(
+                        code="missing_runtime_middleware_system_prompt",
+                        message="system_prompt_injector needs runtimeMiddlewareConfig.system_prompt.",
+                        node_id=node.id,
+                    )
+                )
 
     return issues
 
@@ -1042,6 +1062,25 @@ def validate_variable_references(
                     node_id=node.id,
                 )
             )
+
+    if kind == "runtime_middleware":
+        middleware_id = str(data.get("runtimeMiddlewareId") or "").strip()
+        if middleware_id == "system_prompt_injector":
+            config = data.get("runtimeMiddlewareConfig")
+            if isinstance(config, dict):
+                system_prompt = str(config.get("system_prompt") or "")
+                for variable in sorted(extract_template_variables(system_prompt)):
+                    if variable not in available_variables:
+                        issues.append(
+                            ValidationIssue(
+                                code="missing_runtime_middleware_template_variable",
+                                message=(
+                                    "System prompt middleware references "
+                                    f"undefined variable '{variable}'."
+                                ),
+                                node_id=node.id,
+                            )
+                        )
 
     if kind == "variable_assign":
         template = str(data.get("template") or "")
