@@ -6,7 +6,13 @@ from typing import Any
 
 from .events import RuntimeEventStore
 from .middleware import AgentMiddleware, MiddlewarePipeline
-from .models import MiddlewareContext, ModelCallRequest, ModelCallResponse
+from .models import (
+    MiddlewareContext,
+    ModelCallRequest,
+    ModelCallResponse,
+    ToolCallRequest,
+    ToolCallResponse,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -127,6 +133,45 @@ async def _record_chat_finished(
         logger.warning("Xpert chat.finished middleware failed: %s", exc)
 
 
+async def _record_tool_call(
+    request: ToolCallRequest,
+    handler: Any,
+    context: MiddlewareContext,
+) -> ToolCallResponse:
+    try:
+        await _record_event(
+            context,
+            "tool.call.started",
+            {
+                "tool_name": request.tool_name,
+                "arguments_count": len(request.arguments or {}),
+            },
+        )
+        response = await handler(request)
+        await _record_event(
+            context,
+            "tool.call.finished",
+            {
+                "tool_name": request.tool_name,
+                "output_length": len(response.output or ""),
+                "content_types": response.metadata.get("content_types", []),
+                "is_error": bool(response.metadata.get("is_error")),
+            },
+        )
+        return response
+    except Exception as exc:
+        await _record_event(
+            context,
+            "tool.call.failed",
+            {
+                "tool_name": request.tool_name,
+                "error": str(exc)[:200],
+            },
+            severity="error",
+        )
+        raise
+
+
 system_prompt_injector = AgentMiddleware(
     name="system_prompt_injector",
     before_model=_inject_system_prompt,
@@ -138,6 +183,7 @@ event_recorder = AgentMiddleware(
     before_model=_record_model_started,
     after_model=_record_model_finished,
     after_agent=_record_chat_finished,
+    wrap_tool_call=_record_tool_call,
 )
 
 

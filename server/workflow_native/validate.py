@@ -53,6 +53,8 @@ NODE_KIND_ALIASES = {
     "list-operation": "list_operation",
     "list-operator": "list_operation",
     "iteration": "iteration",
+    "runtime_middleware": "runtime_middleware",
+    "runtime-middleware": "runtime_middleware",
     "end": "output",
     "answer": "output",
     "output": "output",
@@ -78,6 +80,7 @@ SUPPORTED_NODE_KINDS = {
     "http_request",
     "list_operation",
     "iteration",
+    "runtime_middleware",
     "output",
 }
 
@@ -924,6 +927,26 @@ def validate_node_configuration(
                 ValidationIssue(
                     code="missing_output_variable",
                     message="Output node needs data.outputVariable.",
+                    node_id=node.id,
+                )
+            )
+
+    if kind == "runtime_middleware":
+        middleware_id = str(data.get("runtimeMiddlewareId") or "").strip()
+        if not middleware_id:
+            issues.append(
+                ValidationIssue(
+                    code="missing_runtime_middleware_id",
+                    message="runtime_middleware node needs data.runtimeMiddlewareId.",
+                    node_id=node.id,
+                )
+            )
+        middleware_kind = str(data.get("runtimeMiddlewareKind") or "").strip()
+        if not middleware_kind:
+            issues.append(
+                ValidationIssue(
+                    code="missing_runtime_middleware_kind",
+                    message="runtime_middleware node needs data.runtimeMiddlewareKind.",
                     node_id=node.id,
                 )
             )

@@ -24,6 +24,7 @@ NativeNodeKind = Literal[
     "http_request",
     "list_operation",
     "iteration",
+    "runtime_middleware",
     "output",
 ]
 IssueSeverity = Literal["error", "warning"]

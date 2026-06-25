@@ -10,6 +10,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator
 from collections import defaultdict, deque
+from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
@@ -94,15 +95,35 @@ except ModuleNotFoundError:
 
 try:
     from server.xpert_runtime import (
+        CapabilityRegistry,
+        InMemoryToolAuditStore,
+        MCPToolsetProvider,
+        MiddlewareContext,
+        MiddlewarePipeline,
         ModelCallRequest,
         ModelCallResponse,
+        RuntimeToolCall,
+        ToolPermissionPolicy,
         create_default_runtime,
+        event_recorder,
+        run_tool_with_runtime,
+        runtime_middleware_registry,
     )
 except ModuleNotFoundError:
     from xpert_runtime import (
+        CapabilityRegistry,
+        InMemoryToolAuditStore,
+        MCPToolsetProvider,
+        MiddlewareContext,
+        MiddlewarePipeline,
         ModelCallRequest,
         ModelCallResponse,
+        RuntimeToolCall,
+        ToolPermissionPolicy,
         create_default_runtime,
+        event_recorder,
+        run_tool_with_runtime,
+        runtime_middleware_registry,
     )
 
 load_dotenv()
@@ -209,6 +230,16 @@ mcp_connect_windows: dict[str, deque[float]] = defaultdict(deque)
 mcp_manager = MCPClientManager()
 mcp_installer = MCPInstaller()
 tool_registry = ToolRegistry()
+workflow_mcp_provider = MCPToolsetProvider(tool_registry, mcp_manager)
+runtime_capabilities = CapabilityRegistry()
+workflow_mcp_pipeline = MiddlewarePipeline([event_recorder])
+workflow_tool_policy = ToolPermissionPolicy(allow_by_default=True)
+workflow_tool_audit_store = InMemoryToolAuditStore()
+runtime_capabilities.register(
+    "mcp_tools",
+    workflow_mcp_provider,
+    description="MCP tools runtime capability for workflow and agents.",
+)
 workflow_task_store: dict[str, dict[str, Any]] = {}
 
 
@@ -2817,18 +2848,9 @@ async def run_workflow(payload: WorkflowRunRequest, request: Request):
                                 }
                             )
                         else:
-                            registered_tools = await tool_registry.list_tools()
-                            matched_tool = next(
-                                (
-                                    tool
-                                    for tool in registered_tools
-                                    if str(tool.get("name") or "") == tool_name
-                                ),
-                                None,
-                            )
+                            matched_tool = await workflow_mcp_provider.find_tool(tool_name)
                             if not matched_tool:
                                 raise ValueError(f"MCP 工具未注册：{tool_name}")
-                            session_id = str(matched_tool.get("session_id") or "")
                             raw_arguments = render_workflow_template(
                                 str(node.data.get("argumentsJson") or "{}"),
                                 variables,
@@ -2836,25 +2858,38 @@ async def run_workflow(payload: WorkflowRunRequest, request: Request):
                             arguments = json.loads(raw_arguments)
                             if not isinstance(arguments, dict):
                                 raise ValueError("MCP 工具参数必须是 JSON 对象。")
-                            call_result = await mcp_manager.call_tool(
-                                session_id,
-                                tool_name,
-                                arguments,
+                            call_result = await run_tool_with_runtime(
+                                RuntimeToolCall(
+                                    tool_name=tool_name,
+                                    arguments=arguments,
+                                    metadata={
+                                        "session_id": matched_tool.session_id,
+                                        "server_id": matched_tool.server_id,
+                                        "node_id": node.id,
+                                    },
+                                ),
+                                runtime_capabilities,
+                                workflow_mcp_pipeline,
+                                MiddlewareContext(
+                                    task_id=task_id,
+                                    trace_id=task_id,
+                                    capabilities=runtime_capabilities,
+                                    metadata={
+                                        "node_id": node.id,
+                                        "node_title": title,
+                                        "workflow": True,
+                                    },
+                                ),
+                                policy=workflow_tool_policy,
+                                audit_store=workflow_tool_audit_store,
                             )
-                            text_parts: list[str] = []
-                            non_text_types: list[str] = []
-                            for part in getattr(call_result, "content", []) or []:
-                                if isinstance(part, dict):
-                                    part_type = str(part.get("type") or "other")
-                                    part_text = part.get("text")
-                                else:
-                                    part_type = str(getattr(part, "type", "other"))
-                                    part_text = getattr(part, "text", None)
-                                if part_type == "text":
-                                    text_parts.append(str(part_text or ""))
-                                else:
-                                    non_text_types.append(part_type)
-                            output = "\n".join(text_parts).strip()
+                            content_types = call_result.metadata.get("content_types", [])
+                            non_text_types = [
+                                str(content_type)
+                                for content_type in content_types
+                                if str(content_type) != "text"
+                            ]
+                            output = call_result.output.strip()
                             variables[output_variable] = output
                             if non_text_types:
                                 yield sse_payload(
@@ -2943,6 +2978,28 @@ async def run_workflow(payload: WorkflowRunRequest, request: Request):
                                 "message": str(exc),
                             }
                         )
+
+                elif kind == "runtime_middleware":
+                    middleware_id = str(
+                        node.data.get("runtimeMiddlewareId") or "unknown"
+                    )
+                    middleware_kind = str(
+                        node.data.get("runtimeMiddlewareKind")
+                        or "runtime_middleware.unknown"
+                    )
+                    output = (
+                        f"[原型节点] {title}（{middleware_kind} / {middleware_id}）"
+                        "已跳过实际执行。"
+                    )
+                    yield sse_payload(
+                        {
+                            "event": "node_delta",
+                            "node_id": node.id,
+                            "node_title": title,
+                            "node_type": kind,
+                            "output": output,
+                        }
+                    )
 
                 elif kind == "output":
                     output_variable = str(node.data.get("outputVariable") or "llm_output")
@@ -3542,6 +3599,13 @@ async def list_registered_tools():
             for tool in await tool_registry.list_tools()
         ]
     )
+
+
+@app.get("/api/runtime/middleware-nodes", response_model=list[dict[str, Any]])
+async def list_runtime_middleware_nodes():
+    """Return runtime middleware node metadata for the canvas palette."""
+
+    return [asdict(node) for node in runtime_middleware_registry.list()]
 
 
 @app.get("/api/mcp/{session_id}/tools", response_model=MCPToolsResponse)

@@ -2,7 +2,7 @@
 
 workflow-native 是模镜自研工作流引擎的渐进式实验线。它不会替换当前稳定的 `/workflow` Dify iframe 入口，也不会改动 `/rag`。当前阶段提供静态图校验能力，并在 classic 运行器中试点少量本地节点执行，让团队先把数据模型、API 契约、错误模型和测试流程立起来。
 
-最后更新日期：2026-06-17  
+最后更新日期：2026-06-24  
 维护人：模镜团队
 
 ## 目标与边界
@@ -412,6 +412,22 @@ curl http://localhost:8000/api/workflow/run/<task_id>/status
 - `mcp_tool` 字段：`toolName`、`argumentsJson`、`outputVariable`。运行前需要先在 `/mcps` 连接 MCP Server，工具进入全局注册表后才能被调用。`argumentsJson` 支持 `{{variable}}` 模板，模板替换后必须仍是 JSON 对象。
 - `time_tool` 字段：`operation`、`formatString`、`outputVariable`。`operation` 支持 `now_iso`、`now_epoch`、`format`。
 - 安全边界：`mcp_tool` 可通过 `WORKFLOW_MCP_TOOL_ENABLED=False` 降级为 no-op；`time_tool` 可通过 `WORKFLOW_TIME_TOOL_ENABLED=False` 降级为 no-op。工具调用失败时写入空字符串并继续后续节点。
+
+`mcp_tool` 当前已通过 Runtime Toolset Capability 调用工具：`MCPToolsetProvider` 作为薄封装复用 `ToolRegistry` 的全局去重列表和 `MCPClientManager.call_tool()` 的会话执行能力，再经由 `MiddlewarePipeline.run_tool_call()` 进入 `wrap_tool_call` 中间件链。这个链路为工具审计、日志、权限与后续聊天 Agent / 多 Agent 复用预留统一入口。
+
+工具调用会记录轻量运行时事件：`tool.call.started`、`tool.call.finished`、`tool.call.failed`。事件只保存工具名、参数数量、输出长度、content types 和错误摘要，不写入完整工具输出，避免泄露敏感内容。
+
+Runtime Toolset 还提供了内存态的 `ToolPermissionPolicy` 与 `InMemoryToolAuditStore`。当前 workflow 默认使用 `allow_by_default=True`，因此不会改变既有 `mcp_tool` 行为；审计记录只保存工具名、状态、耗时、输出长度、content types 与错误摘要。后续可在此基础上扩展用户级权限、持久化审计和 tool preference。
+
+为对齐 Xpert 的“智能体中间件”画布菜单，后端新增了 `server/xpert_runtime/middleware_registry.py` 与只读接口 `GET /api/runtime/middleware-nodes`。当前 registry 先暴露 5 个可拖拽元数据节点：`system_prompt_injector`、`event_recorder`、`tool_policy`、`tool_audit`、`mcp_tools`。本轮只提供 schema 与 metadata；下一步前端 `NodePalette` 可从该接口拉取分组、字段、图标和搜索内容，渲染“智能体中间件”拖拽菜单。再下一步才会把拖入画布的 `runtime_middleware.xxx` 节点接入 workflow validate 和 runner。
+
+前端 `NodePalette` 已新增“智能体中间件”分组，并从 `/api/runtime/middleware-nodes` 拉取 metadata 渲染内置 middleware 节点。中间件拖拽 payload 使用 JSON 字符串，包含 `kind="runtime_middleware"`、`runtimeMiddlewareId`、`runtimeMiddlewareKind`、`fields` 与 `metadata`；下一步 `WorkflowEditor` 会解析该 payload 并生成可配置的 `runtime_middleware` 节点，再后续接入 NodeConfig 字段表单与 runner 语义。
+
+### 运行时中间件节点（Runtime Middleware Node）
+
+`runtime_middleware` 当前是可视化 + no-op 原型阶段：前端支持从 `NodePalette` 拖拽“智能体中间件”节点到画布，右侧配置面板会根据 `RuntimeMiddlewareField` 动态渲染 `text`、`textarea`、`boolean`、`number`、`select`、`json` 六类基础字段。后端 validate 已最小支持 `runtimeMiddlewareId` 与 `runtimeMiddlewareKind`，classic `workflow_stream` 执行时会发出 `node_delta` 并跳过真实 middleware 编排逻辑。
+
+后续路线是将该节点接入 `MiddlewarePipeline`，让 `system_prompt_injector`、`event_recorder`、`tool_policy`、`tool_audit`、`mcp_tools` 等 registry 节点逐步具备真实运行效果。当前先以 no-op 方式完成拖拽、配置、保存、运行的护栏验收，避免在前端体验未稳定前叠加编排语义。
 
 ## 2026-06-17 增量：Agent 节点
 
