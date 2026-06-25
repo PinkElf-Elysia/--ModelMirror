@@ -47,7 +47,7 @@ class AgentHandoff:
 
 
 class AgentTaskStore:
-    """In-memory agent task store for Xpert/EvoAgentX-aligned runtime work."""
+    """In-memory agent task store for Xpert-aligned runtime work."""
 
     def __init__(self, event_store: RuntimeEventStore | None = None) -> None:
         self._lock = asyncio.Lock()
