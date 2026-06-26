@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import pytest
 
-from server.main import ChatMessage, sse_delta_text, stream_chat_text
+from server.main import (
+    ChatMessage,
+    parse_upstream_error,
+    sse_delta_text,
+    stream_chat_text,
+)
 from server.xpert_runtime import (
     MiddlewareContext,
     ModelCallRequest,
@@ -130,3 +135,42 @@ def test_sse_image_url_is_converted_to_markdown() -> None:
     )
 
     assert sse_delta_text(event) == ["\n![图片](https://example.com/cat.png)\n"]
+
+
+def test_user_not_found_error_is_mapped_to_actionable_message() -> None:
+    message, data = parse_upstream_error(
+        401,
+        b'{"error":{"message":"User not found."}}',
+    )
+
+    assert data is not None
+    assert "User not found" not in message
+    assert "newAPI" in message
+    assert "OPENROUTER_API_KEY" in message
+
+
+def test_newapi_user_error_can_fallback_to_openrouter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import server.main as main_module
+
+    monkeypatch.setattr(main_module, "OPENROUTER_API_KEY", "sk-test")
+
+    assert (
+        main_module.should_fallback_gateway_to_openrouter(
+            401,
+            "本地 newAPI 未找到对应用户或令牌无效。",
+            {"error": {"message": "User not found."}},
+            "http://new-api:3000/v1/chat/completions",
+        )
+        is True
+    )
+    assert (
+        main_module.should_fallback_gateway_to_openrouter(
+            401,
+            "本地 newAPI 未找到对应用户或令牌无效。",
+            {"error": {"message": "User not found."}},
+            main_module.CHAT_COMPLETIONS_URL,
+        )
+        is False
+    )

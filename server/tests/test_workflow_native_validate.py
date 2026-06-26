@@ -669,6 +669,116 @@ async def test_validate_agent_invalid_mode(client: httpx.AsyncClient) -> None:
 
 
 @pytest.mark.asyncio
+async def test_validate_agent_task_ok(client: httpx.AsyncClient) -> None:
+    workflow = linear_workflow()
+    workflow["nodes"][1] = {
+        "id": "agent_task",
+        "type": "agent_task",
+        "data": {
+            "kind": "agent_task",
+            "taskTitle": "Plan {{user_input}}",
+            "taskInput": "Create a plan for {{user_input}}",
+            "assignedAgent": "workflow-planner",
+            "outputVariable": "agent_task_id",
+        },
+    }
+    workflow["nodes"][2]["data"]["outputVariable"] = "agent_task_id"
+    workflow["edges"] = [
+        {"id": "e1", "source": "input", "target": "agent_task"},
+        {"id": "e2", "source": "agent_task", "target": "output"},
+    ]
+
+    data = await validate(client, workflow)
+
+    assert data["valid"] is True
+    assert data["issues"] == []
+
+
+@pytest.mark.asyncio
+async def test_validate_agent_task_missing_input_and_output_variable(
+    client: httpx.AsyncClient,
+) -> None:
+    workflow = linear_workflow()
+    workflow["nodes"][1] = {
+        "id": "agent_task",
+        "type": "agent_task",
+        "data": {
+            "kind": "agent_task",
+            "taskTitle": "Plan {{user_input}}",
+            "assignedAgent": "workflow-planner",
+        },
+    }
+    workflow["edges"] = [
+        {"id": "e1", "source": "input", "target": "agent_task"},
+        {"id": "e2", "source": "agent_task", "target": "output"},
+    ]
+
+    data = await validate(client, workflow)
+
+    assert data["valid"] is False
+    assert {
+        "missing_agent_task_input",
+        "missing_agent_task_output_variable",
+    }.issubset(issue_codes(data))
+
+
+@pytest.mark.asyncio
+async def test_validate_agent_task_template_reference(
+    client: httpx.AsyncClient,
+) -> None:
+    workflow = linear_workflow()
+    workflow["nodes"][1] = {
+        "id": "agent_task",
+        "type": "agent_task",
+        "data": {
+            "kind": "agent_task",
+            "taskTitle": "Plan {{missing_value}}",
+            "taskInput": "Create a plan for {{user_input}}",
+            "assignedAgent": "workflow-planner",
+            "outputVariable": "agent_task_id",
+        },
+    }
+    workflow["nodes"][2]["data"]["outputVariable"] = "agent_task_id"
+    workflow["edges"] = [
+        {"id": "e1", "source": "input", "target": "agent_task"},
+        {"id": "e2", "source": "agent_task", "target": "output"},
+    ]
+
+    data = await validate(client, workflow)
+
+    assert data["valid"] is False
+    assert "missing_agent_task_template_variable" in issue_codes(data)
+
+
+@pytest.mark.asyncio
+async def test_validate_agent_task_output_can_be_used_downstream(
+    client: httpx.AsyncClient,
+) -> None:
+    workflow = linear_workflow()
+    workflow["nodes"][1] = {
+        "id": "agent_task",
+        "type": "agent_task",
+        "data": {
+            "kind": "agent_task",
+            "taskTitle": "Plan {{user_input}}",
+            "taskInput": "Create a plan for {{user_input}}",
+            "assignedAgent": "workflow-planner",
+            "outputVariable": "agent_task_id",
+        },
+    }
+    workflow["nodes"][2]["data"]["outputVariable"] = "agent_task_id"
+    workflow["edges"] = [
+        {"id": "e1", "source": "input", "target": "agent_task"},
+        {"id": "e2", "source": "agent_task", "target": "output"},
+    ]
+
+    data = await validate(client, workflow)
+
+    assert data["valid"] is True
+    assert "missing_output_variable_reference" not in issue_codes(data)
+
+
+@pytest.mark.asyncio
 async def test_validate_runtime_middleware_ok(client: httpx.AsyncClient) -> None:
     workflow = linear_workflow()
     workflow["nodes"][1] = {

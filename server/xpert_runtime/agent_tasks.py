@@ -10,6 +10,12 @@ from .events import RuntimeEventStore
 
 AgentTaskStatus = Literal["pending", "running", "completed", "failed", "cancelled"]
 AgentHandoffStatus = Literal["pending", "accepted", "rejected", "completed"]
+HANDOFF_TRANSITIONS: dict[AgentHandoffStatus, set[AgentHandoffStatus]] = {
+    "pending": {"accepted", "rejected"},
+    "accepted": {"completed"},
+    "rejected": set(),
+    "completed": set(),
+}
 
 
 @dataclass(slots=True)
@@ -188,6 +194,54 @@ class AgentTaskStore:
             handoffs = [handoff for handoff in handoffs if handoff.task_id == task_id]
         handoffs.sort(key=lambda handoff: handoff.created_at, reverse=True)
         return handoffs
+
+    async def get_handoff(self, handoff_id: str) -> AgentHandoff | None:
+        async with self._lock:
+            for handoff in self._handoffs:
+                if handoff.handoff_id == handoff_id:
+                    return handoff
+        return None
+
+    async def update_handoff_status(
+        self,
+        handoff_id: str,
+        status: AgentHandoffStatus,
+        *,
+        metadata: dict[str, Any] | None = None,
+    ) -> AgentHandoff:
+        async with self._lock:
+            handoff = next(
+                (
+                    item
+                    for item in self._handoffs
+                    if item.handoff_id == handoff_id
+                ),
+                None,
+            )
+            if handoff is None:
+                raise KeyError(f"Agent handoff not found: {handoff_id}")
+            allowed = HANDOFF_TRANSITIONS.get(handoff.status, set())
+            if status not in allowed:
+                raise ValueError(
+                    f"Invalid handoff transition: {handoff.status} -> {status}"
+                )
+            handoff.status = status
+            if metadata is not None:
+                handoff.metadata.update(metadata)
+            handoff.touch()
+            updated = handoff
+        await self._record(
+            f"agent.handoff.{status}",
+            task_id=updated.task_id,
+            payload={
+                "handoff_id": updated.handoff_id,
+                "task_id": updated.task_id,
+                "source_agent": updated.source_agent,
+                "target_agent": updated.target_agent,
+                "status": updated.status,
+            },
+        )
+        return updated
 
     async def _record(
         self,

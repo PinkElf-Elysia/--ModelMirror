@@ -14,8 +14,8 @@ EvoAgentX 只保留为历史参考：此前元智能体曾借鉴其 `goal -> sub
 | 能力域 | Xpert 对齐目标 | 当前状态 | 下一步 |
 | --- | --- | --- | --- |
 | Runtime / Execution | 中间件生命周期、任务注册、事件记录、运行观测 | 部分实现 | 建立 Handoff / RunRegistry 闭环 |
-| Agent / Handoff | AgentTask、任务移交、子 Agent、主管-专家协作 | 部分实现 | 增加 handoff API 与 workflow `agent_task` 节点 |
-| Workflow | Xpert 节点类型、Agent 节点、工具节点、知识流水线节点 | 部分实现 | 扩展 `agent_task`、handoff、subflow、task 类节点 |
+| Agent / Handoff | AgentTask、任务移交、子 Agent、主管-专家协作 | 部分实现 | 增加 workflow handoff 节点与 handoff 观测 |
+| Workflow | Xpert 节点类型、Agent 节点、工具节点、知识流水线节点 | 部分实现 | 扩展 handoff、subflow、task 类节点 |
 | Toolset / MCP | 统一 Toolset Provider、权限、审计、偏好 | 部分实现 | 将聊天 Agent 和工作流 Agent 统一接入 toolset capability |
 | Knowledge Pipeline | FileAsset、Artifact、Chunk、CitationAnchor、Embedding | 待实现 | 从本地 RAG 元数据模型开始拆分 |
 | Claw / Skill | 用户偏好、工作区 Skill、会话临时选择 | 待实现 | 在 Xpert workspace / skill 抽象稳定后接入 |
@@ -29,16 +29,16 @@ EvoAgentX 只保留为历史参考：此前元智能体曾借鉴其 `goal -> sub
 - Toolset / MCP：`mcp_tool` 已通过 `MCPToolsetProvider`、`CapabilityRegistry`、`run_tool_with_runtime` 调用工具。
 - Tool Policy / Audit：`tool_policy` 可影响 workflow 内 MCP 工具调用，`InMemoryToolAuditStore` 提供最小审计记录。
 - Runtime Middleware Node：前端可拖入 `runtime_middleware` 节点，`system_prompt_injector`、`tool_policy`、`event_recorder`、`tool_audit` 已逐步进入真实执行或可见状态。
-- Agent Task Runtime：已提供 `AgentTaskStore`、最小 AgentTask API 和 MetaAgent 任务工作台；workflow `agent_task` 节点列为下一步闭环。
+- Agent Task Runtime：已提供 `AgentTaskStore`、最小 AgentTask API、MetaAgent 任务工作台，以及 classic workflow `agent_task` 节点；该节点当前负责创建任务并输出 `task_id`，暂不做真实多 Agent 调度。
+- Handoff API：已提供 handoff 创建、按任务查询、接受、拒绝、完成的内存态 API，状态转移限定为 `pending -> accepted/rejected`、`accepted -> completed`，并写入 `agent.handoff.created/accepted/rejected/completed` runtime events。
 - 运行观测：classic workflow 可查询 per-task runtime events 和 tool audit records，前端 `WorkflowRun` 已提供“运行观测”折叠区。
 
 ## 近期交付顺序
 
-1. **Workflow Agent Task 节点**：在经典工作流新增 `agent_task` 节点，让画布可创建 AgentTask 并输出 `task_id`。
-2. **Handoff 最小闭环**：开放 handoff 创建、查询、接受/拒绝/完成 API，并把事件写入 RuntimeEventStore。
-3. **Workflow Handoff 节点**：新增 `agent_handoff` 或扩展 `agent_task`，让工作流可显式发起 Agent 间移交。
-4. **RunRegistry 雏形**：为 workflow / agent task / handoff 建立统一运行记录、状态、取消和死信视图。
-5. **知识流水线底座**：拆分本地 RAG 的文件元数据，建立 FileAsset -> Artifact -> Chunk -> CitationAnchor 的最小模型。
+1. **Workflow Handoff 节点**：新增 `agent_handoff` 或扩展 `agent_task`，让工作流可显式发起 Agent 间移交。
+2. **RunRegistry 雏形**：为 workflow / agent task / handoff 建立统一运行记录、状态、取消和死信视图。
+3. **Handoff 前端观测**：在 MetaAgent / workflow 运行观测中展示 handoff 状态与事件。
+4. **知识流水线底座**：拆分本地 RAG 的文件元数据，建立 FileAsset -> Artifact -> Chunk -> CitationAnchor 的最小模型。
 
 ## 源码与协议策略
 

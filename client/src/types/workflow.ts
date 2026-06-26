@@ -15,6 +15,7 @@ export type WorkflowNodeKind =
   | "human_intervention"
   | "question_classifier"
   | "agent"
+  | "agent_task"
   | "mcp_tool"
   | "time_tool"
   | "http_request"
@@ -63,6 +64,9 @@ export interface WorkflowNodeData extends Record<string, unknown> {
   useLlmFallback?: string;
   llmFallbackPrompt?: string;
   agentMode?: string;
+  taskTitle?: string;
+  taskInput?: string;
+  assignedAgent?: string;
   instruction?: string;
   toolNames?: string;
   maxIterations?: string;

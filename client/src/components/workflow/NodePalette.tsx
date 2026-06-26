@@ -93,6 +93,12 @@ const paletteItems: PaletteItem[] = [
     description: "模型驱动的任务执行节点，支持工具循环和直接回答两种模式。",
   },
   {
+    kind: "agent_task",
+    icon: "▣",
+    title: "智能体任务",
+    description: "创建 Agent Task Runtime 任务，输出 task_id 供后续节点引用。",
+  },
+  {
     kind: "mcp_tool",
     icon: "🔧",
     title: "MCP Tool",

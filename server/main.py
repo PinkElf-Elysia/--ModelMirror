@@ -415,11 +415,13 @@ WorkflowNodeType = Literal[
     "human_intervention",
     "question_classifier",
     "agent",
+    "agent_task",
     "mcp_tool",
     "time_tool",
     "http_request",
     "list_operation",
     "iteration",
+    "runtime_middleware",
     "output",
 ]
 
@@ -624,10 +626,18 @@ def upstream_error_message(status_code: int, body: bytes) -> str:
         message = error.get("message")
         if isinstance(message, str) and message.strip():
             lowered = message.lower()
+            if "user not found" in lowered:
+                return (
+                    "本地 newAPI 未找到对应用户或令牌无效。请在 newAPI 中配置用户/令牌，"
+                    "或设置 OPENROUTER_API_KEY 使用 OpenRouter 兜底。"
+                )
             if "not available in your region" in lowered:
                 return "当前模型在本地区暂不可用，请返回列表选择其他模型。"
             if "invalid api key" in lowered or "no auth credentials" in lowered:
-                return "服务认证失败，请检查后端密钥配置。"
+                return (
+                    "模型服务认证失败。请检查本地 newAPI 用户/渠道配置，"
+                    "或设置 OPENROUTER_API_KEY 使用 OpenRouter 兜底。"
+                )
             return message
     return fallback
 
@@ -663,6 +673,55 @@ def is_region_or_model_unavailable(
     return status_code in {403, 404, 429, 502, 503} and any(
         marker in lowered for marker in markers
     )
+
+
+def is_local_gateway_url(url: str) -> bool:
+    lowered = url.lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "new-api",
+            "localhost:3000",
+            "127.0.0.1:3000",
+            ":3000/v1/chat/completions",
+        )
+    )
+
+
+def is_gateway_auth_or_user_error(
+    status_code: int,
+    message: str,
+    data: dict[str, Any] | None,
+) -> bool:
+    lowered = json.dumps(data or {}, ensure_ascii=False).lower()
+    lowered += f" {message.lower()}"
+    markers = (
+        "user not found",
+        "invalid api key",
+        "no auth credentials",
+        "unauthorized",
+        "invalid token",
+        "令牌无效",
+        "认证失败",
+    )
+    return status_code in {401, 403, 404} and any(
+        marker in lowered for marker in markers
+    )
+
+
+def should_fallback_gateway_to_openrouter(
+    status_code: int,
+    message: str,
+    data: dict[str, Any] | None,
+    primary_url: str,
+) -> bool:
+    if not OPENROUTER_API_KEY:
+        return False
+    if primary_url.rstrip("/") == CHAT_COMPLETIONS_URL.rstrip("/"):
+        return False
+    if not is_local_gateway_url(primary_url):
+        return False
+    return is_gateway_auth_or_user_error(status_code, message, data)
 
 
 def should_fallback_model(
@@ -1164,11 +1223,13 @@ def workflow_node_kind(node: WorkflowNodePayload) -> WorkflowNodeType:
         "human_intervention",
         "question_classifier",
         "agent",
+        "agent_task",
         "mcp_tool",
         "time_tool",
         "http_request",
         "list_operation",
         "iteration",
+        "runtime_middleware",
         "output",
     }:
         return data_kind  # type: ignore[return-value]
@@ -2892,6 +2953,70 @@ async def run_workflow(payload: WorkflowRunRequest, request: Request):
                             }
                         )
 
+                elif kind == "agent_task":
+                    output_variable = str(
+                        node.data.get("outputVariable") or "agent_task_id"
+                    ).strip()
+                    if not output_variable:
+                        output_variable = "agent_task_id"
+                    try:
+                        task_title = render_workflow_template(
+                            str(node.data.get("taskTitle") or "Workflow agent task"),
+                            variables,
+                        ).strip()
+                        task_input = render_workflow_template(
+                            str(node.data.get("taskInput") or ""),
+                            variables,
+                        )
+                        assigned_agent = str(
+                            node.data.get("assignedAgent") or "workflow-planner"
+                        ).strip()
+                        if not task_title:
+                            raise ValueError("agent_task 缺少任务标题。")
+                        if not task_input.strip():
+                            raise ValueError("agent_task 缺少任务输入。")
+
+                        task = await agent_task_store.create_task(
+                            title=task_title,
+                            input_text=task_input,
+                            source_agent="workflow",
+                            assigned_agent=assigned_agent or "workflow-planner",
+                            metadata={
+                                "workflow_id": payload.workflow.id,
+                                "workflow_title": payload.workflow.title,
+                                "workflow_task_id": task_id,
+                                "workflow_node_id": node.id,
+                                "workflow_node_title": title,
+                                "output_variable": output_variable,
+                            },
+                        )
+                        output = task.task_id
+                        variables[output_variable] = output
+                        yield sse_payload(
+                            {
+                                "event": "node_delta",
+                                "node_id": node.id,
+                                "node_title": title,
+                                "node_type": kind,
+                                "output": (
+                                    "已创建 Agent Task："
+                                    f"{task.title}（{task.task_id}）"
+                                ),
+                                "variable": output_variable,
+                            }
+                        )
+                    except Exception as exc:
+                        logger.warning("Workflow agent_task node failed: %s", exc)
+                        output = ""
+                        variables[output_variable] = output
+                        yield sse_payload(
+                            {
+                                "event": "error",
+                                "node_id": node.id,
+                                "message": str(exc),
+                            }
+                        )
+
                 elif kind == "mcp_tool":
                     output_variable = str(node.data.get("outputVariable") or "mcp_output")
                     try:
@@ -3833,6 +3958,20 @@ async def create_agent_task(payload: dict[str, Any]):
     }
 
 
+def agent_handoff_to_payload(handoff: Any) -> dict[str, Any]:
+    return {
+        "handoff_id": handoff.handoff_id,
+        "task_id": handoff.task_id,
+        "source_agent": handoff.source_agent,
+        "target_agent": handoff.target_agent,
+        "reason": handoff.reason,
+        "status": handoff.status,
+        "metadata": handoff.metadata,
+        "created_at": handoff.created_at,
+        "updated_at": handoff.updated_at,
+    }
+
+
 @app.get("/api/runtime/agent-tasks")
 async def list_agent_tasks(status: str | None = None, limit: int = 50):
     valid_statuses = {"pending", "running", "completed", "failed", "cancelled"}
@@ -3855,6 +3994,48 @@ async def list_agent_tasks(status: str | None = None, limit: int = 50):
     ]
 
 
+@app.post("/api/runtime/agent-tasks/{task_id}/handoffs")
+async def create_agent_handoff(task_id: str, payload: dict[str, Any]):
+    task = await agent_task_store.get_task(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Agent task not found.")
+    target_agent = str(
+        payload.get("target_agent") or payload.get("targetAgent") or ""
+    ).strip()
+    if not target_agent:
+        raise HTTPException(status_code=400, detail="Handoff target_agent is required.")
+    reason = str(payload.get("reason") or "").strip()
+    if not reason:
+        raise HTTPException(status_code=400, detail="Handoff reason is required.")
+    source_agent = str(
+        payload.get("source_agent")
+        or payload.get("sourceAgent")
+        or task.assigned_agent
+        or task.source_agent
+        or "workflow"
+    ).strip()
+    metadata = payload.get("metadata")
+    if metadata is not None and not isinstance(metadata, dict):
+        raise HTTPException(status_code=400, detail="Handoff metadata must be an object.")
+    handoff = await agent_task_store.create_handoff(
+        task_id,
+        source_agent=source_agent or "workflow",
+        target_agent=target_agent,
+        reason=reason,
+        metadata=metadata,
+    )
+    return agent_handoff_to_payload(handoff)
+
+
+@app.get("/api/runtime/agent-tasks/{task_id}/handoffs")
+async def list_agent_handoffs(task_id: str):
+    task = await agent_task_store.get_task(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Agent task not found.")
+    handoffs = await agent_task_store.list_handoffs(task_id=task_id)
+    return [agent_handoff_to_payload(handoff) for handoff in handoffs]
+
+
 @app.get("/api/runtime/agent-tasks/{task_id}")
 async def get_agent_task(task_id: str):
     task = await agent_task_store.get_task(task_id)
@@ -3873,6 +4054,58 @@ async def get_agent_task(task_id: str):
         "created_at": task.created_at,
         "updated_at": task.updated_at,
     }
+
+
+async def update_agent_handoff_api(
+    handoff_id: str,
+    status: str,
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    metadata = (payload or {}).get("metadata")
+    if metadata is not None and not isinstance(metadata, dict):
+        raise HTTPException(status_code=400, detail="Handoff metadata must be an object.")
+    merged_metadata = dict(metadata or {})
+    reason = (payload or {}).get("reason")
+    if reason is not None:
+        merged_metadata["reason"] = str(reason)
+    result = (payload or {}).get("result")
+    if result is not None:
+        merged_metadata["result"] = str(result)
+    try:
+        handoff = await agent_task_store.update_handoff_status(
+            handoff_id,
+            status,  # type: ignore[arg-type]
+            metadata=merged_metadata or None,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Agent handoff not found.") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return agent_handoff_to_payload(handoff)
+
+
+@app.post("/api/runtime/agent-handoffs/{handoff_id}/accept")
+async def accept_agent_handoff(
+    handoff_id: str,
+    payload: dict[str, Any] | None = None,
+):
+    return await update_agent_handoff_api(handoff_id, "accepted", payload)
+
+
+@app.post("/api/runtime/agent-handoffs/{handoff_id}/reject")
+async def reject_agent_handoff(
+    handoff_id: str,
+    payload: dict[str, Any] | None = None,
+):
+    return await update_agent_handoff_api(handoff_id, "rejected", payload)
+
+
+@app.post("/api/runtime/agent-handoffs/{handoff_id}/complete")
+async def complete_agent_handoff(
+    handoff_id: str,
+    payload: dict[str, Any] | None = None,
+):
+    return await update_agent_handoff_api(handoff_id, "completed", payload)
 
 
 @app.post("/api/runtime/agent-tasks/{task_id}/cancel")
@@ -4039,22 +4272,35 @@ async def chat(payload: ChatRequest, request: Request):
     async def send_prepared_to_upstream(
         model_id: str,
         request_payload: dict[str, Any],
+        *,
+        gateway_url: str = url,
+        gateway_key: str = key,
     ) -> httpx.Response:
-        logger.info("Sending chat request to model=%s", model_id)
+        logger.info("Sending chat request to model=%s gateway=%s", model_id, gateway_url)
         return await client.send(
             client.build_request(
                 "POST",
-                url,
-                headers=llm_gateway_headers(key),
+                gateway_url,
+                headers=llm_gateway_headers(gateway_key),
                 json=request_payload,
             ),
             stream=True,
         )
 
-    async def send_to_upstream(model_id: str) -> httpx.Response:
+    async def send_to_upstream(
+        model_id: str,
+        *,
+        gateway_url: str = url,
+        gateway_key: str = key,
+    ) -> httpx.Response:
         request_payload = build_upstream_payload(payload, model_id)
         if runtime_pipeline is None or runtime_context is None:
-            return await send_prepared_to_upstream(model_id, request_payload)
+            return await send_prepared_to_upstream(
+                model_id,
+                request_payload,
+                gateway_url=gateway_url,
+                gateway_key=gateway_key,
+            )
 
         handler_started = False
         try:
@@ -4089,6 +4335,8 @@ async def chat(payload: ChatRequest, request: Request):
                 upstream_response = await send_prepared_to_upstream(
                     request_for_model.model_id,
                     request_payload,
+                    gateway_url=gateway_url,
+                    gateway_key=gateway_key,
                 )
                 return ModelCallResponse(
                     text="",
@@ -4109,7 +4357,12 @@ async def chat(payload: ChatRequest, request: Request):
                 raise
             logger.warning("Xpert runtime chat prepare failed; using direct path: %s", exc)
 
-        return await send_prepared_to_upstream(model_id, request_payload)
+        return await send_prepared_to_upstream(
+            model_id,
+            request_payload,
+            gateway_url=gateway_url,
+            gateway_key=gateway_key,
+        )
 
     try:
         response = await send_to_upstream(actual_model_id)
@@ -4141,7 +4394,62 @@ async def chat(payload: ChatRequest, request: Request):
             body[:500].decode("utf-8", errors="replace"),
         )
 
-        if should_fallback_model(
+        if should_fallback_gateway_to_openrouter(
+            response.status_code,
+            message,
+            data,
+            url,
+        ):
+            try:
+                response = await send_to_upstream(
+                    actual_model_id,
+                    gateway_url=CHAT_COMPLETIONS_URL,
+                    gateway_key=OPENROUTER_API_KEY,
+                )
+                fallback_notice = (
+                    "提示：本地 newAPI 当前不可用，已自动切换到 OpenRouter 继续回答。\n\n"
+                )
+            except httpx.TimeoutException:
+                logger.exception("OpenRouter gateway fallback timed out model=%s", actual_model_id)
+                await finalize_runtime("error", actual_model_id, error="gateway fallback timeout")
+                await client.aclose()
+                return JSONResponse(
+                    status_code=504,
+                    content={"error": "OpenRouter 兜底模型响应超时，请稍后重试。"},
+                )
+            except httpx.HTTPError as exc:
+                logger.exception(
+                    "OpenRouter gateway fallback connection failed model=%s error=%s",
+                    actual_model_id,
+                    exc,
+                )
+                await finalize_runtime("error", actual_model_id, error=str(exc))
+                await client.aclose()
+                return JSONResponse(
+                    status_code=502,
+                    content={"error": "本地 newAPI 当前不可用，OpenRouter 兜底也暂时无法连接。"},
+                )
+
+            if response.status_code >= 400:
+                fallback_body = await response.aread()
+                await response.aclose()
+                fallback_message, _ = parse_upstream_error(
+                    response.status_code,
+                    fallback_body,
+                )
+                await finalize_runtime("error", actual_model_id, error=fallback_message)
+                await client.aclose()
+                return JSONResponse(
+                    status_code=response.status_code,
+                    content={
+                        "error": (
+                            "本地 newAPI 当前不可用；OpenRouter 兜底也暂不可用："
+                            f"{fallback_message}"
+                        )
+                    },
+                )
+
+        if response.status_code >= 400 and should_fallback_model(
             response.status_code,
             message,
             data,
@@ -4194,7 +4502,7 @@ async def chat(payload: ChatRequest, request: Request):
                     status_code=response.status_code,
                     content={"error": f"{message}；兜底模型也暂不可用：{fallback_message}"},
                 )
-        else:
+        elif response.status_code >= 400:
             await finalize_runtime("error", actual_model_id, error=message)
             await client.aclose()
             return JSONResponse(
