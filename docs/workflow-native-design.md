@@ -2,7 +2,7 @@
 
 workflow-native 是模镜自研工作流引擎的渐进式实验线。它不会替换当前稳定的 `/workflow` Dify iframe 入口，也不会改动 `/rag`。当前阶段提供静态图校验能力，并在 classic 运行器中试点少量本地节点执行，让团队先把数据模型、API 契约、错误模型和测试流程立起来。
 
-最后更新日期：2026-06-25
+最后更新日期：2026-06-26
 维护人：模镜团队
 
 ## 目标与边界
@@ -435,6 +435,10 @@ Runtime Toolset 还提供了内存态的 `ToolPermissionPolicy` 与 `InMemoryToo
 
 `tool_audit` 当前是原型可见状态：每个 workflow task 默认拥有独立 `InMemoryToolAuditStore`，工具调用会记录 `tool_name`、`status`、`started_at`、`finished_at`、`duration_ms`、`output_length`、`content_types` 与 `error`。`runtime_middleware.tool_audit` 节点可读取 `runtimeMiddlewareConfig.max_records`，为本次运行重建指定上限的审计 store；观测 API 返回当前 task 的审计记录。该能力仍为内存态，后续再扩展 per-user/per-workspace 过滤、持久化审计与图形化 trace。
 
+### Classic 工作流布局优化
+
+`/workflow` 当前改为“画布 + 单一右侧工作台”的主布局：节点库不再作为常驻左侧长栏，而是在画布标题区提供“节点库”下拉浮层，拖入节点后自动收起；右侧工作台用 `配置 / 运行` tabs 承载 `NodeConfig` 与 `WorkflowRun`。该调整只改变布局，不改变节点数据结构、React Flow 拖拽协议、SSE 运行协议或后端执行逻辑。目标是让节点库、画布和运行结果集中在同一视野附近，避免窄屏或 Docker 本地验收时出现左侧节点库与右侧运行区纵向堆叠、需要大幅下滑的问题。
+
 ### Agent Task Runtime（Xpert 对齐）
 
 当前为最小底座原型阶段，主线对齐 Xpert 的 Agent/Handoff/RunRegistry 思路，并在 ModelMirror 内原生实现为 `server/xpert_runtime/agent_tasks.py`。源码策略是“参考协议与分层，原生改写实现”：不迁移 Xpert 的 Nx/NestJS/Angular 主框架，不整文件复制上游源码，也不引入不兼容协议代码。
@@ -445,7 +449,9 @@ Agent Task Runtime 包含三层：
 - `AgentHandoff`：Agent 间任务移交记录，包含 `source_agent`、`target_agent`、`reason`、`status` 与 metadata。
 - `AgentTaskStore`：内存态任务存储，支持 `create/get/list/update/cancel` 与 `create_handoff/list_handoffs`，并将 `agent.task.created`、`agent.task.updated`、`agent.task.cancelled`、`agent.handoff.created` 写入 `RuntimeEventStore`。
 
-后端已开放最小 API：`POST /api/runtime/agent-tasks` 创建任务，`GET /api/runtime/agent-tasks/{task_id}` 查询任务，`POST /api/runtime/agent-tasks/{task_id}/cancel` 取消任务，`GET /api/runtime/agent-tasks` 列出任务。当前不做真实多 Agent 编排、不接数据库、不接 Redis/Celery 队列；下一步再把经典工作流的 `agent_task` 节点接入该 store，并逐步扩展 handoff queue、agent selection、持久化与前端任务面板。
+后端已开放最小 API：`POST /api/runtime/agent-tasks` 创建任务，`GET /api/runtime/agent-tasks/{task_id}` 查询任务，`POST /api/runtime/agent-tasks/{task_id}/cancel` 取消任务，`GET /api/runtime/agent-tasks` 列出任务。Handoff 最小闭环也已开放：`POST /api/runtime/agent-tasks/{task_id}/handoffs` 创建移交，`GET /api/runtime/agent-tasks/{task_id}/handoffs` 查询任务下的移交记录，`POST /api/runtime/agent-handoffs/{handoff_id}/accept|reject|complete` 更新状态。状态转移限定为 `pending -> accepted/rejected` 与 `accepted -> completed`，非法转移返回 400；每次创建或状态变更会写入 `agent.handoff.created/accepted/rejected/completed` runtime events。当前不做真实多 Agent 编排、不接数据库、不接 Redis/Celery 队列；后续将继续扩展 workflow handoff 节点、handoff queue、agent selection、持久化与前端任务面板。
+
+classic workflow 已新增 `agent_task` 节点，作为 Xpert Agent/Handoff 对齐的第一步闭环。前端可从节点调色板拖入“智能体任务”，配置 `taskTitle`、`taskInput`、`assignedAgent` 与 `outputVariable`；运行时会渲染 `{{变量}}` 模板，调用 `AgentTaskStore.create_task(...)` 创建一条 AgentTask，并将新任务的 `task_id` 写入 `outputVariable`。该节点当前只负责创建任务和输出 ID，不做真实队列分派、专家协作或任务执行；完整任务详情继续通过现有 Agent Task API 查询。
 
 ## 2026-06-17 增量：Agent 节点
 

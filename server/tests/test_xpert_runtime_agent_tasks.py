@@ -95,6 +95,76 @@ async def test_handoff_create_and_list() -> None:
 
 
 @pytest.mark.asyncio
+async def test_handoff_status_transitions() -> None:
+    store = AgentTaskStore()
+    task = await store.create_task("T", "in")
+    handoff = await store.create_handoff(
+        task.task_id,
+        source_agent="agent_a",
+        target_agent="agent_b",
+        reason="need expertise",
+    )
+
+    accepted = await store.update_handoff_status(
+        handoff.handoff_id,
+        "accepted",
+    )
+    assert accepted.status == "accepted"
+
+    completed = await store.update_handoff_status(
+        handoff.handoff_id,
+        "completed",
+        metadata={"result": "done"},
+    )
+    assert completed.status == "completed"
+    assert completed.metadata["result"] == "done"
+
+
+@pytest.mark.asyncio
+async def test_handoff_reject_and_invalid_transition() -> None:
+    store = AgentTaskStore()
+    task = await store.create_task("T", "in")
+    handoff = await store.create_handoff(
+        task.task_id,
+        source_agent="agent_a",
+        target_agent="agent_b",
+        reason="need expertise",
+    )
+
+    rejected = await store.update_handoff_status(
+        handoff.handoff_id,
+        "rejected",
+        metadata={"reason": "busy"},
+    )
+    assert rejected.status == "rejected"
+    assert rejected.metadata["reason"] == "busy"
+
+    with pytest.raises(ValueError):
+        await store.update_handoff_status(handoff.handoff_id, "completed")
+
+
+@pytest.mark.asyncio
+async def test_event_store_records_handoff_events() -> None:
+    event_store = RuntimeEventStore()
+    store = AgentTaskStore(event_store=event_store)
+    task = await store.create_task("T", "in")
+    handoff = await store.create_handoff(
+        task.task_id,
+        source_agent="agent_a",
+        target_agent="agent_b",
+        reason="need expertise",
+    )
+    await store.update_handoff_status(handoff.handoff_id, "accepted")
+    await store.update_handoff_status(handoff.handoff_id, "completed")
+
+    events = await event_store.list_events(task.task_id)
+    event_types = [event.type for event in events]
+    assert "agent.handoff.created" in event_types
+    assert "agent.handoff.accepted" in event_types
+    assert "agent.handoff.completed" in event_types
+
+
+@pytest.mark.asyncio
 async def test_event_store_records_task_events() -> None:
     event_store = RuntimeEventStore()
     store = AgentTaskStore(event_store=event_store)
@@ -170,6 +240,88 @@ async def test_api_cancel_task(client: httpx.AsyncClient) -> None:
     data = cancel_response.json()
     assert data["status"] == "cancelled"
     assert data["error"] == "test cancel"
+
+
+@pytest.mark.asyncio
+async def test_api_create_and_list_handoffs(client: httpx.AsyncClient) -> None:
+    create_response = await client.post(
+        "/api/runtime/agent-tasks",
+        json={"title": "Handoff API Task", "input": "x", "assigned_agent": "agent_a"},
+    )
+    task_id = create_response.json()["task_id"]
+
+    handoff_response = await client.post(
+        f"/api/runtime/agent-tasks/{task_id}/handoffs",
+        json={"target_agent": "agent_b", "reason": "need expertise"},
+    )
+
+    assert handoff_response.status_code == 200, handoff_response.text
+    handoff = handoff_response.json()
+    assert handoff["task_id"] == task_id
+    assert handoff["source_agent"] == "agent_a"
+    assert handoff["target_agent"] == "agent_b"
+    assert handoff["status"] == "pending"
+
+    list_response = await client.get(f"/api/runtime/agent-tasks/{task_id}/handoffs")
+    assert list_response.status_code == 200
+    handoffs = list_response.json()
+    assert any(item["handoff_id"] == handoff["handoff_id"] for item in handoffs)
+
+
+@pytest.mark.asyncio
+async def test_api_handoff_status_transitions(client: httpx.AsyncClient) -> None:
+    create_response = await client.post(
+        "/api/runtime/agent-tasks",
+        json={"title": "Handoff Transition", "input": "x"},
+    )
+    task_id = create_response.json()["task_id"]
+    handoff_response = await client.post(
+        f"/api/runtime/agent-tasks/{task_id}/handoffs",
+        json={
+            "source_agent": "agent_a",
+            "target_agent": "agent_b",
+            "reason": "need expertise",
+        },
+    )
+    handoff_id = handoff_response.json()["handoff_id"]
+
+    accept_response = await client.post(
+        f"/api/runtime/agent-handoffs/{handoff_id}/accept",
+    )
+    assert accept_response.status_code == 200
+    assert accept_response.json()["status"] == "accepted"
+
+    complete_response = await client.post(
+        f"/api/runtime/agent-handoffs/{handoff_id}/complete",
+        json={"result": "done"},
+    )
+    assert complete_response.status_code == 200
+    completed = complete_response.json()
+    assert completed["status"] == "completed"
+    assert completed["metadata"]["result"] == "done"
+
+
+@pytest.mark.asyncio
+async def test_api_handoff_invalid_transition(client: httpx.AsyncClient) -> None:
+    create_response = await client.post(
+        "/api/runtime/agent-tasks",
+        json={"title": "Handoff Invalid", "input": "x"},
+    )
+    task_id = create_response.json()["task_id"]
+    handoff_response = await client.post(
+        f"/api/runtime/agent-tasks/{task_id}/handoffs",
+        json={
+            "source_agent": "agent_a",
+            "target_agent": "agent_b",
+            "reason": "need expertise",
+        },
+    )
+    handoff_id = handoff_response.json()["handoff_id"]
+
+    complete_response = await client.post(
+        f"/api/runtime/agent-handoffs/{handoff_id}/complete",
+    )
+    assert complete_response.status_code == 400
 
 
 @pytest.mark.asyncio

@@ -36,6 +36,8 @@ interface WorkflowObservationData {
 
 interface WorkflowRunProps {
   definition: WorkflowDefinition;
+  embedded?: boolean;
+  onRunStart?: () => void;
 }
 
 interface PendingHumanIntervention {
@@ -210,7 +212,11 @@ function buildRunSteps(events: WorkflowRunEvent[]) {
   return steps;
 }
 
-export default function WorkflowRun({ definition }: WorkflowRunProps) {
+export default function WorkflowRun({
+  definition,
+  embedded = false,
+  onRunStart,
+}: WorkflowRunProps) {
   const [input, setInput] = useState("请帮我把这个需求拆成三步执行计划。");
   const [events, setEvents] = useState<WorkflowRunEvent[]>([]);
   const [isRunning, setIsRunning] = useState(false);
@@ -246,6 +252,7 @@ export default function WorkflowRun({ definition }: WorkflowRunProps) {
   const runSteps = useMemo(() => buildRunSteps(events), [events]);
 
   async function runWorkflow() {
+    onRunStart?.();
     setEvents([]);
     setError("");
     setTaskId(null);
@@ -397,7 +404,13 @@ export default function WorkflowRun({ definition }: WorkflowRunProps) {
   }
 
   return (
-    <aside className="surface-panel flex min-h-0 flex-col rounded-lg">
+    <aside
+      className={
+        embedded
+          ? "flex min-h-0 flex-1 flex-col"
+          : "surface-panel flex min-h-0 flex-col rounded-lg"
+      }
+    >
       <div className="border-b border-white/10 p-4">
         <p className="text-sm font-semibold text-white">流水线试运行</p>
         <p className="mt-1 text-xs leading-5 text-slate-400">

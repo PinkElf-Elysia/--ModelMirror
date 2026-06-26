@@ -41,6 +41,8 @@ NODE_KIND_ALIASES = {
     "question_classifier": "question_classifier",
     "question-classifier": "question_classifier",
     "agent": "agent",
+    "agent_task": "agent_task",
+    "agent-task": "agent_task",
     "mcp_tool": "mcp_tool",
     "mcp-tool": "mcp_tool",
     "tool": "mcp_tool",
@@ -75,6 +77,7 @@ SUPPORTED_NODE_KINDS = {
     "human_intervention",
     "question_classifier",
     "agent",
+    "agent_task",
     "mcp_tool",
     "time_tool",
     "http_request",
@@ -688,6 +691,45 @@ def validate_node_configuration(
                     )
                 )
 
+    if kind == "agent_task":
+        task_title = str(data.get("taskTitle") or "").strip()
+        if not task_title:
+            issues.append(
+                ValidationIssue(
+                    code="missing_agent_task_title",
+                    message="Agent task node needs data.taskTitle.",
+                    node_id=node.id,
+                )
+            )
+
+        task_input = str(data.get("taskInput") or "").strip()
+        if not task_input:
+            issues.append(
+                ValidationIssue(
+                    code="missing_agent_task_input",
+                    message="Agent task node needs data.taskInput.",
+                    node_id=node.id,
+                )
+            )
+
+        output_variable = str(data.get("outputVariable") or "").strip()
+        if not output_variable:
+            issues.append(
+                ValidationIssue(
+                    code="missing_agent_task_output_variable",
+                    message="Agent task node needs data.outputVariable.",
+                    node_id=node.id,
+                )
+            )
+        elif not is_variable_name(output_variable):
+            issues.append(
+                ValidationIssue(
+                    code="invalid_agent_task_output_variable",
+                    message="Agent task outputVariable must be an identifier.",
+                    node_id=node.id,
+                )
+            )
+
     if kind == "mcp_tool":
         tool_name = str(data.get("toolName") or "").strip()
         if not tool_name:
@@ -1046,6 +1088,7 @@ def collect_declared_variables(
             "human_intervention",
             "question_classifier",
             "agent",
+            "agent_task",
             "mcp_tool",
             "time_tool",
             "http_request",
@@ -1269,6 +1312,22 @@ def validate_variable_references(
                         node_id=node.id,
                     )
                 )
+
+    if kind == "agent_task":
+        for field_name in ("taskTitle", "taskInput"):
+            template = str(data.get(field_name) or "")
+            for variable in sorted(extract_template_variables(template)):
+                if variable not in available_variables:
+                    issues.append(
+                        ValidationIssue(
+                            code="missing_agent_task_template_variable",
+                            message=(
+                                f"Agent task {field_name} references undefined "
+                                f"variable '{variable}'."
+                            ),
+                            node_id=node.id,
+                        )
+                    )
 
     if kind == "mcp_tool":
         arguments_json = str(data.get("argumentsJson") or "")
