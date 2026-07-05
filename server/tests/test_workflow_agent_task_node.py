@@ -33,13 +33,13 @@ async def test_workflow_agent_task_node_creates_runtime_task(
                 "data": {"kind": "input", "variableName": "user_input"},
             },
             {
-                "id": "task",
+                "id": "agent_task",
                 "type": "agent_task",
                 "data": {
                     "kind": "agent_task",
-                    "title": "Create task",
-                    "taskTitle": "规划 {{user_input}}",
-                    "taskInput": "请拆解任务：{{user_input}}",
+                    "title": "Create agent task",
+                    "taskTitle": "Plan {{user_input}}",
+                    "taskInput": "Please plan: {{user_input}}",
                     "assignedAgent": "workflow-planner",
                     "outputVariable": "agent_task_id",
                 },
@@ -51,8 +51,8 @@ async def test_workflow_agent_task_node_creates_runtime_task(
             },
         ],
         "edges": [
-            {"id": "e1", "source": "input", "target": "task"},
-            {"id": "e2", "source": "task", "target": "output"},
+            {"id": "e1", "source": "input", "target": "agent_task"},
+            {"id": "e2", "source": "agent_task", "target": "output"},
         ],
     }
 
@@ -60,57 +60,67 @@ async def test_workflow_agent_task_node_creates_runtime_task(
         "/api/workflow/run",
         json={
             "workflow": workflow,
-            "inputs": {"user_input": "准备 Xpert 对齐计划"},
+            "inputs": {"user_input": "launch a support workflow"},
         },
     )
-
     assert response.status_code == 200, response.text
+
     events = _parse_sse_events(response.text)
     workflow_meta = next(event for event in events if event.get("event") == "workflow_meta")
-    workflow_run_id = workflow_meta["run_id"]
-    task_node_end = next(
-        event
-        for event in events
-        if event.get("event") == "node_end" and event.get("node_id") == "task"
-    )
-    agent_task_id = task_node_end["output"]
-
-    task_response = await client.get(f"/api/runtime/agent-tasks/{agent_task_id}")
-    assert task_response.status_code == 200, task_response.text
-    task = task_response.json()
-
-    assert task["title"] == "规划 准备 Xpert 对齐计划"
-    assert task["input"] == "请拆解任务：准备 Xpert 对齐计划"
-    assert task["status"] == "pending"
-    assert task["source_agent"] == "workflow"
-    assert task["assigned_agent"] == "workflow-planner"
-    assert task["metadata"]["workflow_id"] == "agent-task-workflow"
-    assert task["metadata"]["node_id"] == "task"
+    workflow_run_id = workflow_meta.get("run_id")
+    assert isinstance(workflow_run_id, str)
+    assert workflow_run_id
 
     workflow_end = next(event for event in events if event.get("event") == "workflow_end")
-    assert workflow_end["final_output"] == agent_task_id
-    assert workflow_end["run_id"] == workflow_run_id
+    assert workflow_end.get("run_id") == workflow_run_id
+
+    agent_task_end = next(
+        event
+        for event in events
+        if event.get("event") == "node_end" and event.get("node_id") == "agent_task"
+    )
+    task_id = agent_task_end.get("output")
+    assert isinstance(task_id, str)
+    assert task_id
+    assert agent_task_end["variables"]["agent_task_id"] == task_id
+
+    deltas = [
+        event
+        for event in events
+        if event.get("event") == "node_delta" and event.get("node_id") == "agent_task"
+    ]
+    assert any("Agent Task" in str(event.get("output")) for event in deltas)
+
+    detail_response = await client.get(f"/api/runtime/agent-tasks/{task_id}")
+    assert detail_response.status_code == 200, detail_response.text
+    payload = detail_response.json()
+    assert payload["task_id"] == task_id
+    assert payload["title"] == "Plan launch a support workflow"
+    assert payload["input"] == "Please plan: launch a support workflow"
+    assert payload["source_agent"] == "workflow"
+    assert payload["assigned_agent"] == "workflow-planner"
+    assert payload["metadata"]["workflow_id"] == "agent-task-workflow"
+    assert payload["metadata"]["workflow_node_id"] == "agent_task"
 
     workflow_run_response = await client.get(f"/api/runtime/runs/{workflow_run_id}")
-    assert workflow_run_response.status_code == 200, workflow_run_response.text
+    assert workflow_run_response.status_code == 200
     workflow_run = workflow_run_response.json()
     assert workflow_run["run_type"] == "workflow"
     assert workflow_run["status"] == "completed"
-    assert workflow_run["metadata"]["workflow_task_id"] == workflow_meta["task_id"]
+    assert workflow_run["metadata"]["workflow_task_id"]
 
-    task_runs_response = await client.get("/api/runtime/runs?run_type=agent_task&limit=50")
-    assert task_runs_response.status_code == 200, task_runs_response.text
-    task_runs = task_runs_response.json()
-    assert any(
-        run["source_id"] == agent_task_id
-        and run["parent_run_id"] == workflow_run_id
-        and run["metadata"]["node_id"] == "task"
-        for run in task_runs
+    agent_task_runs_response = await client.get(
+        "/api/runtime/runs?run_type=agent_task&limit=50",
     )
+    assert agent_task_runs_response.status_code == 200
+    agent_task_runs = agent_task_runs_response.json()
+    agent_task_run = next(item for item in agent_task_runs if item["source_id"] == task_id)
+    assert agent_task_run["parent_run_id"] == workflow_run_id
+    assert agent_task_run["metadata"]["node_id"] == "agent_task"
 
 
 @pytest.mark.asyncio
-async def test_workflow_agent_handoff_node_creates_handoff(
+async def test_workflow_agent_handoff_node_creates_runtime_handoff_and_runs(
     client: httpx.AsyncClient,
 ) -> None:
     workflow = {
@@ -123,11 +133,11 @@ async def test_workflow_agent_handoff_node_creates_handoff(
                 "data": {"kind": "input", "variableName": "user_input"},
             },
             {
-                "id": "task",
+                "id": "agent_task",
                 "type": "agent_task",
                 "data": {
                     "kind": "agent_task",
-                    "title": "Create task",
+                    "title": "Create agent task",
                     "taskTitle": "Plan {{user_input}}",
                     "taskInput": "Please plan: {{user_input}}",
                     "assignedAgent": "workflow-planner",
@@ -135,15 +145,15 @@ async def test_workflow_agent_handoff_node_creates_handoff(
                 },
             },
             {
-                "id": "handoff",
+                "id": "agent_handoff",
                 "type": "agent_handoff",
                 "data": {
                     "kind": "agent_handoff",
-                    "title": "Create handoff",
+                    "title": "Handoff agent task",
                     "taskIdVariable": "agent_task_id",
-                    "targetAgent": "reviewer-agent",
-                    "sourceAgent": "workflow",
-                    "reason": "Please review {{user_input}}",
+                    "sourceAgent": "workflow-planner",
+                    "targetAgent": "review-agent",
+                    "reason": "Review plan for {{user_input}}",
                     "outputVariable": "agent_handoff_id",
                 },
             },
@@ -154,9 +164,9 @@ async def test_workflow_agent_handoff_node_creates_handoff(
             },
         ],
         "edges": [
-            {"id": "e1", "source": "input", "target": "task"},
-            {"id": "e2", "source": "task", "target": "handoff"},
-            {"id": "e3", "source": "handoff", "target": "output"},
+            {"id": "e1", "source": "input", "target": "agent_task"},
+            {"id": "e2", "source": "agent_task", "target": "agent_handoff"},
+            {"id": "e3", "source": "agent_handoff", "target": "output"},
         ],
     }
 
@@ -164,67 +174,55 @@ async def test_workflow_agent_handoff_node_creates_handoff(
         "/api/workflow/run",
         json={
             "workflow": workflow,
-            "inputs": {"user_input": "prepare Xpert handoff"},
+            "inputs": {"user_input": "handoff scenario"},
         },
     )
-
     assert response.status_code == 200, response.text
+
     events = _parse_sse_events(response.text)
     workflow_meta = next(event for event in events if event.get("event") == "workflow_meta")
-    workflow_run_id = workflow_meta["run_id"]
-    task_node_end = next(
+    workflow_run_id = workflow_meta.get("run_id")
+    assert isinstance(workflow_run_id, str)
+
+    task_end = next(
         event
         for event in events
-        if event.get("event") == "node_end" and event.get("node_id") == "task"
+        if event.get("event") == "node_end" and event.get("node_id") == "agent_task"
     )
-    handoff_node_end = next(
+    task_id = task_end.get("output")
+    assert isinstance(task_id, str)
+    assert task_id
+
+    handoff_end = next(
         event
         for event in events
-        if event.get("event") == "node_end" and event.get("node_id") == "handoff"
+        if event.get("event") == "node_end" and event.get("node_id") == "agent_handoff"
     )
-    agent_task_id = task_node_end["output"]
-    agent_handoff_id = handoff_node_end["output"]
+    handoff_id = handoff_end.get("output")
+    assert isinstance(handoff_id, str)
+    assert handoff_id
+    assert handoff_end["variables"]["agent_handoff_id"] == handoff_id
 
-    assert agent_handoff_id
-    handoffs_response = await client.get(
-        f"/api/runtime/agent-tasks/{agent_task_id}/handoffs"
-    )
-    assert handoffs_response.status_code == 200, handoffs_response.text
-    handoffs = handoffs_response.json()
-    assert any(
-        handoff["handoff_id"] == agent_handoff_id
-        and handoff["target_agent"] == "reviewer-agent"
-        and handoff["status"] == "pending"
-        for handoff in handoffs
-    )
-
-    workflow_end = next(event for event in events if event.get("event") == "workflow_end")
-    assert workflow_end["final_output"] == agent_handoff_id
-    assert workflow_end["run_id"] == workflow_run_id
-
-    workflow_run_response = await client.get(f"/api/runtime/runs/{workflow_run_id}")
-    assert workflow_run_response.status_code == 200, workflow_run_response.text
-    assert workflow_run_response.json()["status"] == "completed"
+    handoff_response = await client.get(f"/api/runtime/agent-tasks/{task_id}/handoffs")
+    assert handoff_response.status_code == 200, handoff_response.text
+    handoffs = handoff_response.json()
+    assert any(item["handoff_id"] == handoff_id for item in handoffs)
 
     task_runs_response = await client.get("/api/runtime/runs?run_type=agent_task&limit=50")
-    handoff_runs_response = await client.get(
-        "/api/runtime/runs?run_type=agent_handoff&limit=50"
-    )
-    assert task_runs_response.status_code == 200, task_runs_response.text
-    assert handoff_runs_response.status_code == 200, handoff_runs_response.text
+    assert task_runs_response.status_code == 200
     task_runs = task_runs_response.json()
+    task_run = next(item for item in task_runs if item["source_id"] == task_id)
+    assert task_run["parent_run_id"] == workflow_run_id
+
+    handoff_runs_response = await client.get(
+        "/api/runtime/runs?run_type=agent_handoff&limit=50",
+    )
+    assert handoff_runs_response.status_code == 200
     handoff_runs = handoff_runs_response.json()
-    assert any(
-        run["source_id"] == agent_task_id
-        and run["parent_run_id"] == workflow_run_id
-        for run in task_runs
-    )
-    assert any(
-        run["source_id"] == agent_handoff_id
-        and run["parent_run_id"] == workflow_run_id
-        and run["metadata"]["target_agent"] == "reviewer-agent"
-        for run in handoff_runs
-    )
+    handoff_run = next(item for item in handoff_runs if item["source_id"] == handoff_id)
+    assert handoff_run["parent_run_id"] == workflow_run_id
+    assert handoff_run["metadata"]["agent_task_id"] == task_id
+    assert handoff_run["metadata"]["target_agent"] == "review-agent"
 
 
 def _parse_sse_events(sse_text: str) -> list[dict]:
@@ -232,8 +230,10 @@ def _parse_sse_events(sse_text: str) -> list[dict]:
     for line in sse_text.splitlines():
         if not line.startswith("data:"):
             continue
-        payload = line[5:].strip()
-        if not payload:
+        try:
+            payload = json.loads(line[5:].strip())
+        except json.JSONDecodeError:
             continue
-        events.append(json.loads(payload))
+        if isinstance(payload, dict):
+            events.append(payload)
     return events

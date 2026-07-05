@@ -280,7 +280,7 @@ function createNodeData(
     return {
       kind,
       title: "智能体任务",
-      description: "创建 Agent Task Runtime 任务，输出 task_id。",
+      description: "创建 Agent Task Runtime 任务，并把 task_id 写入变量。",
       taskTitle: "工作流任务：{{user_input}}",
       taskInput: "{{user_input}}",
       assignedAgent: "workflow-planner",
@@ -292,11 +292,11 @@ function createNodeData(
     return {
       kind,
       title: "智能体移交",
-      description: "将 Agent Task 移交给目标智能体，输出 handoff_id。",
+      description: "将已有 Agent Task 移交给另一个智能体，输出 handoff_id。",
       taskIdVariable: "agent_task_id",
-      targetAgent: "reviewer-agent",
-      reason: "请接手处理任务：{{user_input}}",
-      sourceAgent: "workflow",
+      sourceAgent: "workflow-planner",
+      targetAgent: "review-agent",
+      reason: "请接手处理：{{user_input}}",
       outputVariable: "agent_handoff_id",
     };
   }
@@ -1178,13 +1178,12 @@ function NodeConfig({ node, onChange }: NodeConfigProps) {
       {data.kind === "agent_task" ? (
         <>
           <div className="rounded-lg border border-violet-300/25 bg-violet-300/10 px-3 py-2 text-xs leading-5 text-violet-50">
-            智能体任务节点会创建 Agent Task Runtime 任务；当前不做真实多 Agent 调度，输出为新建任务的 task_id。
+            该节点会在运行时创建 Agent Task，并将新任务的 task_id 写入输出变量；当前不做真实多 Agent 调度。
           </div>
           <Field label="任务标题（支持 {{变量}}）">
             <input
               className={textInputClass()}
               onChange={(event) => update({ taskTitle: event.target.value })}
-              placeholder="工作流任务：{{user_input}}"
               value={data.taskTitle ?? ""}
             />
           </Field>
@@ -1192,15 +1191,13 @@ function NodeConfig({ node, onChange }: NodeConfigProps) {
             <textarea
               className={`${textInputClass()} min-h-32 resize-none leading-6`}
               onChange={(event) => update({ taskInput: event.target.value })}
-              placeholder="{{user_input}}"
               value={data.taskInput ?? ""}
             />
           </Field>
-          <Field label="指派智能体（可选）">
+          <Field label="指派智能体">
             <input
               className={textInputClass()}
               onChange={(event) => update({ assignedAgent: event.target.value })}
-              placeholder="workflow-planner"
               value={data.assignedAgent ?? ""}
             />
           </Field>
@@ -1216,39 +1213,35 @@ function NodeConfig({ node, onChange }: NodeConfigProps) {
 
       {data.kind === "agent_handoff" ? (
         <>
-          <div className="rounded-lg border border-indigo-300/25 bg-indigo-300/10 px-3 py-2 text-xs leading-5 text-indigo-50">
-            智能体移交节点会为已创建的 Agent Task 生成 handoff 记录；当前不做真实队列调度，输出为 handoff_id。
+          <div className="rounded-lg border border-purple-300/25 bg-purple-300/10 px-3 py-2 text-xs leading-5 text-purple-50">
+            该节点会读取已有 Agent Task 的 task_id，并创建一条 Handoff 记录；当前只登记移交，不做真实调度。
           </div>
           <Field label="任务 ID 变量">
             <input
               className={textInputClass()}
               onChange={(event) => update({ taskIdVariable: event.target.value })}
-              placeholder="agent_task_id"
               value={data.taskIdVariable ?? ""}
-            />
-          </Field>
-          <Field label="目标智能体">
-            <input
-              className={textInputClass()}
-              onChange={(event) => update({ targetAgent: event.target.value })}
-              placeholder="reviewer-agent"
-              value={data.targetAgent ?? ""}
-            />
-          </Field>
-          <Field label="移交原因（支持 {{变量}}）">
-            <textarea
-              className={`${textInputClass()} min-h-28 resize-none leading-6`}
-              onChange={(event) => update({ reason: event.target.value })}
-              placeholder="请接手处理任务：{{user_input}}"
-              value={data.reason ?? ""}
             />
           </Field>
           <Field label="来源智能体">
             <input
               className={textInputClass()}
               onChange={(event) => update({ sourceAgent: event.target.value })}
-              placeholder="workflow"
               value={data.sourceAgent ?? ""}
+            />
+          </Field>
+          <Field label="目标智能体">
+            <input
+              className={textInputClass()}
+              onChange={(event) => update({ targetAgent: event.target.value })}
+              value={data.targetAgent ?? ""}
+            />
+          </Field>
+          <Field label="移交理由（支持 {{变量}}）">
+            <textarea
+              className={`${textInputClass()} min-h-28 resize-none leading-6`}
+              onChange={(event) => update({ reason: event.target.value })}
+              value={data.reason ?? ""}
             />
           </Field>
           <Field label="输出变量">
@@ -1659,6 +1652,8 @@ interface WorkflowCanvasProps {
   workflowId: string;
 }
 
+type WorkflowWorkspaceTab = "config" | "run";
+
 function WorkflowCanvas({ workflowId }: WorkflowCanvasProps) {
   const loadedDefinition = useMemo(() => loadDefinition(workflowId), [workflowId]);
   const [title, setTitle] = useState(loadedDefinition.title);
@@ -1671,8 +1666,9 @@ function WorkflowCanvas({ workflowId }: WorkflowCanvasProps) {
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [saveNotice, setSaveNotice] = useState("");
-  const [isPaletteOpen, setIsPaletteOpen] = useState(false);
-  const [workbenchTab, setWorkbenchTab] = useState<"config" | "run">("config");
+  const [isNodePaletteOpen, setIsNodePaletteOpen] = useState(false);
+  const [workspaceTab, setWorkspaceTab] =
+    useState<WorkflowWorkspaceTab>("config");
   const { screenToFlowPosition } = useReactFlow();
 
   const definition = useMemo<WorkflowDefinition>(
@@ -1801,7 +1797,7 @@ function WorkflowCanvas({ workflowId }: WorkflowCanvasProps) {
       );
       setNodes((currentNodes) => [...currentNodes, nextNode]);
       setSelectedNodeId(nextNode.id);
-      setIsPaletteOpen(false);
+      setIsNodePaletteOpen(false);
       return;
     }
 
@@ -1816,7 +1812,7 @@ function WorkflowCanvas({ workflowId }: WorkflowCanvasProps) {
       );
       setNodes((currentNodes) => [...currentNodes, nextNode]);
       setSelectedNodeId(nextNode.id);
-      setIsPaletteOpen(false);
+      setIsNodePaletteOpen(false);
       return;
     }
 
@@ -1826,7 +1822,7 @@ function WorkflowCanvas({ workflowId }: WorkflowCanvasProps) {
     const nextNode = createNode(kind, position.x, position.y);
     setNodes((currentNodes) => [...currentNodes, nextNode]);
     setSelectedNodeId(nextNode.id);
-    setIsPaletteOpen(false);
+    setIsNodePaletteOpen(false);
   }
 
   useEffect(() => {
@@ -1843,7 +1839,7 @@ function WorkflowCanvas({ workflowId }: WorkflowCanvasProps) {
           拖拽节点到画布，像安排招聘会工位一样搭建 AI 流水线。
         </p>
         <div className="mt-4">
-          {null}
+          <NodePalette />
         </div>
       </aside>
 
@@ -1860,18 +1856,23 @@ function WorkflowCanvas({ workflowId }: WorkflowCanvasProps) {
             </p>
           </div>
           <div className="relative flex flex-wrap items-center gap-2">
+            <button
+              className="rounded-full border border-hire-300/30 bg-hire-300/10 px-4 py-2 text-sm font-semibold text-hire-100 transition hover:border-hire-200/50 hover:bg-hire-300/20"
+              onClick={() => setIsNodePaletteOpen((current) => !current)}
+              type="button"
+            >
+              节点库
+            </button>
+            {isNodePaletteOpen ? (
+              <div className="absolute right-0 top-full z-30 mt-3 max-h-[72vh] w-[min(22rem,calc(100vw-2rem))] overflow-y-auto rounded-lg border border-white/10 bg-surface-900/95 p-4 shadow-2xl shadow-ink-950/50 backdrop-blur">
+                <NodePalette />
+              </div>
+            ) : null}
             {saveNotice ? (
               <span className="rounded-full border border-emerald-300/25 bg-emerald-300/10 px-3 py-1.5 text-xs font-semibold text-emerald-100">
                 {saveNotice}
               </span>
             ) : null}
-            <button
-              className="rounded-full border border-hire-300/35 bg-hire-300/10 px-4 py-2 text-sm font-semibold text-hire-100 transition hover:border-hire-200/50 hover:bg-hire-300/15"
-              onClick={() => setIsPaletteOpen((current) => !current)}
-              type="button"
-            >
-              节点库
-            </button>
             <button
               className="rounded-full border border-white/10 bg-white/[0.06] px-4 py-2 text-sm font-semibold text-slate-100 transition hover:border-hire-300/40 hover:bg-hire-300/10 hover:text-hire-100"
               onClick={saveWorkflow}
@@ -1879,31 +1880,11 @@ function WorkflowCanvas({ workflowId }: WorkflowCanvasProps) {
             >
               保存草稿
             </button>
-            {isPaletteOpen ? (
-              <div className="absolute right-0 top-full z-40 mt-3 max-h-[70vh] w-[min(360px,calc(100vw-2rem))] overflow-y-auto rounded-lg border border-white/10 bg-surface-950/95 p-4 shadow-2xl shadow-ink-950/70 backdrop-blur">
-                <div className="mb-3 flex items-center justify-between gap-3">
-                  <div>
-                    <p className="text-sm font-semibold text-white">节点库</p>
-                    <p className="mt-1 text-xs text-slate-400">
-                      拖拽节点到画布，快速搭建工作流。
-                    </p>
-                  </div>
-                  <button
-                    className="rounded-full border border-white/10 px-2 py-1 text-xs text-slate-300 transition hover:bg-white/10"
-                    onClick={() => setIsPaletteOpen(false)}
-                    type="button"
-                  >
-                    关闭
-                  </button>
-                </div>
-                <NodePalette />
-              </div>
-            ) : null}
           </div>
         </div>
 
         <div
-          className="h-[640px] min-h-[520px]"
+          className="h-[640px] min-h-[520px] overflow-hidden rounded-b-lg"
           onDragOver={(event) => {
             event.preventDefault();
             event.dataTransfer.dropEffect = "move";
@@ -1959,27 +1940,33 @@ function WorkflowCanvas({ workflowId }: WorkflowCanvasProps) {
         </div>
       </section>
 
-      <aside className="surface-panel flex min-h-[520px] flex-col overflow-hidden rounded-lg">
-        <div className="border-b border-white/10 p-3">
-          <div className="grid grid-cols-2 gap-2 rounded-full border border-white/10 bg-white/[0.035] p-1">
+      <aside className="surface-panel flex min-h-[520px] flex-col rounded-lg p-4">
+        <div className="flex items-start justify-between gap-3 border-b border-white/10 pb-3">
+          <div>
+            <p className="text-sm font-semibold text-white">工作台</p>
+            <p className="mt-1 text-xs leading-5 text-slate-400">
+              在同一侧栏内切换节点配置与试运行，减少页面纵向滚动。
+            </p>
+          </div>
+          <div className="flex shrink-0 rounded-full border border-white/10 bg-white/[0.04] p-1">
             <button
-              className={`rounded-full px-3 py-2 text-sm font-semibold transition ${
-                workbenchTab === "config"
+              className={`rounded-full px-3 py-1.5 text-xs font-semibold transition ${
+                workspaceTab === "config"
                   ? "bg-hire-300 text-ink-950"
-                  : "text-slate-300 hover:bg-white/10 hover:text-white"
+                  : "text-slate-400 hover:text-slate-100"
               }`}
-              onClick={() => setWorkbenchTab("config")}
+              onClick={() => setWorkspaceTab("config")}
               type="button"
             >
               配置
             </button>
             <button
-              className={`rounded-full px-3 py-2 text-sm font-semibold transition ${
-                workbenchTab === "run"
+              className={`rounded-full px-3 py-1.5 text-xs font-semibold transition ${
+                workspaceTab === "run"
                   ? "bg-hire-300 text-ink-950"
-                  : "text-slate-300 hover:bg-white/10 hover:text-white"
+                  : "text-slate-400 hover:text-slate-100"
               }`}
-              onClick={() => setWorkbenchTab("run")}
+              onClick={() => setWorkspaceTab("run")}
               type="button"
             >
               运行
@@ -1987,8 +1974,13 @@ function WorkflowCanvas({ workflowId }: WorkflowCanvasProps) {
           </div>
         </div>
 
-        <div className="min-h-0 flex-1 overflow-y-auto p-4">
-        <section className={workbenchTab === "config" ? "min-h-0" : "hidden"}>
+        <section
+          className={
+            workspaceTab === "config"
+              ? "min-h-0 flex-1 overflow-y-auto pt-4"
+              : "hidden"
+          }
+        >
           <p className="text-sm font-semibold text-white">工位配置</p>
           <p className="mt-1 text-xs leading-5 text-slate-400">
             节点配置会立即写入画布，下次运行直接生效。
@@ -1998,13 +1990,18 @@ function WorkflowCanvas({ workflowId }: WorkflowCanvasProps) {
           </div>
         </section>
 
-        {workbenchTab === "run" ? (
+        <div
+          className={
+            workspaceTab === "run"
+              ? "min-h-0 flex flex-1 flex-col pt-4"
+              : "hidden"
+          }
+        >
           <WorkflowRun
             definition={definition}
             embedded
-            onRunStart={() => setWorkbenchTab("run")}
+            onRunStart={() => setWorkspaceTab("run")}
           />
-        ) : null}
         </div>
       </aside>
     </div>

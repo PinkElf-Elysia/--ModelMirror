@@ -10,7 +10,6 @@ from .events import RuntimeEventStore
 
 AgentTaskStatus = Literal["pending", "running", "completed", "failed", "cancelled"]
 AgentHandoffStatus = Literal["pending", "accepted", "rejected", "completed"]
-
 HANDOFF_TRANSITIONS: dict[AgentHandoffStatus, set[AgentHandoffStatus]] = {
     "pending": {"accepted", "rejected"},
     "accepted": {"completed"},
@@ -221,19 +220,16 @@ class AgentTaskStore:
             )
             if handoff is None:
                 raise KeyError(f"Agent handoff not found: {handoff_id}")
-
             allowed = HANDOFF_TRANSITIONS.get(handoff.status, set())
             if status not in allowed:
                 raise ValueError(
-                    f"Invalid handoff status transition: {handoff.status} -> {status}"
+                    f"Invalid handoff transition: {handoff.status} -> {status}"
                 )
-
             handoff.status = status
-            if metadata:
+            if metadata is not None:
                 handoff.metadata.update(metadata)
             handoff.touch()
             updated = handoff
-
         await self._record(
             f"agent.handoff.{status}",
             task_id=updated.task_id,

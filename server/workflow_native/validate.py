@@ -1375,10 +1375,7 @@ def validate_variable_references(
                 )
 
     if kind == "agent_task":
-        for field_name, label in (
-            ("taskTitle", "title"),
-            ("taskInput", "input"),
-        ):
+        for field_name in ("taskTitle", "taskInput"):
             template = str(data.get(field_name) or "")
             for variable in sorted(extract_template_variables(template)):
                 if variable not in available_variables:
@@ -1386,7 +1383,7 @@ def validate_variable_references(
                         ValidationIssue(
                             code="missing_agent_task_template_variable",
                             message=(
-                                f"Agent task {label} references undefined "
+                                f"Agent task {field_name} references undefined "
                                 f"variable '{variable}'."
                             ),
                             node_id=node.id,
@@ -1400,8 +1397,8 @@ def validate_variable_references(
                 ValidationIssue(
                     code="missing_agent_handoff_task_id_reference",
                     message=(
-                        "Agent handoff references undefined taskIdVariable "
-                        f"'{task_id_variable}'."
+                        "Agent handoff taskIdVariable references undefined "
+                        f"variable '{task_id_variable}'."
                     ),
                     node_id=node.id,
                 )

@@ -105,7 +105,10 @@ async def test_handoff_status_transitions() -> None:
         reason="need expertise",
     )
 
-    accepted = await store.update_handoff_status(handoff.handoff_id, "accepted")
+    accepted = await store.update_handoff_status(
+        handoff.handoff_id,
+        "accepted",
+    )
     assert accepted.status == "accepted"
 
     completed = await store.update_handoff_status(
@@ -118,7 +121,7 @@ async def test_handoff_status_transitions() -> None:
 
 
 @pytest.mark.asyncio
-async def test_handoff_reject_blocks_completion() -> None:
+async def test_handoff_reject_and_invalid_transition() -> None:
     store = AgentTaskStore()
     task = await store.create_task("T", "in")
     handoff = await store.create_handoff(
@@ -128,8 +131,13 @@ async def test_handoff_reject_blocks_completion() -> None:
         reason="need expertise",
     )
 
-    rejected = await store.update_handoff_status(handoff.handoff_id, "rejected")
+    rejected = await store.update_handoff_status(
+        handoff.handoff_id,
+        "rejected",
+        metadata={"reason": "busy"},
+    )
     assert rejected.status == "rejected"
+    assert rejected.metadata["reason"] == "busy"
 
     with pytest.raises(ValueError):
         await store.update_handoff_status(handoff.handoff_id, "completed")
@@ -149,7 +157,7 @@ async def test_event_store_records_handoff_events() -> None:
     await store.update_handoff_status(handoff.handoff_id, "accepted")
     await store.update_handoff_status(handoff.handoff_id, "completed")
 
-    events = await event_store.list_events(task_id=task.task_id)
+    events = await event_store.list_events(task.task_id)
     event_types = [event.type for event in events]
     assert "agent.handoff.created" in event_types
     assert "agent.handoff.accepted" in event_types
@@ -236,68 +244,56 @@ async def test_api_cancel_task(client: httpx.AsyncClient) -> None:
     runs_response = await client.get("/api/runtime/runs?run_type=agent_task&limit=50")
     assert runs_response.status_code == 200
     runs = runs_response.json()
-    assert any(
-        run["source_id"] == task_id
-        and run["status"] == "cancelled"
-        and run["error"] == "test cancel"
-        for run in runs
-    )
-
-
-@pytest.mark.asyncio
-async def test_api_list_tasks(client: httpx.AsyncClient) -> None:
-    response = await client.get("/api/runtime/agent-tasks")
-
-    assert response.status_code == 200
-    assert isinstance(response.json(), list)
+    task_run = next(item for item in runs if item["source_id"] == task_id)
+    assert task_run["status"] == "cancelled"
+    assert task_run["error"] == "test cancel"
 
 
 @pytest.mark.asyncio
 async def test_api_create_and_list_handoffs(client: httpx.AsyncClient) -> None:
     create_response = await client.post(
         "/api/runtime/agent-tasks",
-        json={"title": "Handoff API Task", "input": "hello"},
+        json={"title": "Handoff API Task", "input": "x", "assigned_agent": "agent_a"},
     )
-    assert create_response.status_code == 200
     task_id = create_response.json()["task_id"]
 
     handoff_response = await client.post(
         f"/api/runtime/agent-tasks/{task_id}/handoffs",
-        json={
-            "target_agent": "reviewer-agent",
-            "source_agent": "workflow",
-            "reason": "needs review",
-        },
+        json={"target_agent": "agent_b", "reason": "need expertise"},
     )
+
     assert handoff_response.status_code == 200, handoff_response.text
     handoff = handoff_response.json()
     assert handoff["task_id"] == task_id
+    assert handoff["source_agent"] == "agent_a"
+    assert handoff["target_agent"] == "agent_b"
     assert handoff["status"] == "pending"
-    assert handoff["target_agent"] == "reviewer-agent"
 
     list_response = await client.get(f"/api/runtime/agent-tasks/{task_id}/handoffs")
     assert list_response.status_code == 200
     handoffs = list_response.json()
-    assert len(handoffs) >= 1
-    assert handoffs[0]["handoff_id"] == handoff["handoff_id"]
+    assert any(item["handoff_id"] == handoff["handoff_id"] for item in handoffs)
 
 
 @pytest.mark.asyncio
 async def test_api_handoff_status_transitions(client: httpx.AsyncClient) -> None:
     create_response = await client.post(
         "/api/runtime/agent-tasks",
-        json={"title": "Transition API Task", "input": "hello"},
+        json={"title": "Handoff Transition", "input": "x"},
     )
     task_id = create_response.json()["task_id"]
     handoff_response = await client.post(
         f"/api/runtime/agent-tasks/{task_id}/handoffs",
-        json={"target_agent": "reviewer-agent", "reason": "needs review"},
+        json={
+            "source_agent": "agent_a",
+            "target_agent": "agent_b",
+            "reason": "need expertise",
+        },
     )
     handoff_id = handoff_response.json()["handoff_id"]
 
     accept_response = await client.post(
         f"/api/runtime/agent-handoffs/{handoff_id}/accept",
-        json={"reason": "accepted"},
     )
     assert accept_response.status_code == 200
     assert accept_response.json()["status"] == "accepted"
@@ -307,36 +303,46 @@ async def test_api_handoff_status_transitions(client: httpx.AsyncClient) -> None
         json={"result": "done"},
     )
     assert complete_response.status_code == 200
-    assert complete_response.json()["status"] == "completed"
+    completed = complete_response.json()
+    assert completed["status"] == "completed"
+    assert completed["metadata"]["result"] == "done"
 
     runs_response = await client.get(
-        "/api/runtime/runs?run_type=agent_handoff&limit=50"
+        "/api/runtime/runs?run_type=agent_handoff&limit=50",
     )
     assert runs_response.status_code == 200
     runs = runs_response.json()
-    assert any(
-        run["source_id"] == handoff_id
-        and run["status"] == "completed"
-        and run["metadata"].get("handoff_status") == "completed"
-        for run in runs
-    )
+    handoff_run = next(item for item in runs if item["source_id"] == handoff_id)
+    assert handoff_run["status"] == "completed"
+    assert handoff_run["metadata"]["handoff_status"] == "completed"
 
 
 @pytest.mark.asyncio
 async def test_api_handoff_invalid_transition(client: httpx.AsyncClient) -> None:
     create_response = await client.post(
         "/api/runtime/agent-tasks",
-        json={"title": "Invalid Transition API Task", "input": "hello"},
+        json={"title": "Handoff Invalid", "input": "x"},
     )
     task_id = create_response.json()["task_id"]
     handoff_response = await client.post(
         f"/api/runtime/agent-tasks/{task_id}/handoffs",
-        json={"target_agent": "reviewer-agent", "reason": "needs review"},
+        json={
+            "source_agent": "agent_a",
+            "target_agent": "agent_b",
+            "reason": "need expertise",
+        },
     )
     handoff_id = handoff_response.json()["handoff_id"]
 
     complete_response = await client.post(
         f"/api/runtime/agent-handoffs/{handoff_id}/complete",
-        json={"result": "done"},
     )
     assert complete_response.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_api_list_tasks(client: httpx.AsyncClient) -> None:
+    response = await client.get("/api/runtime/agent-tasks")
+
+    assert response.status_code == 200
+    assert isinstance(response.json(), list)

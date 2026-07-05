@@ -53,7 +53,7 @@ curl http://localhost:5173/agents/meta-agent
 
 ## 后续路线
 
-1. 将 AgentTask 扩展到 Handoff API，支持任务移交、接受、拒绝和完成。
-2. 在经典工作流中增加 handoff / sub-agent 相关节点。
+1. 将 AgentTask 接入经典工作流 `agent_task` 节点，支持画布创建任务并输出 `task_id`。
+2. 将 AgentTask 扩展到 Handoff API，支持任务移交、接受、拒绝和完成。
 3. 将任务工作台从“可见与取消”升级为 Xpert 风格 RunRegistry 视图。
 4. 在 Xpert 对齐主线稳定后，再评估是否补齐 EvoAgentX 历史参考中的剩余能力。

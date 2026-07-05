@@ -444,12 +444,14 @@ export default function WorkflowRun({
     });
   }
 
-  const containerClassName = embedded
-    ? "flex min-h-0 flex-col"
-    : "surface-panel flex min-h-0 flex-col rounded-lg";
-
   return (
-    <aside className={containerClassName}>
+    <aside
+      className={
+        embedded
+          ? "flex min-h-0 flex-1 flex-col"
+          : "surface-panel flex min-h-0 flex-col rounded-lg"
+      }
+    >
       <div className="border-b border-white/10 p-4">
         <p className="text-sm font-semibold text-white">流水线试运行</p>
         <p className="mt-1 text-xs leading-5 text-slate-400">
@@ -598,10 +600,14 @@ export default function WorkflowRun({
                           <p>类型：{runSummary.run_type}</p>
                           <p>标题：{runSummary.title}</p>
                           {runSummary.source_id ? (
-                            <p className="break-all">source：{runSummary.source_id}</p>
+                            <p className="break-all">
+                              source：{runSummary.source_id}
+                            </p>
                           ) : null}
                           {runSummary.error ? (
-                            <p className="text-rose-200">error：{runSummary.error}</p>
+                            <p className="text-rose-200">
+                              error：{runSummary.error}
+                            </p>
                           ) : null}
                         </div>
                       ) : (
