@@ -99,6 +99,12 @@ const paletteItems: PaletteItem[] = [
     description: "创建 Agent Task Runtime 任务，输出 task_id 供后续节点引用。",
   },
   {
+    kind: "agent_handoff",
+    icon: "⇄",
+    title: "智能体移交",
+    description: "把 Agent Task 显式移交给另一个智能体，输出 handoff_id。",
+  },
+  {
     kind: "mcp_tool",
     icon: "🔧",
     title: "MCP Tool",

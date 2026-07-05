@@ -288,6 +288,19 @@ function createNodeData(
     };
   }
 
+  if (kind === "agent_handoff") {
+    return {
+      kind,
+      title: "智能体移交",
+      description: "将已有 Agent Task 移交给另一个智能体，输出 handoff_id。",
+      taskIdVariable: "agent_task_id",
+      sourceAgent: "workflow-planner",
+      targetAgent: "review-agent",
+      reason: "请接手处理：{{user_input}}",
+      outputVariable: "agent_handoff_id",
+    };
+  }
+
   if (kind === "mcp_tool") {
     return {
       kind,
@@ -1186,6 +1199,49 @@ function NodeConfig({ node, onChange }: NodeConfigProps) {
               className={textInputClass()}
               onChange={(event) => update({ assignedAgent: event.target.value })}
               value={data.assignedAgent ?? ""}
+            />
+          </Field>
+          <Field label="输出变量">
+            <input
+              className={textInputClass()}
+              onChange={(event) => update({ outputVariable: event.target.value })}
+              value={data.outputVariable ?? ""}
+            />
+          </Field>
+        </>
+      ) : null}
+
+      {data.kind === "agent_handoff" ? (
+        <>
+          <div className="rounded-lg border border-purple-300/25 bg-purple-300/10 px-3 py-2 text-xs leading-5 text-purple-50">
+            该节点会读取已有 Agent Task 的 task_id，并创建一条 Handoff 记录；当前只登记移交，不做真实调度。
+          </div>
+          <Field label="任务 ID 变量">
+            <input
+              className={textInputClass()}
+              onChange={(event) => update({ taskIdVariable: event.target.value })}
+              value={data.taskIdVariable ?? ""}
+            />
+          </Field>
+          <Field label="来源智能体">
+            <input
+              className={textInputClass()}
+              onChange={(event) => update({ sourceAgent: event.target.value })}
+              value={data.sourceAgent ?? ""}
+            />
+          </Field>
+          <Field label="目标智能体">
+            <input
+              className={textInputClass()}
+              onChange={(event) => update({ targetAgent: event.target.value })}
+              value={data.targetAgent ?? ""}
+            />
+          </Field>
+          <Field label="移交理由（支持 {{变量}}）">
+            <textarea
+              className={`${textInputClass()} min-h-28 resize-none leading-6`}
+              onChange={(event) => update({ reason: event.target.value })}
+              value={data.reason ?? ""}
             />
           </Field>
           <Field label="输出变量">

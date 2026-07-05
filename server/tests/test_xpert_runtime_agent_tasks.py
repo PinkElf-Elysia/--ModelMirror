@@ -241,6 +241,13 @@ async def test_api_cancel_task(client: httpx.AsyncClient) -> None:
     assert data["status"] == "cancelled"
     assert data["error"] == "test cancel"
 
+    runs_response = await client.get("/api/runtime/runs?run_type=agent_task&limit=50")
+    assert runs_response.status_code == 200
+    runs = runs_response.json()
+    task_run = next(item for item in runs if item["source_id"] == task_id)
+    assert task_run["status"] == "cancelled"
+    assert task_run["error"] == "test cancel"
+
 
 @pytest.mark.asyncio
 async def test_api_create_and_list_handoffs(client: httpx.AsyncClient) -> None:
@@ -299,6 +306,15 @@ async def test_api_handoff_status_transitions(client: httpx.AsyncClient) -> None
     completed = complete_response.json()
     assert completed["status"] == "completed"
     assert completed["metadata"]["result"] == "done"
+
+    runs_response = await client.get(
+        "/api/runtime/runs?run_type=agent_handoff&limit=50",
+    )
+    assert runs_response.status_code == 200
+    runs = runs_response.json()
+    handoff_run = next(item for item in runs if item["source_id"] == handoff_id)
+    assert handoff_run["status"] == "completed"
+    assert handoff_run["metadata"]["handoff_status"] == "completed"
 
 
 @pytest.mark.asyncio

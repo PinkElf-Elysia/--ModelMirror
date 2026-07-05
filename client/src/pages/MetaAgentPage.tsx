@@ -73,6 +73,23 @@ interface MetaAgentGenerateResponse {
   validation: MetaAgentValidation;
 }
 
+interface AgentTaskSummary {
+  task_id: string;
+  title: string;
+  status: string;
+  assigned_agent: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
+interface AgentTaskDetail extends AgentTaskSummary {
+  input: string;
+  result: string | null;
+  error: string | null;
+  source_agent: string | null;
+  metadata: Record<string, unknown>;
+}
+
 const nodeTypes = {
   workflowNode: WorkflowNodeCard,
 };
@@ -118,6 +135,36 @@ function errorMessage(payload: unknown, fallback: string) {
   if (typeof detail === "string") return detail;
   if (detail) return JSON.stringify(detail);
   return fallback;
+}
+
+function agentTaskTitle(goal: string) {
+  const compactGoal = goal.replace(/\s+/g, " ").trim();
+  const suffix = compactGoal.length > 60 ? "..." : "";
+  return `元智能体任务：${compactGoal.slice(0, 60)}${suffix}`;
+}
+
+function formatTaskTime(value: number | null | undefined) {
+  if (!value) return "-";
+  return new Date(value * 1000).toLocaleString();
+}
+
+function taskStatusLabel(status: string) {
+  const labels: Record<string, string> = {
+    pending: "待处理",
+    running: "运行中",
+    completed: "已完成",
+    failed: "失败",
+    cancelled: "已取消",
+  };
+  return labels[status] ?? status;
+}
+
+function taskStatusClass(status: string) {
+  if (status === "completed") return "border-emerald-300/25 bg-emerald-300/10 text-emerald-100";
+  if (status === "failed") return "border-rose-300/25 bg-rose-300/10 text-rose-100";
+  if (status === "cancelled") return "border-slate-400/20 bg-slate-400/10 text-slate-300";
+  if (status === "running") return "border-cyan-300/25 bg-cyan-300/10 text-cyan-100";
+  return "border-hire-300/25 bg-hire-300/10 text-hire-100";
 }
 
 function nodeColor(node: WorkflowNode) {
@@ -221,10 +268,130 @@ export default function MetaAgentPage() {
   const [result, setResult] = useState<MetaAgentGenerateResponse | null>(null);
   const [error, setError] = useState("");
   const [isGenerating, setIsGenerating] = useState(false);
+  const [agentTasks, setAgentTasks] = useState<AgentTaskSummary[]>([]);
+  const [selectedTask, setSelectedTask] = useState<AgentTaskDetail | null>(null);
+  const [tasksLoading, setTasksLoading] = useState(false);
+  const [tasksError, setTasksError] = useState("");
+  const [taskActionError, setTaskActionError] = useState("");
+  const [cancellingTaskId, setCancellingTaskId] = useState<string | null>(null);
 
   useEffect(() => {
     document.title = "模镜 - 元智能体工作台";
   }, []);
+
+  useEffect(() => {
+    void loadAgentTasks();
+  }, []);
+
+  async function loadAgentTask(taskId: string) {
+    try {
+      const response = await fetch(`/api/runtime/agent-tasks/${taskId}`);
+      const payload = (await response.json().catch(() => null)) as
+        | AgentTaskDetail
+        | { error?: string; detail?: unknown }
+        | null;
+      if (!response.ok) {
+        throw new Error(errorMessage(payload, "任务详情加载失败。"));
+      }
+      setSelectedTask(payload as AgentTaskDetail);
+      setTaskActionError("");
+    } catch (taskError) {
+      setTaskActionError(
+        taskError instanceof Error ? taskError.message : "任务详情加载失败。",
+      );
+    }
+  }
+
+  async function loadAgentTasks(selectTaskId?: string) {
+    setTasksLoading(true);
+    try {
+      const response = await fetch("/api/runtime/agent-tasks?limit=20");
+      const payload = (await response.json().catch(() => null)) as
+        | AgentTaskSummary[]
+        | { error?: string; detail?: unknown }
+        | null;
+      if (!response.ok || !Array.isArray(payload)) {
+        throw new Error(errorMessage(payload, "任务列表加载失败。"));
+      }
+      setAgentTasks(payload);
+      setTasksError("");
+      if (selectTaskId) {
+        await loadAgentTask(selectTaskId);
+      }
+    } catch (taskError) {
+      setTasksError(
+        taskError instanceof Error ? taskError.message : "任务列表加载失败。",
+      );
+    } finally {
+      setTasksLoading(false);
+    }
+  }
+
+  async function createAgentTaskForResult(
+    generated: MetaAgentGenerateResponse,
+    trimmedGoal: string,
+  ) {
+    try {
+      const response = await fetch("/api/runtime/agent-tasks", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: agentTaskTitle(trimmedGoal),
+          input: trimmedGoal,
+          source_agent: "meta-agent",
+          assigned_agent: "workflow-planner",
+          metadata: {
+            model_id: modelId,
+            max_tasks: maxTasks,
+            workflow_id: generated.workflow.id,
+            workflow_title: generated.workflow.title,
+            sub_tasks_count: generated.plan.sub_tasks.length,
+            validation_valid: generated.validation.valid,
+          },
+        }),
+      });
+      const payload = (await response.json().catch(() => null)) as
+        | { task_id?: string }
+        | { error?: string; detail?: unknown }
+        | null;
+      if (!response.ok || !payload || !("task_id" in payload) || !payload.task_id) {
+        throw new Error(errorMessage(payload, "任务记录创建失败。"));
+      }
+      setTaskActionError("");
+      await loadAgentTasks(payload.task_id);
+    } catch (taskError) {
+      setTaskActionError(
+        taskError instanceof Error
+          ? `工作流已生成，但${taskError.message}`
+          : "工作流已生成，但任务记录创建失败。",
+      );
+    }
+  }
+
+  async function cancelAgentTask(taskId: string) {
+    setCancellingTaskId(taskId);
+    try {
+      const response = await fetch(`/api/runtime/agent-tasks/${taskId}/cancel`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reason: "用户在元智能体工作台取消" }),
+      });
+      const payload = (await response.json().catch(() => null)) as
+        | { error?: string; detail?: unknown }
+        | null;
+      if (!response.ok) {
+        throw new Error(errorMessage(payload, "取消任务失败。"));
+      }
+      setTaskActionError("");
+      await loadAgentTasks(taskId);
+    } catch (taskError) {
+      setTaskActionError(
+        taskError instanceof Error ? taskError.message : "取消任务失败。",
+      );
+    } finally {
+      setCancellingTaskId(null);
+    }
+  }
 
   async function generateWorkflow() {
     const trimmedGoal = goal.trim();
@@ -253,7 +420,9 @@ export default function MetaAgentPage() {
       if (!response.ok) {
         throw new Error(errorMessage(payload, "生成失败，请检查模型网关配置。"));
       }
-      setResult(payload as MetaAgentGenerateResponse);
+      const generated = payload as MetaAgentGenerateResponse;
+      setResult(generated);
+      await createAgentTaskForResult(generated, trimmedGoal);
     } catch (generateError) {
       setError(generateError instanceof Error ? generateError.message : "生成失败。");
     } finally {
@@ -441,6 +610,141 @@ export default function MetaAgentPage() {
         </section>
 
         <aside className="min-h-0 space-y-4">
+          <section className="surface-panel rounded-lg p-4">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <p className="text-sm font-semibold text-white">任务工作台</p>
+                <p className="mt-1 text-xs text-slate-400">
+                  元智能体任务工作台 Beta
+                </p>
+              </div>
+              <button
+                className="rounded-full border border-white/10 bg-white/[0.055] px-2.5 py-1 text-xs font-semibold text-slate-300 transition hover:border-hire-300/35 hover:text-hire-100"
+                disabled={tasksLoading}
+                onClick={() => void loadAgentTasks(selectedTask?.task_id)}
+                type="button"
+              >
+                {tasksLoading ? "刷新中" : "刷新"}
+              </button>
+            </div>
+
+            {tasksError ? (
+              <div className="mt-3 rounded-lg border border-amber-300/25 bg-amber-300/10 px-3 py-2 text-xs leading-5 text-amber-100">
+                {tasksError}
+              </div>
+            ) : null}
+            {taskActionError ? (
+              <div className="mt-3 rounded-lg border border-rose-300/25 bg-rose-300/10 px-3 py-2 text-xs leading-5 text-rose-100">
+                {taskActionError}
+              </div>
+            ) : null}
+
+            <div className="mt-3 max-h-48 space-y-2 overflow-y-auto pr-1">
+              {tasksLoading && agentTasks.length === 0 ? (
+                <p className="rounded-lg border border-white/10 bg-white/[0.035] px-3 py-2 text-xs text-slate-400">
+                  正在加载任务...
+                </p>
+              ) : agentTasks.length === 0 ? (
+                <p className="rounded-lg border border-dashed border-white/15 bg-white/[0.025] px-3 py-3 text-xs leading-5 text-slate-400">
+                  暂无任务。生成一个工作流后，会自动创建元智能体任务记录。
+                </p>
+              ) : (
+                agentTasks.map((task) => (
+                  <button
+                    className={`w-full rounded-lg border px-3 py-2 text-left transition ${
+                      selectedTask?.task_id === task.task_id
+                        ? "border-hire-300/45 bg-hire-300/10"
+                        : "border-white/10 bg-white/[0.045] hover:border-white/20 hover:bg-white/[0.07]"
+                    }`}
+                    key={task.task_id}
+                    onClick={() => void loadAgentTask(task.task_id)}
+                    type="button"
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <p className="min-w-0 truncate text-xs font-semibold text-white">
+                        {task.title}
+                      </p>
+                      <span
+                        className={`shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-semibold ${taskStatusClass(
+                          task.status,
+                        )}`}
+                      >
+                        {taskStatusLabel(task.status)}
+                      </span>
+                    </div>
+                    <p className="mt-1 truncate text-[11px] text-slate-500">
+                      {task.assigned_agent ?? "未分配"} · {formatTaskTime(task.created_at)}
+                    </p>
+                  </button>
+                ))
+              )}
+            </div>
+
+            {selectedTask ? (
+              <div className="mt-3 rounded-lg border border-white/10 bg-white/[0.035] p-3">
+                <div className="flex items-center justify-between gap-3">
+                  <p className="truncate text-xs font-semibold text-slate-200">
+                    {selectedTask.title}
+                  </p>
+                  {selectedTask.metadata?.workflow_id === result?.workflow.id ? (
+                    <span className="shrink-0 rounded-full border border-cyan-300/25 bg-cyan-300/10 px-2 py-0.5 text-[10px] font-semibold text-cyan-100">
+                      当前草稿
+                    </span>
+                  ) : null}
+                </div>
+                <p className="mt-2 line-clamp-3 text-xs leading-5 text-slate-400">
+                  {selectedTask.input}
+                </p>
+                <div className="mt-3 grid grid-cols-2 gap-2 text-[11px] text-slate-400">
+                  <div className="rounded-md border border-white/10 bg-slate-950/30 px-2 py-1.5">
+                    <p className="text-slate-500">状态</p>
+                    <p className="mt-1 font-semibold text-slate-200">
+                      {taskStatusLabel(selectedTask.status)}
+                    </p>
+                  </div>
+                  <div className="rounded-md border border-white/10 bg-slate-950/30 px-2 py-1.5">
+                    <p className="text-slate-500">负责 Agent</p>
+                    <p className="mt-1 truncate font-semibold text-slate-200">
+                      {selectedTask.assigned_agent ?? "未分配"}
+                    </p>
+                  </div>
+                  <div className="rounded-md border border-white/10 bg-slate-950/30 px-2 py-1.5">
+                    <p className="text-slate-500">工作流</p>
+                    <p className="mt-1 truncate font-semibold text-slate-200">
+                      {typeof selectedTask.metadata?.workflow_title === "string"
+                        ? selectedTask.metadata.workflow_title
+                        : "未关联"}
+                    </p>
+                  </div>
+                  <div className="rounded-md border border-white/10 bg-slate-950/30 px-2 py-1.5">
+                    <p className="text-slate-500">子任务</p>
+                    <p className="mt-1 font-semibold text-slate-200">
+                      {typeof selectedTask.metadata?.sub_tasks_count === "number"
+                        ? selectedTask.metadata.sub_tasks_count
+                        : "-"}
+                    </p>
+                  </div>
+                </div>
+                {selectedTask.error ? (
+                  <p className="mt-2 rounded-md border border-rose-300/25 bg-rose-300/10 px-2 py-1.5 text-xs text-rose-100">
+                    {selectedTask.error}
+                  </p>
+                ) : null}
+                <button
+                  className="mt-3 w-full rounded-full border border-white/10 bg-white/[0.055] px-3 py-2 text-xs font-semibold text-slate-200 transition hover:border-rose-300/35 hover:bg-rose-300/10 hover:text-rose-100 disabled:cursor-not-allowed disabled:opacity-50"
+                  disabled={
+                    selectedTask.status === "cancelled" ||
+                    cancellingTaskId === selectedTask.task_id
+                  }
+                  onClick={() => void cancelAgentTask(selectedTask.task_id)}
+                  type="button"
+                >
+                  {cancellingTaskId === selectedTask.task_id ? "取消中..." : "取消任务"}
+                </button>
+              </div>
+            ) : null}
+          </section>
+
           <section className="surface-panel rounded-lg p-4">
             <div className="flex items-center justify-between gap-3">
               <p className="text-sm font-semibold text-white">计划</p>

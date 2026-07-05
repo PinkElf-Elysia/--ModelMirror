@@ -1,6 +1,22 @@
 # Xpert 对齐总纲
 
-最后更新日期：2026-06-26  
+> 2026-07-05 状态补充：RunRegistry 已进入最小可观测闭环阶段，详见文末“RunRegistry 最小可观测闭环”。
+
+## 2026-07-05 增量：RunRegistry 最小可观测闭环
+
+RunRegistry 已从“下一步”进入“部分实现”。当前新增 `server/xpert_runtime/run_registry.py`，提供内存态 `RuntimeRun` 与 `RunRegistry`，统一登记 `workflow`、`agent_task`、`agent_handoff` 三类 run，支持创建、查询、过滤列表、状态更新和取消。
+
+Classic workflow 运行时会创建 workflow run，并在 `workflow_meta` / `workflow_end` SSE 中携带 `run_id`；`agent_task` 节点创建任务时登记 agent_task run；`agent_handoff` 节点创建移交时登记 agent_handoff run。Run 之间通过 `parent_run_id` 和 metadata 关联，不强行合并现有 workflow `task_id`，避免破坏既有 SSE、status 和 resume 协议。
+
+新增 API：
+
+- `GET /api/runtime/runs?run_type=&status=&limit=`
+- `GET /api/runtime/runs/{run_id}`
+- `POST /api/runtime/runs/{run_id}/cancel`
+
+当前边界：RunRegistry 仅为内存态可观测索引，不是持久化调度器；取消 run 只更新 registry 状态，不中断真实 workflow、AgentTask 或 Handoff 执行。下一步可在此基础上继续补齐 Handoff 前端观测、RunRegistry 页面、checkpoint、死信与持久化存储。
+
+最后更新日期：2026-07-05
 维护人：模镜团队
 
 ## 对齐原则

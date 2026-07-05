@@ -43,6 +43,8 @@ NODE_KIND_ALIASES = {
     "agent": "agent",
     "agent_task": "agent_task",
     "agent-task": "agent_task",
+    "agent_handoff": "agent_handoff",
+    "agent-handoff": "agent_handoff",
     "mcp_tool": "mcp_tool",
     "mcp-tool": "mcp_tool",
     "tool": "mcp_tool",
@@ -78,6 +80,7 @@ SUPPORTED_NODE_KINDS = {
     "question_classifier",
     "agent",
     "agent_task",
+    "agent_handoff",
     "mcp_tool",
     "time_tool",
     "http_request",
@@ -730,6 +733,63 @@ def validate_node_configuration(
                 )
             )
 
+    if kind == "agent_handoff":
+        task_id_variable = str(data.get("taskIdVariable") or "").strip()
+        if not task_id_variable:
+            issues.append(
+                ValidationIssue(
+                    code="missing_agent_handoff_task_id_variable",
+                    message="Agent handoff node needs data.taskIdVariable.",
+                    node_id=node.id,
+                )
+            )
+        elif not is_variable_name(task_id_variable):
+            issues.append(
+                ValidationIssue(
+                    code="invalid_agent_handoff_task_id_variable",
+                    message="Agent handoff taskIdVariable must be an identifier.",
+                    node_id=node.id,
+                )
+            )
+
+        target_agent = str(data.get("targetAgent") or "").strip()
+        if not target_agent:
+            issues.append(
+                ValidationIssue(
+                    code="missing_agent_handoff_target_agent",
+                    message="Agent handoff node needs data.targetAgent.",
+                    node_id=node.id,
+                )
+            )
+
+        reason = str(data.get("reason") or "").strip()
+        if not reason:
+            issues.append(
+                ValidationIssue(
+                    code="missing_agent_handoff_reason",
+                    message="Agent handoff node needs data.reason.",
+                    node_id=node.id,
+                )
+            )
+
+        output_variable = str(data.get("outputVariable") or "").strip()
+        if not output_variable:
+            issues.append(
+                ValidationIssue(
+                    code="missing_agent_handoff_output_variable",
+                    message="Agent handoff node needs data.outputVariable.",
+                    node_id=node.id,
+                )
+            )
+        elif not is_variable_name(output_variable):
+            issues.append(
+                ValidationIssue(
+                    code="invalid_agent_handoff_output_variable",
+                    message="Agent handoff outputVariable must be an identifier.",
+                    node_id=node.id,
+                )
+            )
+
     if kind == "mcp_tool":
         tool_name = str(data.get("toolName") or "").strip()
         if not tool_name:
@@ -1089,6 +1149,7 @@ def collect_declared_variables(
             "question_classifier",
             "agent",
             "agent_task",
+            "agent_handoff",
             "mcp_tool",
             "time_tool",
             "http_request",
@@ -1328,6 +1389,34 @@ def validate_variable_references(
                             node_id=node.id,
                         )
                     )
+
+    if kind == "agent_handoff":
+        task_id_variable = str(data.get("taskIdVariable") or "").strip()
+        if task_id_variable and task_id_variable not in available_variables:
+            issues.append(
+                ValidationIssue(
+                    code="missing_agent_handoff_task_id_reference",
+                    message=(
+                        "Agent handoff taskIdVariable references undefined "
+                        f"variable '{task_id_variable}'."
+                    ),
+                    node_id=node.id,
+                )
+            )
+
+        reason = str(data.get("reason") or "")
+        for variable in sorted(extract_template_variables(reason)):
+            if variable not in available_variables:
+                issues.append(
+                    ValidationIssue(
+                        code="missing_agent_handoff_template_variable",
+                        message=(
+                            "Agent handoff reason references undefined "
+                            f"variable '{variable}'."
+                        ),
+                        node_id=node.id,
+                    )
+                )
 
     if kind == "mcp_tool":
         arguments_json = str(data.get("argumentsJson") or "")

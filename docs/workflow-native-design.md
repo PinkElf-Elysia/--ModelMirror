@@ -1,8 +1,26 @@
 # workflow-native 自研工作流设计
 
+> 2026-07-05 状态补充：classic workflow 已接入 RunRegistry 最小可观测闭环，并恢复 `/workflow` 画布的节点库浮层与配置/运行 tabs 布局。
+
+## 2026-07-05 增量：RunRegistry 与工作流运行观测
+
+Classic workflow 每次运行会登记一条 `workflow` run，并在 `workflow_meta` / `workflow_end` SSE 中携带 `run_id`。`agent_task` 节点创建 AgentTask 时同步登记 `agent_task` run；`agent_handoff` 节点创建 Handoff 时同步登记 `agent_handoff` run。三类 run 通过 `parent_run_id` 与 metadata 互相关联，保留现有 workflow `task_id`、AgentTask `task_id` 与 Handoff `handoff_id` 协议不变。
+
+新增 Runtime Run API 用于最小观测：
+
+- `GET /api/runtime/runs?run_type=&status=&limit=`
+- `GET /api/runtime/runs/{run_id}`
+- `POST /api/runtime/runs/{run_id}/cancel`
+
+当前 RunRegistry 是内存态索引，不是调度器；取消 run 仅更新观测状态，不中断正在执行的 workflow、AgentTask 或 Handoff。前端 `WorkflowRun` 的“运行观测”折叠区会展示当前 `run_id` 与 RunRegistry 摘要，并继续展示 runtime events 与 tool audit records。
+
+## 2026-07-05 增量：`/workflow` 画布布局恢复
+
+`/workflow` 布局恢复为“画布 + 单一右侧工作台”：节点库位于画布顶部附近的下拉/浮层中，避免常驻左栏；右侧工作台使用 `配置 / 运行` tabs 承载 `NodeConfig` 与 `WorkflowRun`，点击运行时切到运行页。该调整只恢复布局体验，不改变节点数据结构、拖拽 payload、SSE 协议或后端执行逻辑。
+
 workflow-native 是模镜自研工作流引擎的渐进式实验线。它不会替换当前稳定的 `/workflow` Dify iframe 入口，也不会改动 `/rag`。当前阶段提供静态图校验能力，并在 classic 运行器中试点少量本地节点执行，让团队先把数据模型、API 契约、错误模型和测试流程立起来。
 
-最后更新日期：2026-06-26
+最后更新日期：2026-07-05
 维护人：模镜团队
 
 ## 目标与边界
