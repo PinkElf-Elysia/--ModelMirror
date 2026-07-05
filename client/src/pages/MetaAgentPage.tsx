@@ -466,7 +466,9 @@ export default function MetaAgentPage() {
       <header className="mb-5 overflow-hidden rounded-lg border border-hire-300/20 bg-[linear-gradient(135deg,rgba(67,20,7,0.70),rgba(6,9,22,0.92)_48%,rgba(8,51,68,0.62))] p-5 shadow-prism sm:p-6">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
           <div>
-            <p className="text-sm font-semibold text-hire-100">EvoAgentX-inspired</p>
+            <p className="text-sm font-semibold text-hire-100">
+              Xpert 对齐任务工作台 Beta
+            </p>
             <h1 className="mt-2 text-3xl font-semibold text-white sm:text-4xl">
               元智能体工作台
             </h1>

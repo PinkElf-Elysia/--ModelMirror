@@ -19,6 +19,8 @@ NativeNodeKind = Literal[
     "human_intervention",
     "question_classifier",
     "agent",
+    "agent_task",
+    "agent_handoff",
     "mcp_tool",
     "time_tool",
     "http_request",

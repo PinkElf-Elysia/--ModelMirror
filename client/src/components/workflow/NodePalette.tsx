@@ -93,6 +93,18 @@ const paletteItems: PaletteItem[] = [
     description: "模型驱动的任务执行节点，支持工具循环和直接回答两种模式。",
   },
   {
+    kind: "agent_task",
+    icon: "AT",
+    title: "智能体任务",
+    description: "创建 Agent Task Runtime 任务，输出 task_id 供后续节点查询或展示。",
+  },
+  {
+    kind: "agent_handoff",
+    icon: "AH",
+    title: "智能体移交",
+    description: "将已创建的 Agent Task 移交给目标智能体，输出 handoff_id。",
+  },
+  {
     kind: "mcp_tool",
     icon: "🔧",
     title: "MCP Tool",

@@ -15,6 +15,8 @@ export type WorkflowNodeKind =
   | "human_intervention"
   | "question_classifier"
   | "agent"
+  | "agent_task"
+  | "agent_handoff"
   | "mcp_tool"
   | "time_tool"
   | "http_request"
@@ -68,6 +70,13 @@ export interface WorkflowNodeData extends Record<string, unknown> {
   maxIterations?: string;
   temperature?: string;
   promptSuffix?: string;
+  taskTitle?: string;
+  taskInput?: string;
+  assignedAgent?: string;
+  taskIdVariable?: string;
+  targetAgent?: string;
+  reason?: string;
+  sourceAgent?: string;
   toolName?: string;
   argumentsJson?: string;
   errorMode?: string;
@@ -112,6 +121,7 @@ export interface WorkflowRunEvent {
     | "workflow_end"
     | "error";
   task_id?: string;
+  run_id?: string;
   node_id?: string;
   node_title?: string;
   node_type?: WorkflowNodeKind;

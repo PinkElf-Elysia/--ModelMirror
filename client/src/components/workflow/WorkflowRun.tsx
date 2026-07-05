@@ -34,8 +34,24 @@ interface WorkflowObservationData {
   tool_audit_count: number;
 }
 
+interface RuntimeRunSummary {
+  run_id: string;
+  run_type: string;
+  status: string;
+  title: string;
+  source_id: string | null;
+  parent_run_id: string | null;
+  metadata: Record<string, unknown>;
+  created_at: number;
+  updated_at: number;
+  cancelled_at: number | null;
+  error: string | null;
+}
+
 interface WorkflowRunProps {
   definition: WorkflowDefinition;
+  embedded?: boolean;
+  onRunStart?: () => void;
 }
 
 interface PendingHumanIntervention {
@@ -210,12 +226,17 @@ function buildRunSteps(events: WorkflowRunEvent[]) {
   return steps;
 }
 
-export default function WorkflowRun({ definition }: WorkflowRunProps) {
+export default function WorkflowRun({
+  definition,
+  embedded = false,
+  onRunStart,
+}: WorkflowRunProps) {
   const [input, setInput] = useState("请帮我把这个需求拆成三步执行计划。");
   const [events, setEvents] = useState<WorkflowRunEvent[]>([]);
   const [isRunning, setIsRunning] = useState(false);
   const [error, setError] = useState("");
   const [taskId, setTaskId] = useState<string | null>(null);
+  const [runId, setRunId] = useState<string | null>(null);
   const [pendingHuman, setPendingHuman] =
     useState<PendingHumanIntervention | null>(null);
   const [humanInput, setHumanInput] = useState("");
@@ -224,6 +245,8 @@ export default function WorkflowRun({ definition }: WorkflowRunProps) {
   const [observationData, setObservationData] =
     useState<WorkflowObservationData | null>(null);
   const [observationLoading, setObservationLoading] = useState(false);
+  const [runSummary, setRunSummary] = useState<RuntimeRunSummary | null>(null);
+  const [runSummaryLoading, setRunSummaryLoading] = useState(false);
 
   const inputVariable = useMemo(() => {
     const inputNode = definition.nodes.find((node) => node.data.kind === "input");
@@ -246,14 +269,18 @@ export default function WorkflowRun({ definition }: WorkflowRunProps) {
   const runSteps = useMemo(() => buildRunSteps(events), [events]);
 
   async function runWorkflow() {
+    onRunStart?.();
     setEvents([]);
     setError("");
     setTaskId(null);
+    setRunId(null);
     setPendingHuman(null);
     setHumanInput("");
     setShowObservation(false);
     setObservationData(null);
     setObservationLoading(false);
+    setRunSummary(null);
+    setRunSummaryLoading(false);
     setIsRunning(true);
 
     try {
@@ -322,6 +349,12 @@ export default function WorkflowRun({ definition }: WorkflowRunProps) {
     if (event.event === "workflow_meta" && event.task_id) {
       setTaskId(event.task_id);
     }
+    if (
+      (event.event === "workflow_meta" || event.event === "workflow_end") &&
+      event.run_id
+    ) {
+      setRunId(event.run_id);
+    }
     if (event.event === "human_intervention_pending") {
       setPendingHuman({
         nodeId: event.node_id ?? "",
@@ -374,30 +407,49 @@ export default function WorkflowRun({ definition }: WorkflowRunProps) {
   async function fetchObservation() {
     if (!taskId) return;
     setObservationLoading(true);
+    setRunSummaryLoading(Boolean(runId));
     try {
       const response = await fetch(`/api/workflow/runtime-events/${taskId}`);
-      if (!response.ok) return;
-      const payload = (await response.json()) as WorkflowObservationData;
-      setObservationData(payload);
+      if (response.ok) {
+        const payload = (await response.json()) as WorkflowObservationData;
+        setObservationData(payload);
+      }
+      if (runId) {
+        const runResponse = await fetch(`/api/runtime/runs/${runId}`);
+        if (runResponse.ok) {
+          const runPayload = (await runResponse.json()) as RuntimeRunSummary;
+          setRunSummary(runPayload);
+        }
+      }
     } catch {
       // Observability is best-effort; workflow execution output remains primary.
     } finally {
       setObservationLoading(false);
+      setRunSummaryLoading(false);
     }
   }
 
   function toggleObservation() {
     setShowObservation((current) => {
       const next = !current;
-      if (next && taskId && !observationData && !observationLoading) {
+      if (
+        next &&
+        taskId &&
+        ((!observationData && !observationLoading) ||
+          (runId && !runSummary && !runSummaryLoading))
+      ) {
         void fetchObservation();
       }
       return next;
     });
   }
 
+  const containerClassName = embedded
+    ? "flex min-h-0 flex-col"
+    : "surface-panel flex min-h-0 flex-col rounded-lg";
+
   return (
-    <aside className="surface-panel flex min-h-0 flex-col rounded-lg">
+    <aside className={containerClassName}>
       <div className="border-b border-white/10 p-4">
         <p className="text-sm font-semibold text-white">流水线试运行</p>
         <p className="mt-1 text-xs leading-5 text-slate-400">
@@ -524,6 +576,42 @@ export default function WorkflowRun({ definition }: WorkflowRunProps) {
                 </p>
               ) : observationData ? (
                 <>
+                  {runId ? (
+                    <div className="rounded-lg border border-hire-300/20 bg-hire-300/10 p-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <p className="text-xs font-semibold text-hire-100">
+                          RunRegistry
+                        </p>
+                        <span className="rounded-full border border-hire-300/25 bg-hire-300/10 px-2 py-0.5 text-[10px] uppercase text-hire-100">
+                          {runSummary?.status ?? "loading"}
+                        </span>
+                      </div>
+                      <p className="mt-2 break-all font-mono text-[11px] text-slate-400">
+                        {runId}
+                      </p>
+                      {runSummaryLoading ? (
+                        <p className="mt-2 text-[11px] text-slate-500">
+                          正在读取 run 摘要...
+                        </p>
+                      ) : runSummary ? (
+                        <div className="mt-2 grid gap-1 text-[11px] text-slate-400">
+                          <p>类型：{runSummary.run_type}</p>
+                          <p>标题：{runSummary.title}</p>
+                          {runSummary.source_id ? (
+                            <p className="break-all">source：{runSummary.source_id}</p>
+                          ) : null}
+                          {runSummary.error ? (
+                            <p className="text-rose-200">error：{runSummary.error}</p>
+                          ) : null}
+                        </div>
+                      ) : (
+                        <p className="mt-2 text-[11px] text-slate-500">
+                          暂无 run 摘要。
+                        </p>
+                      )}
+                    </div>
+                  ) : null}
+
                   <div className="rounded-lg border border-white/10 bg-white/[0.035] p-3">
                     <div className="flex items-center justify-between gap-3">
                       <p className="text-xs font-semibold text-slate-200">

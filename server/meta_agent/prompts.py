@@ -9,7 +9,7 @@ META_AGENT_SYSTEM_PROMPT = (
 
 def build_generation_prompt(goal: str, max_tasks: int) -> str:
     return f"""
-Given the user's goal, design an EvoAgentX-style workflow plan for ModelMirror.
+Given the user's goal, design an Xpert-aligned structured workflow plan for ModelMirror.
 
 Rules:
 1. Return one valid JSON object only. Do not wrap it in Markdown unless unavoidable.
@@ -19,7 +19,7 @@ Rules:
 5. Later task inputs may use "goal" and outputs from earlier tasks only.
 6. Use concise snake_case names for tasks and variable names.
 7. Each task needs at least one output.
-8. Each agent.prompt should reference inputs with EvoAgentX-style placeholders
+8. Each agent.prompt should reference inputs with ModelMirror template placeholders
    such as <input>{{goal}}</input> or {{goal}}.
 9. Each agent.prompt must produce the task outputs as titled sections, for example
    "## research_summary".

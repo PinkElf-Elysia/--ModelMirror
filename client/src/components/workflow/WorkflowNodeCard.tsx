@@ -93,6 +93,20 @@ const nodeMeta = {
     bg: "bg-violet-400/10",
     text: "text-violet-100",
   },
+  agent_task: {
+    icon: "AT",
+    label: "Agent Task",
+    border: "border-fuchsia-300/40",
+    bg: "bg-fuchsia-300/10",
+    text: "text-fuchsia-100",
+  },
+  agent_handoff: {
+    icon: "AH",
+    label: "Agent Handoff",
+    border: "border-indigo-300/40",
+    bg: "bg-indigo-300/10",
+    text: "text-indigo-100",
+  },
   mcp_tool: {
     icon: "🔧",
     label: "MCP Tool",
@@ -176,6 +190,12 @@ function outputName(data: WorkflowNode["data"]) {
   }
   if (data.kind === "agent") {
     return `🤖 ${data.agentMode ?? "tool_first"} → ${data.outputVariable ?? "agent_output"}`;
+  }
+  if (data.kind === "agent_task") {
+    return `${data.assignedAgent ?? "workflow-planner"} → ${data.outputVariable ?? "agent_task_id"}`;
+  }
+  if (data.kind === "agent_handoff") {
+    return `${data.taskIdVariable ?? "agent_task_id"} -> ${data.targetAgent ?? "target-agent"} -> ${data.outputVariable ?? "agent_handoff_id"}`;
   }
   if (data.kind === "mcp_tool") {
     return `🔧 ${data.toolName ?? "未选择"} → ${data.outputVariable ?? "mcp_output"}`;

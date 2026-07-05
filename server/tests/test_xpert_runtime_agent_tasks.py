@@ -95,6 +95,68 @@ async def test_handoff_create_and_list() -> None:
 
 
 @pytest.mark.asyncio
+async def test_handoff_status_transitions() -> None:
+    store = AgentTaskStore()
+    task = await store.create_task("T", "in")
+    handoff = await store.create_handoff(
+        task.task_id,
+        source_agent="agent_a",
+        target_agent="agent_b",
+        reason="need expertise",
+    )
+
+    accepted = await store.update_handoff_status(handoff.handoff_id, "accepted")
+    assert accepted.status == "accepted"
+
+    completed = await store.update_handoff_status(
+        handoff.handoff_id,
+        "completed",
+        metadata={"result": "done"},
+    )
+    assert completed.status == "completed"
+    assert completed.metadata["result"] == "done"
+
+
+@pytest.mark.asyncio
+async def test_handoff_reject_blocks_completion() -> None:
+    store = AgentTaskStore()
+    task = await store.create_task("T", "in")
+    handoff = await store.create_handoff(
+        task.task_id,
+        source_agent="agent_a",
+        target_agent="agent_b",
+        reason="need expertise",
+    )
+
+    rejected = await store.update_handoff_status(handoff.handoff_id, "rejected")
+    assert rejected.status == "rejected"
+
+    with pytest.raises(ValueError):
+        await store.update_handoff_status(handoff.handoff_id, "completed")
+
+
+@pytest.mark.asyncio
+async def test_event_store_records_handoff_events() -> None:
+    event_store = RuntimeEventStore()
+    store = AgentTaskStore(event_store=event_store)
+    task = await store.create_task("T", "in")
+    handoff = await store.create_handoff(
+        task.task_id,
+        source_agent="agent_a",
+        target_agent="agent_b",
+        reason="need expertise",
+    )
+    await store.update_handoff_status(handoff.handoff_id, "accepted")
+    await store.update_handoff_status(handoff.handoff_id, "completed")
+
+    events = await event_store.list_events(task_id=task.task_id)
+    event_types = [event.type for event in events]
+    assert "agent.handoff.created" in event_types
+    assert "agent.handoff.accepted" in event_types
+    assert "agent.handoff.completed" in event_types
+
+
+@pytest.mark.asyncio
 async def test_event_store_records_task_events() -> None:
     event_store = RuntimeEventStore()
     store = AgentTaskStore(event_store=event_store)
@@ -171,6 +233,16 @@ async def test_api_cancel_task(client: httpx.AsyncClient) -> None:
     assert data["status"] == "cancelled"
     assert data["error"] == "test cancel"
 
+    runs_response = await client.get("/api/runtime/runs?run_type=agent_task&limit=50")
+    assert runs_response.status_code == 200
+    runs = runs_response.json()
+    assert any(
+        run["source_id"] == task_id
+        and run["status"] == "cancelled"
+        and run["error"] == "test cancel"
+        for run in runs
+    )
+
 
 @pytest.mark.asyncio
 async def test_api_list_tasks(client: httpx.AsyncClient) -> None:
@@ -178,3 +250,93 @@ async def test_api_list_tasks(client: httpx.AsyncClient) -> None:
 
     assert response.status_code == 200
     assert isinstance(response.json(), list)
+
+
+@pytest.mark.asyncio
+async def test_api_create_and_list_handoffs(client: httpx.AsyncClient) -> None:
+    create_response = await client.post(
+        "/api/runtime/agent-tasks",
+        json={"title": "Handoff API Task", "input": "hello"},
+    )
+    assert create_response.status_code == 200
+    task_id = create_response.json()["task_id"]
+
+    handoff_response = await client.post(
+        f"/api/runtime/agent-tasks/{task_id}/handoffs",
+        json={
+            "target_agent": "reviewer-agent",
+            "source_agent": "workflow",
+            "reason": "needs review",
+        },
+    )
+    assert handoff_response.status_code == 200, handoff_response.text
+    handoff = handoff_response.json()
+    assert handoff["task_id"] == task_id
+    assert handoff["status"] == "pending"
+    assert handoff["target_agent"] == "reviewer-agent"
+
+    list_response = await client.get(f"/api/runtime/agent-tasks/{task_id}/handoffs")
+    assert list_response.status_code == 200
+    handoffs = list_response.json()
+    assert len(handoffs) >= 1
+    assert handoffs[0]["handoff_id"] == handoff["handoff_id"]
+
+
+@pytest.mark.asyncio
+async def test_api_handoff_status_transitions(client: httpx.AsyncClient) -> None:
+    create_response = await client.post(
+        "/api/runtime/agent-tasks",
+        json={"title": "Transition API Task", "input": "hello"},
+    )
+    task_id = create_response.json()["task_id"]
+    handoff_response = await client.post(
+        f"/api/runtime/agent-tasks/{task_id}/handoffs",
+        json={"target_agent": "reviewer-agent", "reason": "needs review"},
+    )
+    handoff_id = handoff_response.json()["handoff_id"]
+
+    accept_response = await client.post(
+        f"/api/runtime/agent-handoffs/{handoff_id}/accept",
+        json={"reason": "accepted"},
+    )
+    assert accept_response.status_code == 200
+    assert accept_response.json()["status"] == "accepted"
+
+    complete_response = await client.post(
+        f"/api/runtime/agent-handoffs/{handoff_id}/complete",
+        json={"result": "done"},
+    )
+    assert complete_response.status_code == 200
+    assert complete_response.json()["status"] == "completed"
+
+    runs_response = await client.get(
+        "/api/runtime/runs?run_type=agent_handoff&limit=50"
+    )
+    assert runs_response.status_code == 200
+    runs = runs_response.json()
+    assert any(
+        run["source_id"] == handoff_id
+        and run["status"] == "completed"
+        and run["metadata"].get("handoff_status") == "completed"
+        for run in runs
+    )
+
+
+@pytest.mark.asyncio
+async def test_api_handoff_invalid_transition(client: httpx.AsyncClient) -> None:
+    create_response = await client.post(
+        "/api/runtime/agent-tasks",
+        json={"title": "Invalid Transition API Task", "input": "hello"},
+    )
+    task_id = create_response.json()["task_id"]
+    handoff_response = await client.post(
+        f"/api/runtime/agent-tasks/{task_id}/handoffs",
+        json={"target_agent": "reviewer-agent", "reason": "needs review"},
+    )
+    handoff_id = handoff_response.json()["handoff_id"]
+
+    complete_response = await client.post(
+        f"/api/runtime/agent-handoffs/{handoff_id}/complete",
+        json={"result": "done"},
+    )
+    assert complete_response.status_code == 400

@@ -26,6 +26,12 @@ from .models import (
     ToolCallRequest,
     ToolCallResponse,
 )
+from .run_registry import (
+    RunRegistry,
+    RuntimeRun,
+    RuntimeRunStatus,
+    RuntimeRunType,
+)
 from .tool_policy import (
     InMemoryToolAuditStore,
     ToolAuditRecord,
@@ -63,12 +69,16 @@ __all__ = [
     "RuntimeMiddlewareField",
     "RuntimeMiddlewareNode",
     "RuntimeMiddlewareRegistry",
+    "RuntimeRun",
+    "RuntimeRunStatus",
+    "RuntimeRunType",
     "RuntimeTask",
     "RuntimeTool",
     "RuntimeToolCall",
     "RuntimeToolError",
     "RuntimeToolResult",
     "run_tool_with_runtime",
+    "RunRegistry",
     "runtime_middleware_registry",
     "system_prompt_injector",
     "ToolCallRequest",

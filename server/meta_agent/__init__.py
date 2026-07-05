@@ -1,4 +1,4 @@
-"""EvoAgentX-inspired meta-agent planning helpers for ModelMirror."""
+"""Xpert-aligned, ModelMirror-native meta-agent planning helpers."""
 
 from .planner import (
     build_meta_agent_prompt,

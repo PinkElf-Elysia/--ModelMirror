@@ -870,6 +870,260 @@ def test_tool_policy_allow_by_default_false() -> None:
 
 
 @pytest.mark.asyncio
+async def test_validate_agent_task_node_ok(client: httpx.AsyncClient) -> None:
+    workflow = linear_workflow()
+    workflow["nodes"][1] = {
+        "id": "task",
+        "type": "agent_task",
+        "data": {
+            "kind": "agent_task",
+            "taskTitle": "处理 {{user_input}}",
+            "taskInput": "请规划：{{user_input}}",
+            "assignedAgent": "workflow-planner",
+            "outputVariable": "agent_task_id",
+        },
+    }
+    workflow["nodes"][2]["data"]["outputVariable"] = "agent_task_id"
+    workflow["edges"] = [
+        {"id": "e1", "source": "input", "target": "task"},
+        {"id": "e2", "source": "task", "target": "output"},
+    ]
+
+    data = await validate(client, workflow)
+
+    assert data["valid"] is True
+    assert data["issues"] == []
+
+
+@pytest.mark.asyncio
+async def test_agent_task_missing_required_fields(
+    client: httpx.AsyncClient,
+) -> None:
+    workflow = linear_workflow()
+    workflow["nodes"][1] = {
+        "id": "task",
+        "type": "agent_task",
+        "data": {
+            "kind": "agent_task",
+            "taskTitle": "处理 {{user_input}}",
+        },
+    }
+    workflow["nodes"][2]["data"]["outputVariable"] = "user_input"
+    workflow["edges"] = [
+        {"id": "e1", "source": "input", "target": "task"},
+        {"id": "e2", "source": "task", "target": "output"},
+    ]
+
+    data = await validate(client, workflow)
+
+    assert data["valid"] is False
+    codes = issue_codes(data)
+    assert "missing_agent_task_input" in codes
+    assert "missing_agent_task_output_variable" in codes
+
+
+@pytest.mark.asyncio
+async def test_agent_task_template_variable_must_be_declared(
+    client: httpx.AsyncClient,
+) -> None:
+    workflow = linear_workflow()
+    workflow["nodes"][1] = {
+        "id": "task",
+        "type": "agent_task",
+        "data": {
+            "kind": "agent_task",
+            "taskTitle": "处理 {{user_input}}",
+            "taskInput": "请规划：{{missing_input}}",
+            "assignedAgent": "workflow-planner",
+            "outputVariable": "agent_task_id",
+        },
+    }
+    workflow["nodes"][2]["data"]["outputVariable"] = "agent_task_id"
+    workflow["edges"] = [
+        {"id": "e1", "source": "input", "target": "task"},
+        {"id": "e2", "source": "task", "target": "output"},
+    ]
+
+    data = await validate(client, workflow)
+
+    assert data["valid"] is False
+    assert "missing_agent_task_template_variable" in issue_codes(data)
+
+
+@pytest.mark.asyncio
+async def test_agent_task_output_variable_is_available_downstream(
+    client: httpx.AsyncClient,
+) -> None:
+    workflow = linear_workflow()
+    workflow["nodes"][1] = {
+        "id": "task",
+        "type": "agent_task",
+        "data": {
+            "kind": "agent_task",
+            "taskTitle": "处理 {{user_input}}",
+            "taskInput": "{{user_input}}",
+            "outputVariable": "agent_task_id",
+        },
+    }
+    workflow["nodes"][2]["data"]["outputVariable"] = "agent_task_id"
+    workflow["edges"] = [
+        {"id": "e1", "source": "input", "target": "task"},
+        {"id": "e2", "source": "task", "target": "output"},
+    ]
+
+    data = await validate(client, workflow)
+
+    assert data["valid"] is True
+    assert "missing_output_variable_reference" not in issue_codes(data)
+
+
+@pytest.mark.asyncio
+async def test_validate_agent_handoff_node_ok(client: httpx.AsyncClient) -> None:
+    workflow = linear_workflow()
+    workflow["nodes"] = [
+        workflow["nodes"][0],
+        {
+            "id": "task",
+            "type": "agent_task",
+            "data": {
+                "kind": "agent_task",
+                "taskTitle": "Plan {{user_input}}",
+                "taskInput": "{{user_input}}",
+                "assignedAgent": "workflow-planner",
+                "outputVariable": "agent_task_id",
+            },
+        },
+        {
+            "id": "handoff",
+            "type": "agent_handoff",
+            "data": {
+                "kind": "agent_handoff",
+                "taskIdVariable": "agent_task_id",
+                "targetAgent": "reviewer-agent",
+                "reason": "Please review {{user_input}}",
+                "sourceAgent": "workflow",
+                "outputVariable": "agent_handoff_id",
+            },
+        },
+        {
+            "id": "output",
+            "type": "output",
+            "data": {"kind": "output", "outputVariable": "agent_handoff_id"},
+        },
+    ]
+    workflow["edges"] = [
+        {"id": "e1", "source": "input", "target": "task"},
+        {"id": "e2", "source": "task", "target": "handoff"},
+        {"id": "e3", "source": "handoff", "target": "output"},
+    ]
+
+    data = await validate(client, workflow)
+
+    assert data["valid"] is True
+    assert data["issues"] == []
+
+
+@pytest.mark.asyncio
+async def test_agent_handoff_missing_required_fields(
+    client: httpx.AsyncClient,
+) -> None:
+    workflow = linear_workflow()
+    workflow["nodes"][1] = {
+        "id": "handoff",
+        "type": "agent_handoff",
+        "data": {"kind": "agent_handoff"},
+    }
+    workflow["nodes"][2]["data"]["outputVariable"] = "user_input"
+    workflow["edges"] = [
+        {"id": "e1", "source": "input", "target": "handoff"},
+        {"id": "e2", "source": "handoff", "target": "output"},
+    ]
+
+    data = await validate(client, workflow)
+
+    codes = issue_codes(data)
+    assert data["valid"] is False
+    assert "missing_agent_handoff_task_id_variable" in codes
+    assert "missing_agent_handoff_target_agent" in codes
+    assert "missing_agent_handoff_reason" in codes
+    assert "missing_agent_handoff_output_variable" in codes
+
+
+@pytest.mark.asyncio
+async def test_agent_handoff_reason_variable_must_be_declared(
+    client: httpx.AsyncClient,
+) -> None:
+    workflow = linear_workflow()
+    workflow["nodes"] = [
+        workflow["nodes"][0],
+        {
+            "id": "task",
+            "type": "agent_task",
+            "data": {
+                "kind": "agent_task",
+                "taskTitle": "Plan {{user_input}}",
+                "taskInput": "{{user_input}}",
+                "outputVariable": "agent_task_id",
+            },
+        },
+        {
+            "id": "handoff",
+            "type": "agent_handoff",
+            "data": {
+                "kind": "agent_handoff",
+                "taskIdVariable": "agent_task_id",
+                "targetAgent": "reviewer-agent",
+                "reason": "Please review {{missing_input}}",
+                "outputVariable": "agent_handoff_id",
+            },
+        },
+        {
+            "id": "output",
+            "type": "output",
+            "data": {"kind": "output", "outputVariable": "agent_handoff_id"},
+        },
+    ]
+    workflow["edges"] = [
+        {"id": "e1", "source": "input", "target": "task"},
+        {"id": "e2", "source": "task", "target": "handoff"},
+        {"id": "e3", "source": "handoff", "target": "output"},
+    ]
+
+    data = await validate(client, workflow)
+
+    assert data["valid"] is False
+    assert "missing_agent_handoff_template_variable" in issue_codes(data)
+
+
+@pytest.mark.asyncio
+async def test_agent_handoff_task_id_variable_must_be_declared(
+    client: httpx.AsyncClient,
+) -> None:
+    workflow = linear_workflow()
+    workflow["nodes"][1] = {
+        "id": "handoff",
+        "type": "agent_handoff",
+        "data": {
+            "kind": "agent_handoff",
+            "taskIdVariable": "agent_task_id",
+            "targetAgent": "reviewer-agent",
+            "reason": "Please review {{user_input}}",
+            "outputVariable": "agent_handoff_id",
+        },
+    }
+    workflow["nodes"][2]["data"]["outputVariable"] = "agent_handoff_id"
+    workflow["edges"] = [
+        {"id": "e1", "source": "input", "target": "handoff"},
+        {"id": "e2", "source": "handoff", "target": "output"},
+    ]
+
+    data = await validate(client, workflow)
+
+    assert data["valid"] is False
+    assert "missing_agent_handoff_task_id_reference" in issue_codes(data)
+
+
+@pytest.mark.asyncio
 async def test_templates_endpoint_returns_starter_template(
     client: httpx.AsyncClient,
 ) -> None:

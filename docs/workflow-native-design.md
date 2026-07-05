@@ -2,7 +2,7 @@
 
 workflow-native 是模镜自研工作流引擎的渐进式实验线。它不会替换当前稳定的 `/workflow` Dify iframe 入口，也不会改动 `/rag`。当前阶段提供静态图校验能力，并在 classic 运行器中试点少量本地节点执行，让团队先把数据模型、API 契约、错误模型和测试流程立起来。
 
-最后更新日期：2026-06-25
+最后更新日期：2026-07-05
 维护人：模镜团队
 
 ## 目标与边界
@@ -435,17 +435,33 @@ Runtime Toolset 还提供了内存态的 `ToolPermissionPolicy` 与 `InMemoryToo
 
 `tool_audit` 当前是原型可见状态：每个 workflow task 默认拥有独立 `InMemoryToolAuditStore`，工具调用会记录 `tool_name`、`status`、`started_at`、`finished_at`、`duration_ms`、`output_length`、`content_types` 与 `error`。`runtime_middleware.tool_audit` 节点可读取 `runtimeMiddlewareConfig.max_records`，为本次运行重建指定上限的审计 store；观测 API 返回当前 task 的审计记录。该能力仍为内存态，后续再扩展 per-user/per-workspace 过滤、持久化审计与图形化 trace。
 
-### Agent Task Runtime（Xpert / EvoAgentX 对齐）
+### Agent Task Runtime（Xpert 对齐）
 
-当前为最小底座原型阶段，参考 EvoAgentX `AgentManager` 的 agent 状态管理思路，以及 `Environment` 的执行轨迹/任务历史思想，在 ModelMirror 内原生重写为 `server/xpert_runtime/agent_tasks.py`。源码策略是“参考架构，不复制实现”：不搬运 EvoAgentX 原文件，不保留原项目版权头，不引入不兼容协议代码。
+当前为最小底座原型阶段，主线对齐 Xpert 的 Agent/Handoff/RunRegistry 思路，并在 ModelMirror 内原生实现为 `server/xpert_runtime/agent_tasks.py`。源码策略是“参考协议与分层，原生改写实现”：不迁移 Xpert 的 Nx/NestJS/Angular 主框架，不整文件复制上游源码，也不引入不兼容协议代码。
 
 Agent Task Runtime 包含三层：
 
 - `AgentTask`：任务实体，包含 `title`、`input`、`status`、`result`、`error`、`source_agent`、`assigned_agent`、`metadata` 与时间戳。
 - `AgentHandoff`：Agent 间任务移交记录，包含 `source_agent`、`target_agent`、`reason`、`status` 与 metadata。
-- `AgentTaskStore`：内存态任务存储，支持 `create/get/list/update/cancel` 与 `create_handoff/list_handoffs`，并将 `agent.task.created`、`agent.task.updated`、`agent.task.cancelled`、`agent.handoff.created` 写入 `RuntimeEventStore`。
+- `AgentTaskStore`：内存态任务存储，支持 `create/get/list/update/cancel`、`create_handoff/list_handoffs/get_handoff/update_handoff_status`，并将 `agent.task.created`、`agent.task.updated`、`agent.task.cancelled`、`agent.handoff.created/accepted/rejected/completed` 写入 `RuntimeEventStore`。
 
-后端已开放最小 API：`POST /api/runtime/agent-tasks` 创建任务，`GET /api/runtime/agent-tasks/{task_id}` 查询任务，`POST /api/runtime/agent-tasks/{task_id}/cancel` 取消任务，`GET /api/runtime/agent-tasks` 列出任务。当前不做真实多 Agent 编排、不接数据库、不接 Redis/Celery 队列；下一步再把 workflow `agent_task` 节点接入该 store，并逐步扩展 handoff queue、agent selection、持久化与前端任务面板。
+后端已开放最小 API：`POST /api/runtime/agent-tasks` 创建任务，`GET /api/runtime/agent-tasks/{task_id}` 查询任务，`POST /api/runtime/agent-tasks/{task_id}/cancel` 取消任务，`GET /api/runtime/agent-tasks` 列出任务；Handoff API 包含 `POST /api/runtime/agent-tasks/{task_id}/handoffs`、`GET /api/runtime/agent-tasks/{task_id}/handoffs`、`POST /api/runtime/agent-handoffs/{handoff_id}/accept|reject|complete`。当前不做真实多 Agent 编排、不接数据库、不接 Redis/Celery 队列。
+
+经典工作流已新增 `agent_task` 节点作为 Xpert Agent/Handoff 对齐的第一步：前端可拖拽“智能体任务”节点，配置 `taskTitle`、`taskInput`、`assignedAgent` 与 `outputVariable`；后端 validate 会检查必填字段、输出变量名与 `{{变量}}` 可达性；classic `workflow_stream` 执行时调用 `AgentTaskStore.create_task()`，并将新建任务的 `task_id` 写入输出变量。该节点只创建任务和提供可观测 task_id，不做真实队列分派、专家协作或自动执行；后续再扩展 handoff queue、sub-agent、agent selection、持久化与运行观测增强。
+
+经典工作流已新增 `agent_handoff` 节点作为第二步：前端可拖拽“智能体移交”节点，配置 `taskIdVariable`、`targetAgent`、`reason`、`sourceAgent` 与 `outputVariable`；后端 validate 会检查必填字段、变量名与 `reason` 模板变量可达性；classic `workflow_stream` 执行时从 `variables[taskIdVariable]` 读取 AgentTask ID，调用 `AgentTaskStore.create_handoff()`，并将新建 handoff 的 `handoff_id` 写入输出变量。该节点只创建移交记录，不做自动 accept、队列分派、目标 Agent 执行或专家协作。
+
+## RunRegistry 与工作流运行观测
+
+RunRegistry 当前是 Xpert RunRegistry / Handoff / Observability 对齐的内存态最小闭环。`/api/workflow/run` 会为每次 classic workflow 运行创建一条 `workflow` run，并在 SSE `workflow_meta` 和 `workflow_end` 中返回 `run_id`。`agent_task` 节点创建 AgentTask 后会登记 `agent_task` run，`agent_handoff` 节点创建 Handoff 后会登记 `agent_handoff` run；三类 run 通过 metadata 关联 `workflow_task_id`、`node_id`、`agent_task_id`、`handoff_id` 与目标 Agent。
+
+新增 API：`GET /api/runtime/runs`、`GET /api/runtime/runs/{run_id}`、`POST /api/runtime/runs/{run_id}/cancel`。本阶段只返回运行元信息，不返回完整 prompt、工具输出或密钥；取消 run 只更新 registry 状态，不中断正在运行的工作流或调度队列。前端 `WorkflowRun` 的“运行观测”折叠区会显示当前 `run_id` 与 run 摘要，并继续展示 runtime events / tool audit records。
+
+## `/workflow` 画布布局恢复
+
+经典工作流画布恢复为“画布 + 单一右侧工作台”的布局：节点库不再常驻左侧长栏，而是在画布标题栏附近通过“节点库”按钮打开浮层；右侧工作台使用 `配置 / 运行` tabs，同一侧栏内切换 NodeConfig 与 WorkflowRun，默认展示配置，点击运行时自动切到运行。这一布局避免节点库、配置、运行结果在窄屏和 Docker 容器环境中纵向堆叠，后续新增节点时应继续保持节点协议不变、布局集中在画布附近。
+
+Skill / MCP 容器运行时依赖：Docker runtime 需要同时提供 `git`、`node`、`npm`、`npx` 和 CA 证书。重建后建议 smoke：`docker compose -p modelmirror exec server git --version`、`npm --version`、`npx --version`，避免 `/skills` 安装再次出现 `git is not available on this server` 或 npm/npx 缺失。
 
 前端现阶段复用已有 `/agents/meta-agent` 元智能体入口，不新建多 Agent 页面。该页面新增“任务工作台”卡片：加载最近 AgentTask、查看任务详情、取消任务，并在每次成功生成 workflow 草稿后自动创建一条 `source_agent="meta-agent"`、`assigned_agent="workflow-planner"` 的 AgentTask。当前只做任务可见和取消，不做真实调度；后续 Xpert 对齐完成后，再在同一入口上扩展 handoff、专家分工和多 Agent 协作。
 
