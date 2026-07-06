@@ -90,6 +90,18 @@ interface AgentTaskDetail extends AgentTaskSummary {
   metadata: Record<string, unknown>;
 }
 
+interface AgentHandoffSummary {
+  handoff_id: string;
+  task_id: string;
+  source_agent: string;
+  target_agent: string;
+  reason: string;
+  status: string;
+  metadata: Record<string, unknown>;
+  created_at: number;
+  updated_at: number;
+}
+
 const nodeTypes = {
   workflowNode: WorkflowNodeCard,
 };
@@ -164,6 +176,23 @@ function taskStatusClass(status: string) {
   if (status === "failed") return "border-rose-300/25 bg-rose-300/10 text-rose-100";
   if (status === "cancelled") return "border-slate-400/20 bg-slate-400/10 text-slate-300";
   if (status === "running") return "border-cyan-300/25 bg-cyan-300/10 text-cyan-100";
+  return "border-hire-300/25 bg-hire-300/10 text-hire-100";
+}
+
+function handoffStatusLabel(status: string) {
+  const labels: Record<string, string> = {
+    pending: "待处理",
+    accepted: "已接受",
+    rejected: "已拒绝",
+    completed: "已完成",
+  };
+  return labels[status] ?? status;
+}
+
+function handoffStatusClass(status: string) {
+  if (status === "completed") return "border-emerald-300/25 bg-emerald-300/10 text-emerald-100";
+  if (status === "rejected") return "border-rose-300/25 bg-rose-300/10 text-rose-100";
+  if (status === "accepted") return "border-cyan-300/25 bg-cyan-300/10 text-cyan-100";
   return "border-hire-300/25 bg-hire-300/10 text-hire-100";
 }
 
@@ -274,6 +303,12 @@ export default function MetaAgentPage() {
   const [tasksError, setTasksError] = useState("");
   const [taskActionError, setTaskActionError] = useState("");
   const [cancellingTaskId, setCancellingTaskId] = useState<string | null>(null);
+  const [selectedTaskHandoffs, setSelectedTaskHandoffs] = useState<
+    AgentHandoffSummary[]
+  >([]);
+  const [handoffInbox, setHandoffInbox] = useState<AgentHandoffSummary[]>([]);
+  const [handoffError, setHandoffError] = useState("");
+  const [handoffActionId, setHandoffActionId] = useState<string | null>(null);
 
   useEffect(() => {
     document.title = "模镜 - 元智能体工作台";
@@ -281,7 +316,51 @@ export default function MetaAgentPage() {
 
   useEffect(() => {
     void loadAgentTasks();
+    void loadHandoffInbox();
   }, []);
+
+  async function loadAgentTaskHandoffs(taskId: string) {
+    try {
+      const response = await fetch(`/api/runtime/agent-tasks/${taskId}/handoffs`);
+      const payload = (await response.json().catch(() => null)) as
+        | AgentHandoffSummary[]
+        | { error?: string; detail?: unknown }
+        | null;
+      if (!response.ok || !Array.isArray(payload)) {
+        throw new Error(errorMessage(payload, "Handoff records failed to load."));
+      }
+      setSelectedTaskHandoffs(payload);
+      setHandoffError("");
+    } catch (handoffLoadError) {
+      setSelectedTaskHandoffs([]);
+      setHandoffError(
+        handoffLoadError instanceof Error
+          ? handoffLoadError.message
+          : "Handoff records failed to load.",
+      );
+    }
+  }
+
+  async function loadHandoffInbox() {
+    try {
+      const response = await fetch("/api/runtime/agent-handoffs?limit=20");
+      const payload = (await response.json().catch(() => null)) as
+        | AgentHandoffSummary[]
+        | { error?: string; detail?: unknown }
+        | null;
+      if (!response.ok || !Array.isArray(payload)) {
+        throw new Error(errorMessage(payload, "Handoff Inbox failed to load."));
+      }
+      setHandoffInbox(payload);
+      setHandoffError("");
+    } catch (handoffLoadError) {
+      setHandoffError(
+        handoffLoadError instanceof Error
+          ? handoffLoadError.message
+          : "Handoff Inbox failed to load.",
+      );
+    }
+  }
 
   async function loadAgentTask(taskId: string) {
     try {
@@ -294,6 +373,7 @@ export default function MetaAgentPage() {
         throw new Error(errorMessage(payload, "任务详情加载失败。"));
       }
       setSelectedTask(payload as AgentTaskDetail);
+      await loadAgentTaskHandoffs(taskId);
       setTaskActionError("");
     } catch (taskError) {
       setTaskActionError(
@@ -391,6 +471,88 @@ export default function MetaAgentPage() {
     } finally {
       setCancellingTaskId(null);
     }
+  }
+
+  async function updateHandoffStatus(
+    handoff: AgentHandoffSummary,
+    action: "accept" | "reject" | "complete",
+  ) {
+    setHandoffActionId(handoff.handoff_id);
+    try {
+      const body =
+        action === "reject"
+          ? { reason: "Rejected in MetaAgent handoff inbox." }
+          : action === "complete"
+            ? { result: "Completed in MetaAgent handoff inbox." }
+            : {};
+      const response = await fetch(
+        `/api/runtime/agent-handoffs/${handoff.handoff_id}/${action}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        },
+      );
+      const payload = (await response.json().catch(() => null)) as
+        | AgentHandoffSummary
+        | { error?: string; detail?: unknown }
+        | null;
+      if (!response.ok) {
+        throw new Error(errorMessage(payload, "Handoff status update failed."));
+      }
+      setHandoffError("");
+      await loadHandoffInbox();
+      if (selectedTask?.task_id) {
+        await loadAgentTask(selectedTask.task_id);
+      }
+    } catch (handoffActionError) {
+      setHandoffError(
+        handoffActionError instanceof Error
+          ? handoffActionError.message
+          : "Handoff status update failed.",
+      );
+    } finally {
+      setHandoffActionId(null);
+    }
+  }
+
+  function renderHandoffActions(handoff: AgentHandoffSummary) {
+    const busy = handoffActionId === handoff.handoff_id;
+    if (handoff.status === "pending") {
+      return (
+        <div className="mt-2 flex gap-2">
+          <button
+            className="rounded-full border border-cyan-300/25 bg-cyan-300/10 px-2.5 py-1 text-[11px] font-semibold text-cyan-100 transition hover:bg-cyan-300/15 disabled:opacity-50"
+            disabled={busy}
+            onClick={() => void updateHandoffStatus(handoff, "accept")}
+            type="button"
+          >
+            接受
+          </button>
+          <button
+            className="rounded-full border border-rose-300/25 bg-rose-300/10 px-2.5 py-1 text-[11px] font-semibold text-rose-100 transition hover:bg-rose-300/15 disabled:opacity-50"
+            disabled={busy}
+            onClick={() => void updateHandoffStatus(handoff, "reject")}
+            type="button"
+          >
+            拒绝
+          </button>
+        </div>
+      );
+    }
+    if (handoff.status === "accepted") {
+      return (
+        <button
+          className="mt-2 rounded-full border border-emerald-300/25 bg-emerald-300/10 px-2.5 py-1 text-[11px] font-semibold text-emerald-100 transition hover:bg-emerald-300/15 disabled:opacity-50"
+          disabled={busy}
+          onClick={() => void updateHandoffStatus(handoff, "complete")}
+          type="button"
+        >
+          完成
+        </button>
+      );
+    }
+    return null;
   }
 
   async function generateWorkflow() {
@@ -638,6 +800,11 @@ export default function MetaAgentPage() {
                 {taskActionError}
               </div>
             ) : null}
+            {handoffError ? (
+              <div className="mt-3 rounded-lg border border-amber-300/25 bg-amber-300/10 px-3 py-2 text-xs leading-5 text-amber-100">
+                {handoffError}
+              </div>
+            ) : null}
 
             <div className="mt-3 max-h-48 space-y-2 overflow-y-auto pr-1">
               {tasksLoading && agentTasks.length === 0 ? (
@@ -725,6 +892,47 @@ export default function MetaAgentPage() {
                     </p>
                   </div>
                 </div>
+                <div className="mt-3 rounded-md border border-white/10 bg-slate-950/25 p-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-[11px] font-semibold text-slate-300">
+                      Handoff records
+                    </p>
+                    <span className="text-[10px] text-slate-500">
+                      {selectedTaskHandoffs.length}
+                    </span>
+                  </div>
+                  {selectedTaskHandoffs.length === 0 ? (
+                    <p className="mt-2 text-[11px] text-slate-500">
+                      No handoff records for this task.
+                    </p>
+                  ) : (
+                    <div className="mt-2 max-h-40 space-y-2 overflow-y-auto pr-1">
+                      {selectedTaskHandoffs.map((handoff) => (
+                        <div
+                          className="rounded-md border border-white/10 bg-white/[0.035] px-2 py-1.5"
+                          key={handoff.handoff_id}
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <p className="min-w-0 truncate text-[11px] font-semibold text-slate-200">
+                              {handoff.source_agent} -&gt; {handoff.target_agent}
+                            </p>
+                            <span
+                              className={`shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-semibold ${handoffStatusClass(
+                                handoff.status,
+                              )}`}
+                            >
+                              {handoffStatusLabel(handoff.status)}
+                            </span>
+                          </div>
+                          <p className="mt-1 line-clamp-2 text-[11px] leading-5 text-slate-500">
+                            {handoff.reason}
+                          </p>
+                          {renderHandoffActions(handoff)}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
                 {selectedTask.error ? (
                   <p className="mt-2 rounded-md border border-rose-300/25 bg-rose-300/10 px-2 py-1.5 text-xs text-rose-100">
                     {selectedTask.error}
@@ -743,6 +951,65 @@ export default function MetaAgentPage() {
                 </button>
               </div>
             ) : null}
+          </section>
+
+          <section className="surface-panel rounded-lg p-4">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <p className="text-sm font-semibold text-white">
+                  Handoff Inbox Beta
+                </p>
+                <p className="mt-1 text-xs text-slate-400">
+                  Manual accept / reject / complete
+                </p>
+              </div>
+              <button
+                className="rounded-full border border-white/10 bg-white/[0.055] px-2.5 py-1 text-xs font-semibold text-slate-300 transition hover:border-hire-300/35 hover:text-hire-100"
+                onClick={() => void loadHandoffInbox()}
+                type="button"
+              >
+                刷新
+              </button>
+            </div>
+            <div className="mt-3 max-h-64 space-y-2 overflow-y-auto pr-1">
+              {handoffInbox.length === 0 ? (
+                <p className="rounded-lg border border-dashed border-white/15 bg-white/[0.025] px-3 py-3 text-xs leading-5 text-slate-400">
+                  No recent handoffs.
+                </p>
+              ) : (
+                handoffInbox.map((handoff) => (
+                  <article
+                    className="rounded-lg border border-white/10 bg-white/[0.045] p-3"
+                    key={handoff.handoff_id}
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <p className="truncate text-xs font-semibold text-white">
+                          {handoff.source_agent} -&gt; {handoff.target_agent}
+                        </p>
+                        <p className="mt-1 break-all font-mono text-[10px] text-slate-500">
+                          {handoff.handoff_id}
+                        </p>
+                      </div>
+                      <span
+                        className={`shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-semibold ${handoffStatusClass(
+                          handoff.status,
+                        )}`}
+                      >
+                        {handoffStatusLabel(handoff.status)}
+                      </span>
+                    </div>
+                    <p className="mt-2 line-clamp-2 text-xs leading-5 text-slate-400">
+                      {handoff.reason}
+                    </p>
+                    <p className="mt-1 break-all text-[11px] text-slate-500">
+                      task: {handoff.task_id}
+                    </p>
+                    {renderHandoffActions(handoff)}
+                  </article>
+                ))
+              )}
+            </div>
           </section>
 
           <section className="surface-panel rounded-lg p-4">

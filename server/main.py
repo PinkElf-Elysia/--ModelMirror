@@ -3654,6 +3654,8 @@ async def update_runtime_runs_for_source(
 async def list_runtime_runs(
     run_type: str | None = None,
     status: str | None = None,
+    parent_run_id: str | None = None,
+    source_id: str | None = None,
     limit: int = 50,
 ):
     valid_run_types = {"workflow", "agent_task", "agent_handoff"}
@@ -3665,6 +3667,8 @@ async def list_runtime_runs(
     runs = await run_registry.list_runs(
         run_type=run_type,  # type: ignore[arg-type]
         status=status,  # type: ignore[arg-type]
+        parent_run_id=parent_run_id,
+        source_id=source_id,
         limit=max(1, min(limit, 200)),
     )
     return [runtime_run_to_payload(run) for run in runs]
@@ -4258,6 +4262,29 @@ async def list_agent_tasks(status: str | None = None, limit: int = 50):
         }
         for task in tasks
     ]
+
+
+@app.get("/api/runtime/agent-handoffs")
+async def list_agent_handoffs_global(
+    task_id: str | None = None,
+    status: str | None = None,
+    target_agent: str | None = None,
+    limit: int = 50,
+):
+    valid_statuses = {"pending", "accepted", "rejected", "completed"}
+    if status is not None and status not in valid_statuses:
+        raise HTTPException(status_code=400, detail="Invalid agent handoff status.")
+    handoffs = await agent_task_store.list_handoffs(task_id=task_id)
+    if status is not None:
+        handoffs = [handoff for handoff in handoffs if handoff.status == status]
+    if target_agent is not None:
+        handoffs = [
+            handoff
+            for handoff in handoffs
+            if handoff.target_agent == target_agent
+        ]
+    capped_limit = max(1, min(limit, 200))
+    return [agent_handoff_to_payload(handoff) for handoff in handoffs[:capped_limit]]
 
 
 @app.post("/api/runtime/agent-tasks/{task_id}/handoffs")

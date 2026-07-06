@@ -224,6 +224,20 @@ async def test_workflow_agent_handoff_node_creates_runtime_handoff_and_runs(
     assert handoff_run["metadata"]["agent_task_id"] == task_id
     assert handoff_run["metadata"]["target_agent"] == "review-agent"
 
+    child_runs_response = await client.get(
+        f"/api/runtime/runs?parent_run_id={workflow_run_id}&limit=50",
+    )
+    assert child_runs_response.status_code == 200, child_runs_response.text
+    child_runs = child_runs_response.json()
+    assert any(
+        item["run_type"] == "agent_task" and item["source_id"] == task_id
+        for item in child_runs
+    )
+    assert any(
+        item["run_type"] == "agent_handoff" and item["source_id"] == handoff_id
+        for item in child_runs
+    )
+
 
 def _parse_sse_events(sse_text: str) -> list[dict]:
     events: list[dict] = []

@@ -158,6 +158,16 @@ function observationPayloadSummary(payload: Record<string, unknown>) {
   return parts.join(" · ");
 }
 
+function runMetadataText(
+  metadata: Record<string, unknown> | undefined,
+  key: string,
+) {
+  const value = metadata?.[key];
+  if (typeof value === "string" && value.trim()) return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  return "";
+}
+
 function buildRunSteps(events: WorkflowRunEvent[]) {
   const steps: WorkflowRunStep[] = [];
   const byNodeId = new Map<string, WorkflowRunStep>();
@@ -247,6 +257,8 @@ export default function WorkflowRun({
   const [observationLoading, setObservationLoading] = useState(false);
   const [runSummary, setRunSummary] = useState<RuntimeRunSummary | null>(null);
   const [runSummaryLoading, setRunSummaryLoading] = useState(false);
+  const [childRuns, setChildRuns] = useState<RuntimeRunSummary[]>([]);
+  const [childRunsLoading, setChildRunsLoading] = useState(false);
 
   const inputVariable = useMemo(() => {
     const inputNode = definition.nodes.find((node) => node.data.kind === "input");
@@ -281,6 +293,8 @@ export default function WorkflowRun({
     setObservationLoading(false);
     setRunSummary(null);
     setRunSummaryLoading(false);
+    setChildRuns([]);
+    setChildRunsLoading(false);
     setIsRunning(true);
 
     try {
@@ -408,6 +422,7 @@ export default function WorkflowRun({
     if (!taskId) return;
     setObservationLoading(true);
     setRunSummaryLoading(Boolean(runId));
+    setChildRunsLoading(Boolean(runId));
     try {
       const response = await fetch(`/api/workflow/runtime-events/${taskId}`);
       if (response.ok) {
@@ -420,12 +435,21 @@ export default function WorkflowRun({
           const runPayload = (await runResponse.json()) as RuntimeRunSummary;
           setRunSummary(runPayload);
         }
+        const childRunsResponse = await fetch(
+          `/api/runtime/runs?parent_run_id=${encodeURIComponent(runId)}&limit=80`,
+        );
+        if (childRunsResponse.ok) {
+          const childRunPayload =
+            (await childRunsResponse.json()) as RuntimeRunSummary[];
+          setChildRuns(childRunPayload);
+        }
       }
     } catch {
       // Observability is best-effort; workflow execution output remains primary.
     } finally {
       setObservationLoading(false);
       setRunSummaryLoading(false);
+      setChildRunsLoading(false);
     }
   }
 
@@ -436,7 +460,8 @@ export default function WorkflowRun({
         next &&
         taskId &&
         ((!observationData && !observationLoading) ||
-          (runId && !runSummary && !runSummaryLoading))
+          (runId && !runSummary && !runSummaryLoading) ||
+          (runId && childRuns.length === 0 && !childRunsLoading))
       ) {
         void fetchObservation();
       }
@@ -614,6 +639,66 @@ export default function WorkflowRun({
                         <p className="mt-2 text-[11px] text-slate-500">
                           暂无 run 摘要。
                         </p>
+                      )}
+                    </div>
+                  ) : null}
+
+                  {runId ? (
+                    <div className="rounded-lg border border-white/10 bg-white/[0.035] p-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <p className="text-xs font-semibold text-slate-200">
+                          子 Run
+                        </p>
+                        <span className="text-[11px] text-slate-500">
+                          {childRunsLoading ? "..." : childRuns.length}
+                        </span>
+                      </div>
+                      {childRunsLoading ? (
+                        <p className="mt-2 text-xs text-slate-500">
+                          正在读取 AgentTask / Handoff 子 run...
+                        </p>
+                      ) : childRuns.length === 0 ? (
+                        <p className="mt-2 text-xs text-slate-500">
+                          暂无子 run。
+                        </p>
+                      ) : (
+                        <div className="mt-2 max-h-44 space-y-1 overflow-y-auto">
+                          {childRuns.slice(0, 30).map((run) => {
+                            const agentTaskId = runMetadataText(
+                              run.metadata,
+                              "agent_task_id",
+                            );
+                            const handoffId = runMetadataText(
+                              run.metadata,
+                              "handoff_id",
+                            );
+                            const targetAgent = runMetadataText(
+                              run.metadata,
+                              "target_agent",
+                            );
+                            return (
+                              <div
+                                className="rounded-md bg-slate-950/35 px-2 py-1.5"
+                                key={run.run_id}
+                              >
+                                <div className="flex items-center justify-between gap-2">
+                                  <span className="truncate text-[11px] font-semibold text-slate-200">
+                                    {run.title || run.run_type}
+                                  </span>
+                                  <span className="shrink-0 rounded-full border border-white/10 bg-white/[0.045] px-2 py-0.5 text-[10px] uppercase text-slate-400">
+                                    {run.status}
+                                  </span>
+                                </div>
+                                <p className="mt-1 truncate text-[11px] text-slate-500">
+                                  {run.run_type}
+                                  {targetAgent ? ` · target=${targetAgent}` : ""}
+                                  {agentTaskId ? ` · task=${agentTaskId}` : ""}
+                                  {handoffId ? ` · handoff=${handoffId}` : ""}
+                                </p>
+                              </div>
+                            );
+                          })}
+                        </div>
                       )}
                     </div>
                   ) : null}
