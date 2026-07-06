@@ -276,6 +276,55 @@ async def test_api_create_and_list_handoffs(client: httpx.AsyncClient) -> None:
 
 
 @pytest.mark.asyncio
+async def test_api_global_handoff_list_filters(client: httpx.AsyncClient) -> None:
+    task_a = await client.post(
+        "/api/runtime/agent-tasks",
+        json={"title": "Handoff Filter A", "input": "x", "assigned_agent": "a"},
+    )
+    task_b = await client.post(
+        "/api/runtime/agent-tasks",
+        json={"title": "Handoff Filter B", "input": "x", "assigned_agent": "b"},
+    )
+    task_a_id = task_a.json()["task_id"]
+    task_b_id = task_b.json()["task_id"]
+
+    handoff_a = await client.post(
+        f"/api/runtime/agent-tasks/{task_a_id}/handoffs",
+        json={"target_agent": "review-agent", "reason": "review this"},
+    )
+    handoff_b = await client.post(
+        f"/api/runtime/agent-tasks/{task_b_id}/handoffs",
+        json={"target_agent": "qa-agent", "reason": "qa this"},
+    )
+    assert handoff_a.status_code == 200, handoff_a.text
+    assert handoff_b.status_code == 200, handoff_b.text
+    handoff_a_id = handoff_a.json()["handoff_id"]
+
+    await client.post(f"/api/runtime/agent-handoffs/{handoff_a_id}/accept")
+
+    task_filter = await client.get(
+        f"/api/runtime/agent-handoffs?task_id={task_a_id}&limit=20",
+    )
+    assert task_filter.status_code == 200, task_filter.text
+    assert [item["task_id"] for item in task_filter.json()] == [task_a_id]
+
+    status_filter = await client.get(
+        "/api/runtime/agent-handoffs?status=accepted&limit=20",
+    )
+    assert status_filter.status_code == 200, status_filter.text
+    assert any(item["handoff_id"] == handoff_a_id for item in status_filter.json())
+    assert all(item["status"] == "accepted" for item in status_filter.json())
+
+    target_filter = await client.get(
+        "/api/runtime/agent-handoffs?target_agent=qa-agent&limit=1",
+    )
+    assert target_filter.status_code == 200, target_filter.text
+    target_handoffs = target_filter.json()
+    assert len(target_handoffs) == 1
+    assert target_handoffs[0]["target_agent"] == "qa-agent"
+
+
+@pytest.mark.asyncio
 async def test_api_handoff_status_transitions(client: httpx.AsyncClient) -> None:
     create_response = await client.post(
         "/api/runtime/agent-tasks",
@@ -315,6 +364,14 @@ async def test_api_handoff_status_transitions(client: httpx.AsyncClient) -> None
     handoff_run = next(item for item in runs if item["source_id"] == handoff_id)
     assert handoff_run["status"] == "completed"
     assert handoff_run["metadata"]["handoff_status"] == "completed"
+
+    list_response = await client.get(
+        f"/api/runtime/agent-handoffs?task_id={task_id}&status=completed",
+    )
+    assert list_response.status_code == 200, list_response.text
+    listed = list_response.json()
+    assert any(item["handoff_id"] == handoff_id for item in listed)
+    assert all(item["status"] == "completed" for item in listed)
 
 
 @pytest.mark.asyncio

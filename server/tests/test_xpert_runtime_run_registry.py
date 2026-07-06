@@ -59,6 +59,30 @@ async def test_run_registry_list_filters_and_limit() -> None:
 
 
 @pytest.mark.asyncio
+async def test_run_registry_filters_by_parent_and_source() -> None:
+    registry = RunRegistry()
+    parent = await registry.create_run("workflow", "Parent", status="running")
+    child = await registry.create_run(
+        "agent_handoff",
+        "Child handoff",
+        parent_run_id=parent.run_id,
+        source_id="handoff-filter-source",
+    )
+    await registry.create_run(
+        "agent_task",
+        "Other child",
+        parent_run_id="other-parent",
+        source_id="other-source",
+    )
+
+    children = await registry.list_runs(parent_run_id=parent.run_id)
+    assert [run.run_id for run in children] == [child.run_id]
+
+    source_runs = await registry.list_runs(source_id="handoff-filter-source")
+    assert [run.run_id for run in source_runs] == [child.run_id]
+
+
+@pytest.mark.asyncio
 async def test_run_registry_cancel_run_updates_status() -> None:
     registry = RunRegistry()
     run = await registry.create_run("agent_handoff", "handoff", status="pending")
@@ -102,3 +126,44 @@ async def test_runtime_run_api_list_and_cancel(client: httpx.AsyncClient) -> Non
     cancelled = cancel_response.json()
     assert cancelled["status"] == "cancelled"
     assert cancelled["error"] == "api test"
+
+
+@pytest.mark.asyncio
+async def test_runtime_run_api_filters_parent_and_source(
+    client: httpx.AsyncClient,
+) -> None:
+    from server.main import run_registry
+
+    parent = await run_registry.create_run(
+        "workflow",
+        "API parent workflow",
+        status="running",
+        source_id="api-parent-workflow",
+    )
+    child = await run_registry.create_run(
+        "agent_task",
+        "API child task",
+        parent_run_id=parent.run_id,
+        source_id="api-child-source",
+    )
+    await run_registry.create_run(
+        "agent_handoff",
+        "API unrelated handoff",
+        parent_run_id="different-parent",
+        source_id="api-unrelated-source",
+    )
+
+    parent_response = await client.get(
+        f"/api/runtime/runs?parent_run_id={parent.run_id}&limit=20",
+    )
+    assert parent_response.status_code == 200, parent_response.text
+    parent_runs = parent_response.json()
+    assert any(item["run_id"] == child.run_id for item in parent_runs)
+    assert all(item["parent_run_id"] == parent.run_id for item in parent_runs)
+
+    source_response = await client.get(
+        "/api/runtime/runs?source_id=api-child-source&limit=20",
+    )
+    assert source_response.status_code == 200, source_response.text
+    source_runs = source_response.json()
+    assert [item["run_id"] for item in source_runs] == [child.run_id]

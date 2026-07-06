@@ -1,5 +1,7 @@
 # Xpert 对齐总纲
 
+> 2026-07-06 状态补充：Handoff 前端观测已进入“部分实现”。Workflow 运行观测可以按 `parent_run_id` 拉取 `agent_task` / `agent_handoff` 子 run；MetaAgent 任务工作台可以查看任务 handoff 记录，并通过 Handoff Inbox Beta 手动 accept / reject / complete。当前仍不做真实多 Agent 调度、队列分派、数据库持久化或目标 Agent 自动执行。
+
 > 2026-07-05 状态补充：RunRegistry 已进入最小可观测闭环阶段，详见文末“RunRegistry 最小可观测闭环”。
 
 ## 2026-07-05 增量：RunRegistry 最小可观测闭环
@@ -16,7 +18,7 @@ Classic workflow 运行时会创建 workflow run，并在 `workflow_meta` / `wor
 
 当前边界：RunRegistry 仅为内存态可观测索引，不是持久化调度器；取消 run 只更新 registry 状态，不中断真实 workflow、AgentTask 或 Handoff 执行。下一步可在此基础上继续补齐 Handoff 前端观测、RunRegistry 页面、checkpoint、死信与持久化存储。
 
-最后更新日期：2026-07-05
+最后更新日期：2026-07-06
 维护人：模镜团队
 
 ## 对齐原则

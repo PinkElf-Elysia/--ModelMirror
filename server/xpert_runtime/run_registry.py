@@ -69,6 +69,8 @@ class RunRegistry:
         *,
         run_type: RuntimeRunType | None = None,
         status: RuntimeRunStatus | None = None,
+        parent_run_id: str | None = None,
+        source_id: str | None = None,
         limit: int = 50,
     ) -> list[RuntimeRun]:
         async with self._lock:
@@ -77,6 +79,10 @@ class RunRegistry:
             runs = [run for run in runs if run.run_type == run_type]
         if status is not None:
             runs = [run for run in runs if run.status == status]
+        if parent_run_id is not None:
+            runs = [run for run in runs if run.parent_run_id == parent_run_id]
+        if source_id is not None:
+            runs = [run for run in runs if run.source_id == source_id]
         runs.sort(key=lambda run: run.created_at, reverse=True)
         return runs[: max(1, limit)]
 

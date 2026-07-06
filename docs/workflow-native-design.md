@@ -1,5 +1,7 @@
 # workflow-native 自研工作流设计
 
+> 2026-07-06 状态补充：Handoff 观测前端进入最小闭环。`GET /api/runtime/runs` 支持按 `parent_run_id` / `source_id` 查询，`WorkflowRun` 的“运行观测”可展示 workflow 下的 `agent_task` 与 `agent_handoff` 子 run；新增 `GET /api/runtime/agent-handoffs?task_id=&status=&target_agent=&limit=` 供 MetaAgent Handoff Inbox 查询。当前只做观测和手动状态操作，不做真实调度、队列或持久化。
+
 > 2026-07-05 状态补充：classic workflow 已接入 RunRegistry 最小可观测闭环，并恢复 `/workflow` 画布的节点库浮层与配置/运行 tabs 布局。
 
 ## 2026-07-05 增量：RunRegistry 与工作流运行观测
@@ -20,7 +22,7 @@ Classic workflow 每次运行会登记一条 `workflow` run，并在 `workflow_m
 
 workflow-native 是模镜自研工作流引擎的渐进式实验线。它不会替换当前稳定的 `/workflow` Dify iframe 入口，也不会改动 `/rag`。当前阶段提供静态图校验能力，并在 classic 运行器中试点少量本地节点执行，让团队先把数据模型、API 契约、错误模型和测试流程立起来。
 
-最后更新日期：2026-07-05
+最后更新日期：2026-07-06
 维护人：模镜团队
 
 ## 目标与边界
