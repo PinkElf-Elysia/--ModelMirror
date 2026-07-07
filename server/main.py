@@ -1835,6 +1835,18 @@ async def run_workflow(payload: WorkflowRunRequest, request: Request):
             "edge_count": len(payload.workflow.edges),
         },
     )
+    await run_registry.record_checkpoint(
+        workflow_run.run_id,
+        event_type="workflow.started",
+        title="Workflow started",
+        summary=payload.workflow.title,
+        metadata={
+            "workflow_id": payload.workflow.id,
+            "workflow_task_id": task_id,
+            "node_count": len(payload.workflow.nodes),
+            "edge_count": len(payload.workflow.edges),
+        },
+    )
     initial_queue = deque(sorted(start_node_ids, key=lambda node_id: order_index[node_id]))
     task_state: dict[str, Any] = {
         "task_id": task_id,
@@ -1869,6 +1881,317 @@ async def run_workflow(payload: WorkflowRunRequest, request: Request):
             "active_middlewares": [],
             "tool_policy": None,
         }
+
+        def selected_workflow_tool_policy() -> ToolPermissionPolicy:
+            policy = workflow_runtime_context.get("tool_policy")
+            return policy if isinstance(policy, ToolPermissionPolicy) else workflow_tool_policy
+
+        def selected_workflow_tool_audit_store() -> InMemoryToolAuditStore:
+            audit_store = task_state.get("tool_audit_store")
+            return (
+                audit_store
+                if isinstance(audit_store, InMemoryToolAuditStore)
+                else workflow_tool_audit_store
+            )
+
+        async def call_workflow_runtime_tool(
+            *,
+            tool_name: str,
+            arguments: dict[str, Any],
+            node: WorkflowNodePayload,
+            title: str,
+            metadata: dict[str, Any] | None = None,
+        ):
+            matched_tool = await workflow_mcp_provider.find_tool(tool_name)
+            if not matched_tool:
+                raise ValueError(f"MCP 工具未注册：{tool_name}")
+            return await run_tool_with_runtime(
+                RuntimeToolCall(
+                    tool_name=tool_name,
+                    arguments=arguments,
+                    metadata={
+                        "session_id": matched_tool.session_id,
+                        "server_id": matched_tool.server_id,
+                        "node_id": node.id,
+                        **dict(metadata or {}),
+                    },
+                ),
+                runtime_capabilities,
+                workflow_mcp_pipeline,
+                MiddlewareContext(
+                    task_id=task_id,
+                    trace_id=task_id,
+                    capabilities=runtime_capabilities,
+                    store=task_state["runtime_event_store"],
+                    metadata={
+                        "node_id": node.id,
+                        "node_title": title,
+                        "workflow": True,
+                    },
+                ),
+                policy=selected_workflow_tool_policy(),
+                audit_store=selected_workflow_tool_audit_store(),
+            )
+
+        def runtime_tool_result_text(call_result: Any) -> str:
+            content_types = call_result.metadata.get("content_types", [])
+            non_text_types = [
+                str(content_type)
+                for content_type in content_types
+                if str(content_type) != "text"
+            ]
+            output_text = str(call_result.output or "").strip()
+            if non_text_types:
+                output_text = (
+                    output_text
+                    + "\n"
+                    + "非文本结果已省略："
+                    + ", ".join(non_text_types)
+                ).strip()
+            return output_text
+
+        async def workflow_available_tools(tool_names_raw: Any) -> list[Any]:
+            tools = await workflow_mcp_provider.list_tools()
+            requested_tool_names = {
+                item.strip()
+                for item in str(tool_names_raw or "").split(",")
+                if item.strip()
+            }
+            if not requested_tool_names:
+                return tools
+            return [tool for tool in tools if tool.name in requested_tool_names]
+
+        async def run_react_lite_agent(
+            *,
+            node: WorkflowNodePayload,
+            title: str,
+            kind: str,
+            model_id: str,
+            system_prompt: str,
+            user_prompt: str,
+            tool_names_raw: Any,
+            max_iterations: int,
+            temperature: float,
+            output_variable: str,
+            run_id: str | None = None,
+        ) -> tuple[str, list[dict[str, Any]]]:
+            available_tools = await workflow_available_tools(tool_names_raw)
+            events: list[dict[str, Any]] = []
+            if not available_tools:
+                events.append(
+                    {
+                        "event": "node_delta",
+                        "node_id": node.id,
+                        "node_title": title,
+                        "node_type": kind,
+                        "output": "Agent 切换为直接回答：没有可用 MCP 工具",
+                        "variable": output_variable,
+                    }
+                )
+                if run_id:
+                    events[-1]["run_id"] = run_id
+                    await run_registry.record_checkpoint(
+                        run_id,
+                        event_type="workflow_agent.direct_fallback",
+                        title="Direct answer fallback",
+                        summary="No MCP tools were available for this agent run.",
+                        metadata={
+                            "node_id": node.id,
+                            "model_id": model_id,
+                            "output_variable": output_variable,
+                        },
+                    )
+                return (
+                    await collect_chat_completion_text(
+                        model_id,
+                        [ChatMessage(role="system", content=system_prompt), ChatMessage(role="user", content=user_prompt)],
+                        temperature=temperature,
+                        max_tokens=WORKFLOW_AGENT_MAX_TOKENS,
+                    ),
+                    events,
+                )
+
+            tool_by_name = {tool.name: tool for tool in available_tools if tool.name}
+            tool_descriptions = "\n".join(
+                (
+                    f"- {name}: {tool.description or '无描述'} "
+                    f"schema={json.dumps(tool.input_schema or {}, ensure_ascii=False)}"
+                )
+                for name, tool in tool_by_name.items()
+            )
+            react_system_prompt = (
+                f"{system_prompt}\n\n"
+                "你可以选择调用一个工具，或给出最终答案。"
+                "每次回复必须是 JSON，且只能使用以下两种格式之一："
+                '{"tool":"工具名","arguments":{...}} 或 {"answer":"最终答案"}。'
+                "不要输出 JSON 以外的文字。\n\n可用工具：\n"
+                f"{tool_descriptions}"
+            )
+            messages: list[ChatMessage] = [
+                ChatMessage(role="system", content=react_system_prompt),
+                ChatMessage(role="user", content=user_prompt),
+            ]
+            output_text = ""
+            for iteration_index in range(max_iterations):
+                if not get_llm_gateway_config()[0]:
+                    raise ValueError(LLM_GATEWAY_NOT_CONFIGURED_MESSAGE)
+                raw_response = (
+                    await collect_chat_completion_text(
+                        model_id,
+                        messages,
+                        temperature=temperature,
+                        max_tokens=WORKFLOW_AGENT_MAX_TOKENS,
+                    )
+                ).strip()
+                json_text = raw_response
+                fenced = re.search(
+                    r"```(?:json)?\s*\n?(.*?)\n?```",
+                    raw_response,
+                    re.DOTALL,
+                )
+                if fenced:
+                    json_text = fenced.group(1).strip()
+                try:
+                    decision = json.loads(json_text)
+                except ValueError:
+                    output_text = raw_response
+                    if run_id:
+                        await run_registry.record_checkpoint(
+                            run_id,
+                            event_type="workflow_agent.model_decision",
+                            title="Model returned plain text",
+                            summary="The agent treated the model response as final text.",
+                            metadata={"iteration": iteration_index + 1},
+                        )
+                    break
+                if not isinstance(decision, dict):
+                    output_text = raw_response
+                    if run_id:
+                        await run_registry.record_checkpoint(
+                            run_id,
+                            event_type="workflow_agent.model_decision",
+                            title="Model returned non-object JSON",
+                            summary="The agent treated the model response as final text.",
+                            metadata={"iteration": iteration_index + 1},
+                        )
+                    break
+                answer = decision.get("answer")
+                if isinstance(answer, str) and answer.strip():
+                    output_text = answer.strip()
+                    if run_id:
+                        await run_registry.record_checkpoint(
+                            run_id,
+                            event_type="workflow_agent.model_answer",
+                            title="Model produced final answer",
+                            summary=f"answer_length={len(output_text)}",
+                            metadata={"iteration": iteration_index + 1},
+                        )
+                    break
+                tool_name = str(decision.get("tool") or "").strip()
+                arguments = decision.get("arguments")
+                if not tool_name:
+                    output_text = raw_response
+                    if run_id:
+                        await run_registry.record_checkpoint(
+                            run_id,
+                            event_type="workflow_agent.model_decision",
+                            title="Model decision missing tool name",
+                            summary="The agent treated the response as final text.",
+                            severity="warning",
+                            metadata={"iteration": iteration_index + 1},
+                        )
+                    break
+                if not isinstance(arguments, dict):
+                    arguments = {}
+                matched_tool = tool_by_name.get(tool_name)
+                if not matched_tool:
+                    tool_result_text = f"工具不可用：{tool_name}"
+                    if run_id:
+                        await run_registry.record_checkpoint(
+                            run_id,
+                            event_type="workflow_agent.tool_missing",
+                            title="Tool unavailable",
+                            summary=tool_name,
+                            severity="warning",
+                            metadata={"iteration": iteration_index + 1},
+                        )
+                else:
+                    call_result = await call_workflow_runtime_tool(
+                        tool_name=tool_name,
+                        arguments=arguments,
+                        node=node,
+                        title=title,
+                        metadata={
+                            "agent_kind": kind,
+                            "agent_node_id": node.id,
+                            "iteration": iteration_index + 1,
+                        },
+                    )
+                    tool_result_text = runtime_tool_result_text(call_result)
+                    if run_id:
+                        await run_registry.record_checkpoint(
+                            run_id,
+                            event_type="workflow_agent.tool_call",
+                            title="Tool call completed",
+                            summary=f"{tool_name} result_length={len(tool_result_text)}",
+                            metadata={
+                                "iteration": iteration_index + 1,
+                                "tool_name": tool_name,
+                                "result_length": len(tool_result_text),
+                            },
+                        )
+                event = {
+                    "event": "node_delta",
+                    "node_id": node.id,
+                    "node_title": title,
+                    "node_type": kind,
+                    "output": (
+                        f"[{iteration_index + 1}/{max_iterations}] 调用工具 "
+                        f"{tool_name}，结果预览：{tool_result_text[:300]}"
+                    ),
+                    "variable": output_variable,
+                }
+                if run_id:
+                    event["run_id"] = run_id
+                    await run_registry.record_checkpoint(
+                        run_id,
+                        event_type="workflow_agent.iteration_limit",
+                        title="Iteration limit reached",
+                        summary=f"max_iterations={max_iterations}",
+                        severity="warning",
+                        metadata={"max_iterations": max_iterations},
+                    )
+                events.append(event)
+                messages.append(
+                    ChatMessage(
+                        role="assistant",
+                        content=json.dumps(decision, ensure_ascii=False),
+                    )
+                )
+                messages.append(
+                    ChatMessage(
+                        role="user",
+                        content=(
+                            f"工具 {tool_name} 的执行结果：\n"
+                            f"{tool_result_text}\n\n"
+                            "请继续用 JSON 决策下一步。"
+                        ),
+                    )
+                )
+            else:
+                event = {
+                    "event": "node_delta",
+                    "node_id": node.id,
+                    "node_title": title,
+                    "node_type": kind,
+                    "output": f"Agent 达到最大循环次数 {max_iterations}，未得到最终答案。",
+                    "variable": output_variable,
+                }
+                if run_id:
+                    event["run_id"] = run_id
+                events.append(event)
+                output_text = ""
+            return output_text, events
 
         try:
             yield sse_payload(
@@ -2759,208 +3082,31 @@ async def run_workflow(payload: WorkflowRunRequest, request: Request):
                                     }
                                 )
                             elif agent_mode == "tool_first":
-                                registered_tools = await tool_registry.list_tools()
-                                requested_tool_names = [
-                                    item.strip()
-                                    for item in str(node.data.get("toolNames") or "").split(",")
-                                    if item.strip()
-                                ]
-                                if requested_tool_names:
-                                    allowed_names = set(requested_tool_names)
-                                    available_tools = [
-                                        tool
-                                        for tool in registered_tools
-                                        if str(tool.get("name") or "") in allowed_names
-                                    ]
-                                else:
-                                    available_tools = registered_tools
-
-                                if not available_tools:
-                                    yield sse_payload(
-                                        {
-                                            "event": "node_delta",
-                                            "node_id": node.id,
-                                            "node_title": title,
-                                            "node_type": kind,
-                                            "output": "Agent 切换为直接回答：没有可用 MCP 工具",
-                                            "variable": output_variable,
-                                        }
-                                    )
-                                    output = await run_direct_agent()
-                                    variables[output_variable] = output
-                                    yield sse_payload(
-                                        {
-                                            "event": "node_delta",
-                                            "node_id": node.id,
-                                            "node_title": title,
-                                            "node_type": kind,
-                                            "output": output[:500],
-                                            "variable": output_variable,
-                                        }
-                                    )
-                                else:
-                                    tool_by_name = {
-                                        str(tool.get("name") or ""): tool
-                                        for tool in available_tools
-                                        if str(tool.get("name") or "")
+                                output, agent_events = await run_react_lite_agent(
+                                    node=node,
+                                    title=title,
+                                    kind=kind,
+                                    model_id=model_id,
+                                    system_prompt="你是模镜工作流中的 ReAct-Lite Agent。",
+                                    user_prompt=instruction,
+                                    tool_names_raw=node.data.get("toolNames"),
+                                    max_iterations=max_iterations,
+                                    temperature=temperature,
+                                    output_variable=output_variable,
+                                )
+                                variables[output_variable] = output
+                                for agent_event in agent_events:
+                                    yield sse_payload(agent_event)
+                                yield sse_payload(
+                                    {
+                                        "event": "node_delta",
+                                        "node_id": node.id,
+                                        "node_title": title,
+                                        "node_type": kind,
+                                        "output": output[:500],
+                                        "variable": output_variable,
                                     }
-                                    tool_descriptions = "\n".join(
-                                        (
-                                            f"- {name}: "
-                                            f"{tool.get('description') or '无描述'} "
-                                            f"schema={json.dumps(tool.get('input_schema') or {}, ensure_ascii=False)}"
-                                        )
-                                        for name, tool in tool_by_name.items()
-                                    )
-                                    system_prompt = (
-                                        "你是模镜工作流中的 ReAct-Lite Agent。"
-                                        "你可以选择调用一个工具，或给出最终答案。"
-                                        "每次回复必须是 JSON，且只能使用以下两种格式之一："
-                                        '{"tool":"工具名","arguments":{...}} 或 {"answer":"最终答案"}。'
-                                        "不要输出 JSON 以外的文字。\n\n可用工具：\n"
-                                        f"{tool_descriptions}"
-                                    )
-                                    messages: list[ChatMessage] = [
-                                        ChatMessage(role="system", content=system_prompt),
-                                        ChatMessage(role="user", content=instruction),
-                                    ]
-                                    for iteration_index in range(max_iterations):
-                                        if not get_llm_gateway_config()[0]:
-                                            raise ValueError(LLM_GATEWAY_NOT_CONFIGURED_MESSAGE)
-                                        raw_response = (
-                                            await collect_chat_completion_text(
-                                                model_id,
-                                                messages,
-                                                temperature=temperature,
-                                                max_tokens=WORKFLOW_AGENT_MAX_TOKENS,
-                                            )
-                                        ).strip()
-                                        json_text = raw_response
-                                        fenced = re.search(
-                                            r"```(?:json)?\s*\n?(.*?)\n?```",
-                                            raw_response,
-                                            re.DOTALL,
-                                        )
-                                        if fenced:
-                                            json_text = fenced.group(1).strip()
-                                        try:
-                                            decision = json.loads(json_text)
-                                        except ValueError:
-                                            output = raw_response
-                                            break
-                                        if not isinstance(decision, dict):
-                                            output = raw_response
-                                            break
-                                        answer = decision.get("answer")
-                                        if isinstance(answer, str) and answer.strip():
-                                            output = answer.strip()
-                                            break
-                                        tool_name = str(decision.get("tool") or "").strip()
-                                        arguments = decision.get("arguments")
-                                        if not tool_name:
-                                            output = raw_response
-                                            break
-                                        if not isinstance(arguments, dict):
-                                            arguments = {}
-                                        matched_tool = tool_by_name.get(tool_name)
-                                        if not matched_tool:
-                                            tool_result_text = f"工具不可用：{tool_name}"
-                                            yield sse_payload(
-                                                {
-                                                    "event": "node_delta",
-                                                    "node_id": node.id,
-                                                    "node_title": title,
-                                                    "node_type": kind,
-                                                    "output": tool_result_text,
-                                                    "variable": output_variable,
-                                                }
-                                            )
-                                        else:
-                                            call_result = await mcp_manager.call_tool(
-                                                str(matched_tool.get("session_id") or ""),
-                                                tool_name,
-                                                arguments,
-                                            )
-                                            text_parts: list[str] = []
-                                            non_text_types: list[str] = []
-                                            for part in getattr(call_result, "content", []) or []:
-                                                if isinstance(part, dict):
-                                                    part_type = str(part.get("type") or "other")
-                                                    part_text = part.get("text")
-                                                else:
-                                                    part_type = str(getattr(part, "type", "other"))
-                                                    part_text = getattr(part, "text", None)
-                                                if part_type == "text":
-                                                    text_parts.append(str(part_text or ""))
-                                                else:
-                                                    non_text_types.append(part_type)
-                                            tool_result_text = "\n".join(text_parts).strip()
-                                            if non_text_types:
-                                                tool_result_text = (
-                                                    tool_result_text
-                                                    + "\n"
-                                                    + "非文本结果已省略："
-                                                    + ", ".join(non_text_types)
-                                                ).strip()
-                                            yield sse_payload(
-                                                {
-                                                    "event": "node_delta",
-                                                    "node_id": node.id,
-                                                    "node_title": title,
-                                                    "node_type": kind,
-                                                    "output": (
-                                                        f"[{iteration_index + 1}/{max_iterations}] "
-                                                        f"调用工具 {tool_name}，结果预览："
-                                                        f"{tool_result_text[:300]}"
-                                                    ),
-                                                    "variable": output_variable,
-                                                }
-                                            )
-                                        messages.append(
-                                            ChatMessage(
-                                                role="assistant",
-                                                content=json.dumps(
-                                                    decision,
-                                                    ensure_ascii=False,
-                                                ),
-                                            )
-                                        )
-                                        messages.append(
-                                            ChatMessage(
-                                                role="user",
-                                                content=(
-                                                    f"工具 {tool_name} 的执行结果：\n"
-                                                    f"{tool_result_text}\n\n"
-                                                    "请继续用 JSON 决策下一步。"
-                                                ),
-                                            )
-                                        )
-                                    else:
-                                        yield sse_payload(
-                                            {
-                                                "event": "node_delta",
-                                                "node_id": node.id,
-                                                "node_title": title,
-                                                "node_type": kind,
-                                                "output": (
-                                                    f"Agent 达到最大循环次数 {max_iterations}，"
-                                                    "未得到最终答案。"
-                                                ),
-                                                "variable": output_variable,
-                                            }
-                                        )
-                                        output = ""
-                                    variables[output_variable] = output
-                                    yield sse_payload(
-                                        {
-                                            "event": "node_delta",
-                                            "node_id": node.id,
-                                            "node_title": title,
-                                            "node_type": kind,
-                                            "output": output[:500],
-                                            "variable": output_variable,
-                                        }
-                                    )
+                                )
                             else:
                                 raise ValueError(f"Agent 模式不支持：{agent_mode}")
                     except Exception as exc:
@@ -2995,10 +3141,29 @@ async def run_workflow(payload: WorkflowRunRequest, request: Request):
                             str(node.data.get("taskInput") or ""),
                             variables,
                         ).strip()
+                        prompt_suffix = render_workflow_template(
+                            str(node.data.get("promptSuffix") or ""),
+                            variables,
+                        ).strip()
+                        if prompt_suffix:
+                            task_input = f"{task_input}\n\n{prompt_suffix}".strip()
+                        tool_mode = str(node.data.get("toolMode") or "none").strip()
+                        try:
+                            max_iterations = int(
+                                str(
+                                    node.data.get("maxIterations")
+                                    or WORKFLOW_AGENT_MAX_ITERATIONS_DEFAULT
+                                )
+                            )
+                        except ValueError:
+                            max_iterations = WORKFLOW_AGENT_MAX_ITERATIONS_DEFAULT
+                        max_iterations = min(max(max_iterations, 1), 20)
                         if not role_prompt:
                             raise ValueError("workflow_agent 缺少角色提示词。")
                         if not task_input:
                             raise ValueError("workflow_agent 缺少任务输入。")
+                        if tool_mode not in {"none", "mcp_tools"}:
+                            raise ValueError(f"workflow_agent 工具模式不支持：{tool_mode}")
 
                         workflow_agent_run = await run_registry.create_run(
                             "workflow_agent",
@@ -3014,23 +3179,75 @@ async def run_workflow(payload: WorkflowRunRequest, request: Request):
                                 "node_title": title,
                                 "agent_name": agent_name,
                                 "model_id": model_id,
+                                "tool_mode": tool_mode,
+                                "output_variable": output_variable,
+                            },
+                        )
+                        await run_registry.record_checkpoint(
+                            workflow_agent_run.run_id,
+                            event_type="workflow_agent.started",
+                            title="Workflow agent started",
+                            summary=f"agent={agent_name}, tool_mode={tool_mode}",
+                            metadata={
+                                "node_id": node.id,
+                                "agent_name": agent_name,
+                                "model_id": model_id,
+                                "tool_mode": tool_mode,
                                 "output_variable": output_variable,
                             },
                         )
 
-                        async for delta in stream_workflow_llm_text(
-                            model_id,
-                            task_input,
-                            system_prompt=role_prompt,
-                        ):
-                            output += delta
+                        if tool_mode == "none":
+                            await run_registry.record_checkpoint(
+                                workflow_agent_run.run_id,
+                                event_type="workflow_agent.model_call",
+                                title="Model call started",
+                                summary=f"model={model_id}",
+                                metadata={
+                                    "node_id": node.id,
+                                    "model_id": model_id,
+                                },
+                            )
+                            async for delta in stream_workflow_llm_text(
+                                model_id,
+                                task_input,
+                                system_prompt=role_prompt,
+                            ):
+                                output += delta
+                                yield sse_payload(
+                                    {
+                                        "event": "node_delta",
+                                        "node_id": node.id,
+                                        "node_title": title,
+                                        "node_type": kind,
+                                        "output": delta,
+                                        "variable": output_variable,
+                                        "run_id": workflow_agent_run.run_id,
+                                    }
+                                )
+                        else:
+                            output, agent_events = await run_react_lite_agent(
+                                node=node,
+                                title=title,
+                                kind=kind,
+                                model_id=model_id,
+                                system_prompt=role_prompt,
+                                user_prompt=task_input,
+                                tool_names_raw=node.data.get("toolNames"),
+                                max_iterations=max_iterations,
+                                temperature=0.7,
+                                output_variable=output_variable,
+                                run_id=workflow_agent_run.run_id,
+                            )
+                            for agent_event in agent_events:
+                                yield sse_payload(agent_event)
                             yield sse_payload(
                                 {
                                     "event": "node_delta",
                                     "node_id": node.id,
                                     "node_title": title,
                                     "node_type": kind,
-                                    "output": delta,
+                                    "output": output[:500],
                                     "variable": output_variable,
                                     "run_id": workflow_agent_run.run_id,
                                 }
@@ -3042,6 +3259,16 @@ async def run_workflow(payload: WorkflowRunRequest, request: Request):
                             metadata={
                                 "output_length": len(output or ""),
                                 "variables_count": len(variables),
+                            },
+                        )
+                        await run_registry.record_checkpoint(
+                            workflow_agent_run.run_id,
+                            event_type="workflow_agent.completed",
+                            title="Workflow agent completed",
+                            summary=f"output_length={len(output or '')}",
+                            metadata={
+                                "node_id": node.id,
+                                "output_variable": output_variable,
                             },
                         )
                     except Exception as exc:
@@ -3117,6 +3344,18 @@ async def run_workflow(payload: WorkflowRunRequest, request: Request):
                                 "workflow_task_id": task_id,
                                 "node_id": node.id,
                                 "node_title": title,
+                                "agent_task_id": task.task_id,
+                                "assigned_agent": assigned_agent,
+                                "output_variable": output_variable,
+                            },
+                        )
+                        await run_registry.record_checkpoint(
+                            agent_task_run.run_id,
+                            event_type="agent_task.created",
+                            title="Agent task created",
+                            summary=task.title,
+                            metadata={
+                                "node_id": node.id,
                                 "agent_task_id": task.task_id,
                                 "assigned_agent": assigned_agent,
                                 "output_variable": output_variable,
@@ -3222,6 +3461,19 @@ async def run_workflow(payload: WorkflowRunRequest, request: Request):
                                 "target_agent": target_agent,
                                 "task_id_variable": task_id_variable,
                                 "output_variable": output_variable,
+                            },
+                        )
+                        await run_registry.record_checkpoint(
+                            handoff_run.run_id,
+                            event_type="agent_handoff.created",
+                            title="Agent handoff created",
+                            summary=f"{source_agent} -> {target_agent}",
+                            metadata={
+                                "node_id": node.id,
+                                "agent_task_id": handoff_task_id,
+                                "handoff_id": handoff.handoff_id,
+                                "source_agent": source_agent,
+                                "target_agent": target_agent,
                             },
                         )
                         output = handoff.handoff_id
@@ -3561,6 +3813,15 @@ async def run_workflow(payload: WorkflowRunRequest, request: Request):
                     "variables_count": len(variables),
                 },
             )
+            await run_registry.record_checkpoint(
+                workflow_run.run_id,
+                event_type="workflow.completed",
+                title="Workflow completed",
+                summary=f"final_output_length={len(final_output or '')}",
+                metadata={
+                    "variables_count": len(variables),
+                },
+            )
             yield sse_payload(
                 {
                     "event": "workflow_end",
@@ -3709,6 +3970,19 @@ def runtime_run_to_payload(run: Any) -> dict[str, Any]:
     }
 
 
+def runtime_run_checkpoint_to_payload(checkpoint: Any) -> dict[str, Any]:
+    return {
+        "checkpoint_id": checkpoint.checkpoint_id,
+        "run_id": checkpoint.run_id,
+        "event_type": checkpoint.event_type,
+        "title": checkpoint.title,
+        "summary": checkpoint.summary,
+        "severity": checkpoint.severity,
+        "metadata": dict(checkpoint.metadata or {}),
+        "created_at": checkpoint.created_at,
+    }
+
+
 async def first_runtime_run_for_source(
     source_id: str,
     run_type: str,
@@ -3745,6 +4019,32 @@ async def update_runtime_runs_for_source(
             )
 
 
+async def record_runtime_run_checkpoints_for_source(
+    source_id: str,
+    run_type: str,
+    *,
+    event_type: str,
+    title: str,
+    summary: str = "",
+    severity: str = "info",
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    runs = await run_registry.list_runs(
+        run_type=run_type,  # type: ignore[arg-type]
+        limit=200,
+    )
+    for run in runs:
+        if run.source_id == source_id:
+            await run_registry.record_checkpoint(
+                run.run_id,
+                event_type=event_type,
+                title=title,
+                summary=summary,
+                severity=severity,
+                metadata=metadata,
+            )
+
+
 @app.get("/api/runtime/runs")
 async def list_runtime_runs(
     run_type: str | None = None,
@@ -3775,6 +4075,18 @@ async def get_runtime_run(run_id: str):
     if run is None:
         raise HTTPException(status_code=404, detail="Runtime run not found.")
     return runtime_run_to_payload(run)
+
+
+@app.get("/api/runtime/runs/{run_id}/checkpoints")
+async def list_runtime_run_checkpoints(run_id: str, limit: int = 50):
+    try:
+        checkpoints = await run_registry.list_checkpoints(
+            run_id,
+            limit=max(1, min(limit, 200)),
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Runtime run not found.") from exc
+    return [runtime_run_checkpoint_to_payload(checkpoint) for checkpoint in checkpoints]
 
 
 @app.post("/api/runtime/runs/{run_id}/cancel")
@@ -4298,7 +4610,7 @@ async def create_agent_task(payload: dict[str, Any]):
         assigned_agent=payload.get("assigned_agent"),
         metadata=metadata,
     )
-    await run_registry.create_run(
+    agent_task_run = await run_registry.create_run(
         "agent_task",
         task.title,
         status="pending",
@@ -4310,6 +4622,17 @@ async def create_agent_task(payload: dict[str, Any]):
         ),
         metadata={
             **dict(metadata or {}),
+            "agent_task_id": task.task_id,
+            "source_agent": task.source_agent,
+            "assigned_agent": task.assigned_agent,
+        },
+    )
+    await run_registry.record_checkpoint(
+        agent_task_run.run_id,
+        event_type="agent_task.created",
+        title="Agent task created",
+        summary=task.title,
+        metadata={
             "agent_task_id": task.task_id,
             "source_agent": task.source_agent,
             "assigned_agent": task.assigned_agent,
@@ -4427,7 +4750,7 @@ async def create_agent_handoff(task_id: str, payload: dict[str, Any]):
         metadata=metadata,
     )
     task_run = await first_runtime_run_for_source(task_id, "agent_task")
-    await run_registry.create_run(
+    handoff_run = await run_registry.create_run(
         "agent_handoff",
         f"{source_agent or 'workflow'} -> {target_agent}",
         status="pending",
@@ -4439,6 +4762,18 @@ async def create_agent_handoff(task_id: str, payload: dict[str, Any]):
         ),
         metadata={
             **dict(metadata or {}),
+            "agent_task_id": task_id,
+            "handoff_id": handoff.handoff_id,
+            "source_agent": handoff.source_agent,
+            "target_agent": handoff.target_agent,
+        },
+    )
+    await run_registry.record_checkpoint(
+        handoff_run.run_id,
+        event_type="agent_handoff.created",
+        title="Agent handoff created",
+        summary=f"{handoff.source_agent} -> {handoff.target_agent}",
+        metadata={
             "agent_task_id": task_id,
             "handoff_id": handoff.handoff_id,
             "source_agent": handoff.source_agent,
@@ -4553,6 +4888,31 @@ async def update_agent_handoff_api(
             ),
             metadata={
                 "handoff_status": status,
+                **merged_metadata,
+            },
+        )
+        handler = (
+            merged_metadata.get("completed_by")
+            or merged_metadata.get("accepted_by")
+            or merged_metadata.get("rejected_by")
+            or ""
+        )
+        summary = str(
+            merged_metadata.get("result")
+            or merged_metadata.get("reason")
+            or handler
+            or status
+        )
+        await record_runtime_run_checkpoints_for_source(
+            handoff_id,
+            "agent_handoff",
+            event_type=f"agent_handoff.{status}",
+            title=f"Agent handoff {status}",
+            summary=summary,
+            severity="error" if status == "rejected" else "info",
+            metadata={
+                "handoff_id": handoff_id,
+                "status": status,
                 **merged_metadata,
             },
         )

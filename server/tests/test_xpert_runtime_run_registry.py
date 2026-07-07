@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import httpx
 import pytest
 import pytest_asyncio
@@ -88,16 +90,64 @@ async def test_run_registry_filters_by_parent_and_source() -> None:
 
 
 @pytest.mark.asyncio
+async def test_run_registry_record_and_list_checkpoints() -> None:
+    registry = RunRegistry()
+    run = await registry.create_run("workflow", "Trace workflow", status="running")
+
+    first = await registry.record_checkpoint(
+        run.run_id,
+        event_type="workflow.started",
+        title="Started",
+        summary="start summary",
+        metadata={"step": 1},
+    )
+    await asyncio.sleep(0.001)
+    second = await registry.record_checkpoint(
+        run.run_id,
+        event_type="workflow.completed",
+        title="Completed",
+        summary="done summary",
+        metadata={"step": 2},
+    )
+
+    checkpoints = await registry.list_checkpoints(run.run_id)
+    assert [checkpoint.checkpoint_id for checkpoint in checkpoints] == [
+        second.checkpoint_id,
+        first.checkpoint_id,
+    ]
+    assert checkpoints[0].event_type == "workflow.completed"
+    assert checkpoints[0].metadata["step"] == 2
+
+
+@pytest.mark.asyncio
+async def test_run_registry_checkpoint_missing_run_raises() -> None:
+    registry = RunRegistry()
+
+    with pytest.raises(KeyError):
+        await registry.record_checkpoint(
+            "missing-run",
+            event_type="workflow.started",
+            title="missing",
+        )
+
+    with pytest.raises(KeyError):
+        await registry.list_checkpoints("missing-run")
+
+
+@pytest.mark.asyncio
 async def test_run_registry_cancel_run_updates_status() -> None:
     registry = RunRegistry()
     run = await registry.create_run("agent_handoff", "handoff", status="pending")
 
     cancelled = await registry.cancel_run(run.run_id, reason="manual stop")
+    checkpoints = await registry.list_checkpoints(run.run_id)
 
     assert cancelled.status == "cancelled"
     assert cancelled.error == "manual stop"
     assert cancelled.cancelled_at is not None
     assert cancelled.metadata["cancel_reason"] == "manual stop"
+    assert checkpoints[0].event_type == "run.cancelled"
+    assert checkpoints[0].summary == "manual stop"
 
 
 @pytest.mark.asyncio
@@ -131,6 +181,13 @@ async def test_runtime_run_api_list_and_cancel(client: httpx.AsyncClient) -> Non
     cancelled = cancel_response.json()
     assert cancelled["status"] == "cancelled"
     assert cancelled["error"] == "api test"
+
+    checkpoints_response = await client.get(
+        f"/api/runtime/runs/{run['run_id']}/checkpoints",
+    )
+    assert checkpoints_response.status_code == 200, checkpoints_response.text
+    checkpoints = checkpoints_response.json()
+    assert any(item["event_type"] == "run.cancelled" for item in checkpoints)
 
 
 @pytest.mark.asyncio
@@ -218,3 +275,12 @@ async def test_handoff_status_updates_runtime_run_metadata(
     assert run["metadata"]["accepted_by"] == "queue-operator"
     assert run["metadata"]["completed_by"] == "queue-operator"
     assert run["metadata"]["result"] == "review complete"
+
+    checkpoints_response = await client.get(
+        f"/api/runtime/runs/{run['run_id']}/checkpoints",
+    )
+    assert checkpoints_response.status_code == 200, checkpoints_response.text
+    checkpoint_types = [item["event_type"] for item in checkpoints_response.json()]
+    assert "agent_handoff.created" in checkpoint_types
+    assert "agent_handoff.accepted" in checkpoint_types
+    assert "agent_handoff.completed" in checkpoint_types

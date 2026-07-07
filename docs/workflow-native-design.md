@@ -1,5 +1,8 @@
 # workflow-native 自研工作流设计
 
+> 2026-07-07 状态补充：RunRegistry Trace / Checkpoint 进入最小闭环。Workflow run、`workflow_agent`、`agent_task`、`agent_handoff` 会写入内存态 checkpoint；前端“运行观测”会读取 `GET /api/runtime/runs/{run_id}/checkpoints` 展示当前 run 与子 run 的时间线摘要。当前不做持久化、自动重试、队列调度或 checkpoint resume。
+> 2026-07-07 状态补充：`workflow_agent` 已支持 Runtime Toolset 工具模式。`toolMode=none` 保持单步模型执行；`toolMode=mcp_tools` 使用轻量 JSON 决策协议调用 MCP 工具，并复用 `run_tool_with_runtime`、`tool_policy`、`tool_audit`。旧 `agent.tool_first` 也已收敛到同一条 runtime toolset 路径。当前不是 OpenAI function calling，不做自动 Handoff 或真实多 Agent 协作。
+
 > 2026-07-06 状态补充：classic workflow 新增 `workflow_agent` 节点。该节点使用 `rolePrompt` 作为该节点 system prompt、`taskInput` 作为用户输入调用模型，流式输出结果并写入 `outputVariable`，同时登记 `workflow_agent` 子 run。当前是单步模型智能体执行，不接 MCP 工具、Handoff 自动调度或真实多 Agent 协作。
 
 > 2026-07-06 状态补充：Handoff Queue 进入人工处理闭环。`accept/reject/complete` 会记录处理者、处理时间和结果/原因摘要，并同步到 `agent_handoff` run metadata；`WorkflowRun` 子 run 摘要会展示 handler/result。当前不做自动调度、目标 Agent 执行、持久化队列或权限系统。
@@ -16,9 +19,10 @@ Classic workflow 每次运行会登记一条 `workflow` run，并在 `workflow_m
 
 - `GET /api/runtime/runs?run_type=&status=&limit=`
 - `GET /api/runtime/runs/{run_id}`
+- `GET /api/runtime/runs/{run_id}/checkpoints`
 - `POST /api/runtime/runs/{run_id}/cancel`
 
-当前 RunRegistry 是内存态索引，不是调度器；取消 run 仅更新观测状态，不中断正在执行的 workflow、AgentTask 或 Handoff。前端 `WorkflowRun` 的“运行观测”折叠区会展示当前 `run_id` 与 RunRegistry 摘要，并继续展示 runtime events 与 tool audit records。
+当前 RunRegistry 是内存态索引，不是调度器；取消 run 仅更新观测状态，不中断正在执行的 workflow、AgentTask 或 Handoff。Checkpoint 仅保存摘要和元信息，不保存完整 prompt、模型输出、工具结果或密钥。前端 `WorkflowRun` 的“运行观测”折叠区会展示当前 `run_id`、RunRegistry 摘要、当前 run 与子 run checkpoint，并继续展示 runtime events 与 tool audit records。
 
 ## 2026-07-05 增量：`/workflow` 画布布局恢复
 
@@ -477,7 +481,9 @@ Agent Task Runtime 包含三层：
 
 classic workflow 已新增 `agent_task` 节点，作为 Xpert Agent/Handoff 对齐的第一步闭环。前端可从节点调色板拖入“智能体任务”，配置 `taskTitle`、`taskInput`、`assignedAgent` 与 `outputVariable`；运行时会渲染 `{{变量}}` 模板，调用 `AgentTaskStore.create_task(...)` 创建一条 AgentTask，并将新任务的 `task_id` 写入 `outputVariable`。该节点当前只负责创建任务和输出 ID，不做真实队列分派、专家协作或任务执行；完整任务详情继续通过现有 Agent Task API 查询。
 
-classic workflow 已新增 `workflow_agent` 节点，作为 Xpert Workflow Agent 的最小执行闭环。前端可从节点调色板拖入“工作流智能体”，配置 `agentName`、`modelId`、`rolePrompt`、`taskInput` 与 `outputVariable`；运行时会先渲染 `{{变量}}`，再以 `rolePrompt` 作为该节点 system prompt、`taskInput` 作为用户输入调用现有工作流 LLM 流式函数，最终把模型输出写入 `outputVariable`。该节点会登记 `workflow_agent` 子 run，便于运行观测查看；当前不接 MCP Toolset、不做 Handoff 自动调度、不实现真实多 Agent 协作。
+classic workflow 已新增 `workflow_agent` 节点，作为 Xpert Workflow Agent 的最小执行闭环。前端可从节点调色板拖入“工作流智能体”，配置 `agentName`、`modelId`、`rolePrompt`、`taskInput`、`toolMode`、`toolNames`、`maxIterations`、`promptSuffix` 与 `outputVariable`；运行时会先渲染 `{{变量}}`，再以 `rolePrompt` 作为该节点 system prompt、`taskInput` 作为用户输入执行。
+
+`toolMode=none` 时，节点直接调用现有工作流 LLM 流式函数，最终把模型输出写入 `outputVariable`。`toolMode=mcp_tools` 时，节点进入 ReAct-Lite 工具循环：模型每轮必须返回 `{"tool":"工具名","arguments":{...}}` 或 `{"answer":"最终答案"}`；工具调用统一经过 `run_tool_with_runtime`、`MCPToolsetProvider` 和 `MiddlewarePipeline.wrap_tool_call`，因此 workflow 中的 `tool_policy` 与 `tool_audit` 会对 `workflow_agent` 生效。该节点会登记 `workflow_agent` 子 run，便于运行观测查看；当前不使用 OpenAI function calling、不做 Handoff 自动调度、不实现真实多 Agent 协作。
 
 ## 2026-06-17 增量：Agent 节点
 

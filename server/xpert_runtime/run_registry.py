@@ -30,12 +30,27 @@ class RuntimeRun:
         self.updated_at = time.time()
 
 
+@dataclass(slots=True)
+class RuntimeRunCheckpoint:
+    """Small trace item attached to a RuntimeRun."""
+
+    checkpoint_id: str
+    run_id: str
+    event_type: str
+    title: str
+    summary: str = ""
+    severity: str = "info"
+    metadata: dict[str, Any] = field(default_factory=dict)
+    created_at: float = field(default_factory=time.time)
+
+
 class RunRegistry:
     """Small in-memory RunRegistry for workflow, agent, task, and handoff runs."""
 
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
         self._runs: dict[str, RuntimeRun] = {}
+        self._checkpoints: dict[str, list[RuntimeRunCheckpoint]] = {}
 
     async def create_run(
         self,
@@ -58,6 +73,7 @@ class RunRegistry:
         )
         async with self._lock:
             self._runs[run.run_id] = run
+            self._checkpoints[run.run_id] = []
         return run
 
     async def get_run(self, run_id: str) -> RuntimeRun | None:
@@ -86,6 +102,44 @@ class RunRegistry:
         runs.sort(key=lambda run: run.created_at, reverse=True)
         return runs[: max(1, limit)]
 
+    async def record_checkpoint(
+        self,
+        run_id: str,
+        *,
+        event_type: str,
+        title: str,
+        summary: str = "",
+        severity: str = "info",
+        metadata: dict[str, Any] | None = None,
+    ) -> RuntimeRunCheckpoint:
+        checkpoint = RuntimeRunCheckpoint(
+            checkpoint_id=str(uuid.uuid4()),
+            run_id=run_id,
+            event_type=event_type,
+            title=title,
+            summary=summary[:500],
+            severity=severity,
+            metadata=dict(metadata or {}),
+        )
+        async with self._lock:
+            if run_id not in self._runs:
+                raise KeyError(f"Runtime run not found: {run_id}")
+            self._checkpoints.setdefault(run_id, []).append(checkpoint)
+        return checkpoint
+
+    async def list_checkpoints(
+        self,
+        run_id: str,
+        *,
+        limit: int = 50,
+    ) -> list[RuntimeRunCheckpoint]:
+        async with self._lock:
+            if run_id not in self._runs:
+                raise KeyError(f"Runtime run not found: {run_id}")
+            checkpoints = list(self._checkpoints.get(run_id, []))
+        checkpoints.sort(key=lambda checkpoint: checkpoint.created_at, reverse=True)
+        return checkpoints[: max(1, limit)]
+
     async def update_run(
         self,
         run_id: str,
@@ -107,6 +161,30 @@ class RunRegistry:
             if metadata is not None:
                 run.metadata.update(metadata)
             run.touch()
+            if status == "failed":
+                self._checkpoints.setdefault(run_id, []).append(
+                    RuntimeRunCheckpoint(
+                        checkpoint_id=str(uuid.uuid4()),
+                        run_id=run_id,
+                        event_type="run.failed",
+                        title="Run failed",
+                        summary=str(error or run.error or "")[:500],
+                        severity="error",
+                        metadata={"status": status},
+                    )
+                )
+            elif status == "cancelled":
+                self._checkpoints.setdefault(run_id, []).append(
+                    RuntimeRunCheckpoint(
+                        checkpoint_id=str(uuid.uuid4()),
+                        run_id=run_id,
+                        event_type="run.cancelled",
+                        title="Run cancelled",
+                        summary=str(error or run.error or "")[:500],
+                        severity="warning",
+                        metadata={"status": status},
+                    )
+                )
             return run
 
     async def cancel_run(

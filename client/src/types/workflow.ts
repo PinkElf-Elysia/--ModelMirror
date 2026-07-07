@@ -67,6 +67,7 @@ export interface WorkflowNodeData extends Record<string, unknown> {
   llmFallbackPrompt?: string;
   agentName?: string;
   agentMode?: string;
+  toolMode?: string;
   rolePrompt?: string;
   taskTitle?: string;
   taskInput?: string;
