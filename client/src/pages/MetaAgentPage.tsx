@@ -196,6 +196,18 @@ function handoffStatusClass(status: string) {
   return "border-hire-300/25 bg-hire-300/10 text-hire-100";
 }
 
+function handoffMetaText(handoff: AgentHandoffSummary, key: string) {
+  const value = handoff.metadata?.[key];
+  if (typeof value === "string" && value.trim()) return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  return "";
+}
+
+function handoffMetaTime(handoff: AgentHandoffSummary, key: string) {
+  const value = handoff.metadata?.[key];
+  return typeof value === "number" ? formatTaskTime(value) : "";
+}
+
 function nodeColor(node: WorkflowNode) {
   const data = node.data as WorkflowNodeData;
   if (data.kind === "input") return "rgba(16,185,129,0.92)";
@@ -309,6 +321,13 @@ export default function MetaAgentPage() {
   const [handoffInbox, setHandoffInbox] = useState<AgentHandoffSummary[]>([]);
   const [handoffError, setHandoffError] = useState("");
   const [handoffActionId, setHandoffActionId] = useState<string | null>(null);
+  const [handoffStatusFilter, setHandoffStatusFilter] = useState("all");
+  const [handoffTargetFilter, setHandoffTargetFilter] = useState("");
+  const [handoffCompleteDrafts, setHandoffCompleteDrafts] = useState<
+    Record<string, string>
+  >({});
+  const [expandedCompleteHandoffId, setExpandedCompleteHandoffId] =
+    useState<string | null>(null);
 
   useEffect(() => {
     document.title = "模镜 - 元智能体工作台";
@@ -343,7 +362,15 @@ export default function MetaAgentPage() {
 
   async function loadHandoffInbox() {
     try {
-      const response = await fetch("/api/runtime/agent-handoffs?limit=20");
+      const params = new URLSearchParams({ limit: "20" });
+      if (handoffStatusFilter !== "all") {
+        params.set("status", handoffStatusFilter);
+      }
+      const targetFilter = handoffTargetFilter.trim();
+      if (targetFilter) {
+        params.set("target_agent", targetFilter);
+      }
+      const response = await fetch(`/api/runtime/agent-handoffs?${params}`);
       const payload = (await response.json().catch(() => null)) as
         | AgentHandoffSummary[]
         | { error?: string; detail?: unknown }
@@ -479,12 +506,22 @@ export default function MetaAgentPage() {
   ) {
     setHandoffActionId(handoff.handoff_id);
     try {
+      const operator = "meta-agent-operator";
+      const completionResult =
+        handoffCompleteDrafts[handoff.handoff_id]?.trim() ||
+        "Completed in MetaAgent handoff inbox.";
       const body =
         action === "reject"
-          ? { reason: "Rejected in MetaAgent handoff inbox." }
+          ? {
+              rejected_by: operator,
+              reason: "Rejected in MetaAgent handoff inbox.",
+            }
           : action === "complete"
-            ? { result: "Completed in MetaAgent handoff inbox." }
-            : {};
+            ? {
+                completed_by: operator,
+                result: completionResult,
+              }
+            : { accepted_by: operator };
       const response = await fetch(
         `/api/runtime/agent-handoffs/${handoff.handoff_id}/${action}`,
         {
@@ -505,6 +542,7 @@ export default function MetaAgentPage() {
       if (selectedTask?.task_id) {
         await loadAgentTask(selectedTask.task_id);
       }
+      setExpandedCompleteHandoffId(null);
     } catch (handoffActionError) {
       setHandoffError(
         handoffActionError instanceof Error
@@ -541,6 +579,52 @@ export default function MetaAgentPage() {
       );
     }
     if (handoff.status === "accepted") {
+      const expanded = expandedCompleteHandoffId === handoff.handoff_id;
+      return (
+        <div className="mt-2 space-y-2">
+          {expanded ? (
+            <textarea
+              className="min-h-16 w-full resize-none rounded-md border border-white/10 bg-slate-950/35 px-2 py-1.5 text-[11px] leading-5 text-slate-200 outline-none transition placeholder:text-slate-500 focus:border-emerald-300/45 focus:ring-2 focus:ring-emerald-300/10"
+              onChange={(event) =>
+                setHandoffCompleteDrafts((current) => ({
+                  ...current,
+                  [handoff.handoff_id]: event.target.value,
+                }))
+              }
+              placeholder="填写完成结果摘要"
+              value={handoffCompleteDrafts[handoff.handoff_id] ?? ""}
+            />
+          ) : null}
+          <div className="flex gap-2">
+            <button
+              className="rounded-full border border-emerald-300/25 bg-emerald-300/10 px-2.5 py-1 text-[11px] font-semibold text-emerald-100 transition hover:bg-emerald-300/15 disabled:opacity-50"
+              disabled={busy}
+              onClick={() => {
+                if (!expanded) {
+                  setExpandedCompleteHandoffId(handoff.handoff_id);
+                  return;
+                }
+                void updateHandoffStatus(handoff, "complete");
+              }}
+              type="button"
+            >
+              {expanded ? "提交完成" : "填写结果"}
+            </button>
+            {expanded ? (
+              <button
+                className="rounded-full border border-white/10 bg-white/[0.045] px-2.5 py-1 text-[11px] font-semibold text-slate-300 transition hover:bg-white/[0.07] disabled:opacity-50"
+                disabled={busy}
+                onClick={() => setExpandedCompleteHandoffId(null)}
+                type="button"
+              >
+                收起
+              </button>
+            ) : null}
+          </div>
+        </div>
+      );
+    }
+    if (false && handoff.status === "accepted") {
       return (
         <button
           className="mt-2 rounded-full border border-emerald-300/25 bg-emerald-300/10 px-2.5 py-1 text-[11px] font-semibold text-emerald-100 transition hover:bg-emerald-300/15 disabled:opacity-50"
@@ -553,6 +637,30 @@ export default function MetaAgentPage() {
       );
     }
     return null;
+  }
+
+  function renderHandoffMetaSummary(handoff: AgentHandoffSummary) {
+    const acceptedBy = handoffMetaText(handoff, "accepted_by");
+    const rejectedBy = handoffMetaText(handoff, "rejected_by");
+    const completedBy = handoffMetaText(handoff, "completed_by");
+    const result = handoffMetaText(handoff, "result");
+    const reason = handoffMetaText(handoff, "reason");
+    const time =
+      handoffMetaTime(handoff, "completed_at") ||
+      handoffMetaTime(handoff, "rejected_at") ||
+      handoffMetaTime(handoff, "accepted_at");
+    const handler = completedBy || rejectedBy || acceptedBy;
+    if (!handler && !result && !reason && !time) return null;
+    return (
+      <div className="mt-2 rounded-md border border-white/10 bg-slate-950/25 px-2 py-1.5 text-[11px] leading-5 text-slate-400">
+        {handler ? <p>处理者：{handler}</p> : null}
+        {time ? <p>处理时间：{time}</p> : null}
+        {result ? <p className="line-clamp-2">结果：{result}</p> : null}
+        {reason && handoff.status === "rejected" ? (
+          <p className="line-clamp-2">原因：{reason}</p>
+        ) : null}
+      </div>
+    );
   }
 
   async function generateWorkflow() {
@@ -927,6 +1035,7 @@ export default function MetaAgentPage() {
                           <p className="mt-1 line-clamp-2 text-[11px] leading-5 text-slate-500">
                             {handoff.reason}
                           </p>
+                          {renderHandoffMetaSummary(handoff)}
                           {renderHandoffActions(handoff)}
                         </div>
                       ))}
@@ -971,6 +1080,32 @@ export default function MetaAgentPage() {
                 刷新
               </button>
             </div>
+            <div className="mt-3 grid grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)_auto] gap-2">
+              <select
+                className="h-9 rounded-md border border-white/10 bg-slate-950/45 px-2 text-xs text-slate-200 outline-none transition focus:border-hire-300/45 focus:ring-2 focus:ring-hire-300/10"
+                onChange={(event) => setHandoffStatusFilter(event.target.value)}
+                value={handoffStatusFilter}
+              >
+                <option value="all">全部状态</option>
+                <option value="pending">待处理</option>
+                <option value="accepted">已接受</option>
+                <option value="rejected">已拒绝</option>
+                <option value="completed">已完成</option>
+              </select>
+              <input
+                className="h-9 rounded-md border border-white/10 bg-slate-950/45 px-2 text-xs text-slate-200 outline-none transition placeholder:text-slate-500 focus:border-hire-300/45 focus:ring-2 focus:ring-hire-300/10"
+                onChange={(event) => setHandoffTargetFilter(event.target.value)}
+                placeholder="target agent"
+                value={handoffTargetFilter}
+              />
+              <button
+                className="h-9 rounded-md border border-white/10 bg-white/[0.055] px-3 text-xs font-semibold text-slate-300 transition hover:border-hire-300/35 hover:text-hire-100"
+                onClick={() => void loadHandoffInbox()}
+                type="button"
+              >
+                应用
+              </button>
+            </div>
             <div className="mt-3 max-h-64 space-y-2 overflow-y-auto pr-1">
               {handoffInbox.length === 0 ? (
                 <p className="rounded-lg border border-dashed border-white/15 bg-white/[0.025] px-3 py-3 text-xs leading-5 text-slate-400">
@@ -1002,6 +1137,7 @@ export default function MetaAgentPage() {
                     <p className="mt-2 line-clamp-2 text-xs leading-5 text-slate-400">
                       {handoff.reason}
                     </p>
+                    {renderHandoffMetaSummary(handoff)}
                     <p className="mt-1 break-all text-[11px] text-slate-500">
                       task: {handoff.task_id}
                     </p>

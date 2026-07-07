@@ -300,7 +300,10 @@ async def test_api_global_handoff_list_filters(client: httpx.AsyncClient) -> Non
     assert handoff_b.status_code == 200, handoff_b.text
     handoff_a_id = handoff_a.json()["handoff_id"]
 
-    await client.post(f"/api/runtime/agent-handoffs/{handoff_a_id}/accept")
+    await client.post(
+        f"/api/runtime/agent-handoffs/{handoff_a_id}/accept",
+        json={"accepted_by": "queue-operator"},
+    )
 
     task_filter = await client.get(
         f"/api/runtime/agent-handoffs?task_id={task_a_id}&limit=20",
@@ -323,6 +326,19 @@ async def test_api_global_handoff_list_filters(client: httpx.AsyncClient) -> Non
     assert len(target_handoffs) == 1
     assert target_handoffs[0]["target_agent"] == "qa-agent"
 
+    source_filter = await client.get(
+        "/api/runtime/agent-handoffs?source_agent=a&limit=20",
+    )
+    assert source_filter.status_code == 200, source_filter.text
+    assert any(item["handoff_id"] == handoff_a_id for item in source_filter.json())
+    assert all(item["source_agent"] == "a" for item in source_filter.json())
+
+    created_after_filter = await client.get(
+        "/api/runtime/agent-handoffs?created_after=9999999999&limit=20",
+    )
+    assert created_after_filter.status_code == 200, created_after_filter.text
+    assert created_after_filter.json() == []
+
 
 @pytest.mark.asyncio
 async def test_api_handoff_status_transitions(client: httpx.AsyncClient) -> None:
@@ -343,17 +359,23 @@ async def test_api_handoff_status_transitions(client: httpx.AsyncClient) -> None
 
     accept_response = await client.post(
         f"/api/runtime/agent-handoffs/{handoff_id}/accept",
+        json={"accepted_by": "queue-operator"},
     )
     assert accept_response.status_code == 200
-    assert accept_response.json()["status"] == "accepted"
+    accepted = accept_response.json()
+    assert accepted["status"] == "accepted"
+    assert accepted["metadata"]["accepted_by"] == "queue-operator"
+    assert isinstance(accepted["metadata"]["accepted_at"], float)
 
     complete_response = await client.post(
         f"/api/runtime/agent-handoffs/{handoff_id}/complete",
-        json={"result": "done"},
+        json={"completed_by": "queue-operator", "result": "done"},
     )
     assert complete_response.status_code == 200
     completed = complete_response.json()
     assert completed["status"] == "completed"
+    assert completed["metadata"]["completed_by"] == "queue-operator"
+    assert isinstance(completed["metadata"]["completed_at"], float)
     assert completed["metadata"]["result"] == "done"
 
     runs_response = await client.get(
@@ -364,6 +386,8 @@ async def test_api_handoff_status_transitions(client: httpx.AsyncClient) -> None
     handoff_run = next(item for item in runs if item["source_id"] == handoff_id)
     assert handoff_run["status"] == "completed"
     assert handoff_run["metadata"]["handoff_status"] == "completed"
+    assert handoff_run["metadata"]["completed_by"] == "queue-operator"
+    assert handoff_run["metadata"]["result"] == "done"
 
     list_response = await client.get(
         f"/api/runtime/agent-handoffs?task_id={task_id}&status=completed",
@@ -395,6 +419,17 @@ async def test_api_handoff_invalid_transition(client: httpx.AsyncClient) -> None
         f"/api/runtime/agent-handoffs/{handoff_id}/complete",
     )
     assert complete_response.status_code == 400
+
+    reject_response = await client.post(
+        f"/api/runtime/agent-handoffs/{handoff_id}/reject",
+        json={"rejected_by": "queue-operator", "reason": "not mine"},
+    )
+    assert reject_response.status_code == 200
+    rejected = reject_response.json()
+    assert rejected["status"] == "rejected"
+    assert rejected["metadata"]["rejected_by"] == "queue-operator"
+    assert isinstance(rejected["metadata"]["rejected_at"], float)
+    assert rejected["metadata"]["reason"] == "not mine"
 
 
 @pytest.mark.asyncio

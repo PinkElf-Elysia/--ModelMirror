@@ -44,6 +44,7 @@ async def test_run_registry_create_and_get_run() -> None:
 async def test_run_registry_list_filters_and_limit() -> None:
     registry = RunRegistry()
     await registry.create_run("workflow", "A", status="completed")
+    await registry.create_run("workflow_agent", "Agent", status="completed")
     await registry.create_run("agent_task", "B", status="pending")
     await registry.create_run("agent_task", "C", status="completed")
 
@@ -52,7 +53,11 @@ async def test_run_registry_list_filters_and_limit() -> None:
     assert all(run.run_type == "agent_task" for run in agent_runs)
 
     completed_runs = await registry.list_runs(status="completed")
-    assert len(completed_runs) == 2
+    assert len(completed_runs) == 3
+
+    workflow_agent_runs = await registry.list_runs(run_type="workflow_agent")
+    assert len(workflow_agent_runs) == 1
+    assert workflow_agent_runs[0].title == "Agent"
 
     limited = await registry.list_runs(limit=1)
     assert len(limited) == 1
@@ -167,3 +172,49 @@ async def test_runtime_run_api_filters_parent_and_source(
     assert source_response.status_code == 200, source_response.text
     source_runs = source_response.json()
     assert [item["run_id"] for item in source_runs] == [child.run_id]
+
+
+@pytest.mark.asyncio
+async def test_handoff_status_updates_runtime_run_metadata(
+    client: httpx.AsyncClient,
+) -> None:
+    create_task = await client.post(
+        "/api/runtime/agent-tasks",
+        json={"title": "Run metadata handoff", "input": "hello"},
+    )
+    assert create_task.status_code == 200, create_task.text
+    task_id = create_task.json()["task_id"]
+    create_handoff = await client.post(
+        f"/api/runtime/agent-tasks/{task_id}/handoffs",
+        json={
+            "source_agent": "planner",
+            "target_agent": "reviewer",
+            "reason": "review handoff metadata",
+        },
+    )
+    assert create_handoff.status_code == 200, create_handoff.text
+    handoff_id = create_handoff.json()["handoff_id"]
+
+    accept = await client.post(
+        f"/api/runtime/agent-handoffs/{handoff_id}/accept",
+        json={"accepted_by": "queue-operator"},
+    )
+    assert accept.status_code == 200, accept.text
+    complete = await client.post(
+        f"/api/runtime/agent-handoffs/{handoff_id}/complete",
+        json={"completed_by": "queue-operator", "result": "review complete"},
+    )
+    assert complete.status_code == 200, complete.text
+
+    runs_response = await client.get(
+        f"/api/runtime/runs?source_id={handoff_id}&limit=20",
+    )
+    assert runs_response.status_code == 200, runs_response.text
+    runs = runs_response.json()
+    assert len(runs) == 1
+    run = runs[0]
+    assert run["status"] == "completed"
+    assert run["metadata"]["handoff_status"] == "completed"
+    assert run["metadata"]["accepted_by"] == "queue-operator"
+    assert run["metadata"]["completed_by"] == "queue-operator"
+    assert run["metadata"]["result"] == "review complete"

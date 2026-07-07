@@ -41,6 +41,8 @@ NODE_KIND_ALIASES = {
     "question_classifier": "question_classifier",
     "question-classifier": "question_classifier",
     "agent": "agent",
+    "workflow_agent": "workflow_agent",
+    "workflow-agent": "workflow_agent",
     "agent_task": "agent_task",
     "agent-task": "agent_task",
     "agent_handoff": "agent_handoff",
@@ -79,6 +81,7 @@ SUPPORTED_NODE_KINDS = {
     "human_intervention",
     "question_classifier",
     "agent",
+    "workflow_agent",
     "agent_task",
     "agent_handoff",
     "mcp_tool",
@@ -694,6 +697,65 @@ def validate_node_configuration(
                     )
                 )
 
+    if kind == "workflow_agent":
+        agent_name = str(data.get("agentName") or "").strip()
+        if not agent_name:
+            issues.append(
+                ValidationIssue(
+                    code="missing_workflow_agent_name",
+                    message="Workflow agent node needs data.agentName.",
+                    node_id=node.id,
+                )
+            )
+
+        model_id = str(data.get("modelId") or "").strip()
+        if not model_id:
+            issues.append(
+                ValidationIssue(
+                    code="missing_workflow_agent_model",
+                    message="Workflow agent node needs data.modelId.",
+                    node_id=node.id,
+                )
+            )
+
+        role_prompt = str(data.get("rolePrompt") or "").strip()
+        if not role_prompt:
+            issues.append(
+                ValidationIssue(
+                    code="missing_workflow_agent_role_prompt",
+                    message="Workflow agent node needs data.rolePrompt.",
+                    node_id=node.id,
+                )
+            )
+
+        task_input = str(data.get("taskInput") or "").strip()
+        if not task_input:
+            issues.append(
+                ValidationIssue(
+                    code="missing_workflow_agent_task_input",
+                    message="Workflow agent node needs data.taskInput.",
+                    node_id=node.id,
+                )
+            )
+
+        output_variable = str(data.get("outputVariable") or "").strip()
+        if not output_variable:
+            issues.append(
+                ValidationIssue(
+                    code="missing_workflow_agent_output_variable",
+                    message="Workflow agent node needs data.outputVariable.",
+                    node_id=node.id,
+                )
+            )
+        elif not is_variable_name(output_variable):
+            issues.append(
+                ValidationIssue(
+                    code="invalid_workflow_agent_output_variable",
+                    message="Workflow agent outputVariable must be an identifier.",
+                    node_id=node.id,
+                )
+            )
+
     if kind == "agent_task":
         task_title = str(data.get("taskTitle") or "").strip()
         if not task_title:
@@ -1148,6 +1210,7 @@ def collect_declared_variables(
             "human_intervention",
             "question_classifier",
             "agent",
+            "workflow_agent",
             "agent_task",
             "agent_handoff",
             "mcp_tool",
@@ -1373,6 +1436,22 @@ def validate_variable_references(
                         node_id=node.id,
                     )
                 )
+
+    if kind == "workflow_agent":
+        for field_name in ("rolePrompt", "taskInput"):
+            template = str(data.get(field_name) or "")
+            for variable in sorted(extract_template_variables(template)):
+                if variable not in available_variables:
+                    issues.append(
+                        ValidationIssue(
+                            code="missing_workflow_agent_template_variable",
+                            message=(
+                                f"Workflow agent {field_name} references undefined "
+                                f"variable '{variable}'."
+                            ),
+                            node_id=node.id,
+                        )
+                    )
 
     if kind == "agent_task":
         for field_name in ("taskTitle", "taskInput"):

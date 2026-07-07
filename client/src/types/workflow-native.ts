@@ -14,6 +14,7 @@ export type NativeNodeKind =
   | "human_intervention"
   | "question_classifier"
   | "agent"
+  | "workflow_agent"
   | "mcp_tool"
   | "time_tool"
   | "http_request"
