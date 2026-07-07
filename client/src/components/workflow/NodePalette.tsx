@@ -93,6 +93,12 @@ const paletteItems: PaletteItem[] = [
     description: "模型驱动的任务执行节点，支持工具循环和直接回答两种模式。",
   },
   {
+    kind: "workflow_agent",
+    icon: "🧭",
+    title: "工作流智能体",
+    description: "用角色提示词执行一个模型驱动的 Agent 步骤，并写入输出变量。",
+  },
+  {
     kind: "agent_task",
     icon: "▣",
     title: "智能体任务",

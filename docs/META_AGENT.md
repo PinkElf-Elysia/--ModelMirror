@@ -15,7 +15,7 @@
 - 后端生成接口：`POST /api/meta-agent/generate-workflow`。
 - 后端模块：`server/meta_agent/`。
 - 任务运行时：复用 `POST /api/runtime/agent-tasks`、`GET /api/runtime/agent-tasks`、`GET /api/runtime/agent-tasks/{task_id}`、`POST /api/runtime/agent-tasks/{task_id}/cancel`。
-- Handoff 观测：任务工作台会查询 `GET /api/runtime/agent-tasks/{task_id}/handoffs` 展示选中任务的移交记录，并通过 `GET /api/runtime/agent-handoffs?limit=20` 提供 Handoff Inbox Beta；pending 移交支持手动接受/拒绝，accepted 移交支持手动完成。
+- Handoff Inbox：任务工作台会查询 `GET /api/runtime/agent-tasks/{task_id}/handoffs` 展示选中任务的移交记录，并通过 `GET /api/runtime/agent-handoffs?status=&target_agent=&limit=20` 提供 Handoff Inbox Beta；pending 移交支持手动接受/拒绝，accepted 移交支持填写完成结果并提交。
 - 输出目标：生成 `WorkflowDefinition`，可导入经典自研画布并通过 `/api/workflow/run` 执行。
 - 校验路径：生成后的工作流会调用 `workflow_native.validate_workflow_graph` 做静态校验。
 
@@ -24,7 +24,7 @@
 - planner、schema 和 prompt 放在 `server/meta_agent/`，不要继续堆进 `server/main.py`。
 - 生成接口依赖模型网关；测试必须 mock `collect_chat_completion_text`，不能请求真实模型。
 - 前端负责提交目标、展示任务拆解、创建 AgentTask 记录、展示任务工作台和导入经典画布。
-- 当前只做任务可见、取消、handoff 观测和手动状态操作，不做队列分派、专家协作、自动执行或持久化调度。
+- 当前只做任务可见、取消、handoff 观测、筛选和人工处理状态记录，不做真实队列分派、专家协作、自动执行、登录用户权限或持久化调度。
 - Docker 镜像必须复制 `server/meta_agent/`，否则 `server/main.py` 导入会失败。
 
 ## 请求示例

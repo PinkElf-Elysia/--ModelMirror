@@ -239,6 +239,116 @@ async def test_workflow_agent_handoff_node_creates_runtime_handoff_and_runs(
     )
 
 
+@pytest.mark.asyncio
+async def test_workflow_agent_node_streams_output_and_registers_run(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, str | None] = {}
+
+    async def fake_stream_workflow_llm_text(
+        model_id: str,
+        prompt: str,
+        *,
+        system_prompt: str | None = None,
+    ):
+        captured["model_id"] = model_id
+        captured["prompt"] = prompt
+        captured["system_prompt"] = system_prompt
+        yield "agent "
+        yield "result"
+
+    monkeypatch.setattr(
+        "server.main.get_llm_gateway_config",
+        lambda: ("http://test-gateway.local/v1/chat/completions", "test-key"),
+    )
+    monkeypatch.setattr(
+        "server.main.stream_workflow_llm_text",
+        fake_stream_workflow_llm_text,
+    )
+
+    workflow = {
+        "id": "workflow-agent-workflow",
+        "title": "workflow agent workflow",
+        "nodes": [
+            {
+                "id": "input",
+                "type": "input",
+                "data": {"kind": "input", "variableName": "user_input"},
+            },
+            {
+                "id": "workflow_agent",
+                "type": "workflow_agent",
+                "data": {
+                    "kind": "workflow_agent",
+                    "title": "Execute workflow agent",
+                    "agentName": "research-agent",
+                    "modelId": "deepseek/deepseek-chat",
+                    "rolePrompt": "你是研究智能体，任务来自 {{user_input}}。",
+                    "taskInput": "请处理：{{user_input}}",
+                    "outputVariable": "agent_output",
+                },
+            },
+            {
+                "id": "output",
+                "type": "output",
+                "data": {"kind": "output", "outputVariable": "agent_output"},
+            },
+        ],
+        "edges": [
+            {"id": "e1", "source": "input", "target": "workflow_agent"},
+            {"id": "e2", "source": "workflow_agent", "target": "output"},
+        ],
+    }
+
+    response = await client.post(
+        "/api/workflow/run",
+        json={
+            "workflow": workflow,
+            "inputs": {"user_input": "summarize handoff queue"},
+        },
+    )
+    assert response.status_code == 200, response.text
+
+    events = _parse_sse_events(response.text)
+    workflow_meta = next(event for event in events if event.get("event") == "workflow_meta")
+    workflow_run_id = workflow_meta.get("run_id")
+    assert isinstance(workflow_run_id, str)
+
+    deltas = [
+        event
+        for event in events
+        if event.get("event") == "node_delta" and event.get("node_id") == "workflow_agent"
+    ]
+    assert [event.get("output") for event in deltas] == ["agent ", "result"]
+
+    agent_end = next(
+        event
+        for event in events
+        if event.get("event") == "node_end" and event.get("node_id") == "workflow_agent"
+    )
+    assert agent_end["output"] == "agent result"
+    assert agent_end["variables"]["agent_output"] == "agent result"
+
+    assert captured["model_id"] == "deepseek/deepseek-chat"
+    assert captured["prompt"] == "请处理：summarize handoff queue"
+    assert captured["system_prompt"] == "你是研究智能体，任务来自 summarize handoff queue。"
+
+    agent_runs_response = await client.get(
+        "/api/runtime/runs?run_type=workflow_agent&limit=50",
+    )
+    assert agent_runs_response.status_code == 200, agent_runs_response.text
+    agent_runs = agent_runs_response.json()
+    agent_run = next(
+        item for item in agent_runs if item["source_id"].endswith(":workflow_agent")
+    )
+    assert agent_run["parent_run_id"] == workflow_run_id
+    assert agent_run["status"] == "completed"
+    assert agent_run["metadata"]["agent_name"] == "research-agent"
+    assert agent_run["metadata"]["model_id"] == "deepseek/deepseek-chat"
+    assert agent_run["metadata"]["output_variable"] == "agent_output"
+
+
 def _parse_sse_events(sse_text: str) -> list[dict]:
     events: list[dict] = []
     for line in sse_text.splitlines():

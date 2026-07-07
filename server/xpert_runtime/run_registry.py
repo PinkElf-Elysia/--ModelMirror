@@ -6,7 +6,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-RuntimeRunType = Literal["workflow", "agent_task", "agent_handoff"]
+RuntimeRunType = Literal["workflow", "workflow_agent", "agent_task", "agent_handoff"]
 RuntimeRunStatus = Literal["pending", "running", "completed", "failed", "cancelled"]
 
 
@@ -31,7 +31,7 @@ class RuntimeRun:
 
 
 class RunRegistry:
-    """Small in-memory RunRegistry for workflow, AgentTask, and Handoff runs."""
+    """Small in-memory RunRegistry for workflow, agent, task, and handoff runs."""
 
     def __init__(self) -> None:
         self._lock = asyncio.Lock()

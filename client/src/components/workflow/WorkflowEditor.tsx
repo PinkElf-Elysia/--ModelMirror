@@ -276,6 +276,19 @@ function createNodeData(
     };
   }
 
+  if (kind === "workflow_agent") {
+    return {
+      kind,
+      title: "工作流智能体",
+      description: "模型驱动的单步智能体执行节点。",
+      agentName: "workflow-agent",
+      modelId: "deepseek/deepseek-chat",
+      rolePrompt: "你是负责执行当前工作流步骤的智能体，请直接输出结果。",
+      taskInput: "{{user_input}}",
+      outputVariable: "agent_output",
+    };
+  }
+
   if (kind === "agent_task") {
     return {
       kind,
@@ -1163,6 +1176,62 @@ function NodeConfig({ node, onChange }: NodeConfigProps) {
               onChange={(event) => update({ promptSuffix: event.target.value })}
               placeholder="可加入输出格式、语气或额外约束。"
               value={data.promptSuffix ?? ""}
+            />
+          </Field>
+          <Field label="输出变量">
+            <input
+              className={textInputClass()}
+              onChange={(event) => update({ outputVariable: event.target.value })}
+              value={data.outputVariable ?? ""}
+            />
+          </Field>
+        </>
+      ) : null}
+
+      {data.kind === "workflow_agent" ? (
+        <>
+          <div className="rounded-lg border border-cyan-300/25 bg-cyan-300/10 px-3 py-2 text-xs leading-5 text-cyan-50">
+            该节点会以角色提示词调用模型执行一个工作流步骤，并将结果写入输出变量；当前不接工具和真实多智能体调度。
+          </div>
+          <Field label="智能体名称">
+            <input
+              className={textInputClass()}
+              onChange={(event) => update({ agentName: event.target.value })}
+              value={data.agentName ?? ""}
+            />
+          </Field>
+          <Field label="调用模型">
+            <select
+              className={textInputClass()}
+              onChange={(event) => update({ modelId: event.target.value })}
+              value={data.modelId ?? ""}
+            >
+              <option className="bg-slate-950" value="">
+                请选择模型
+              </option>
+              {models.map((model) => (
+                <option
+                  className="bg-slate-950 text-white"
+                  key={model.id}
+                  value={model.id}
+                >
+                  {model.name}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <Field label="角色提示词（支持 {{变量}}）">
+            <textarea
+              className={`${textInputClass()} min-h-32 resize-none leading-6`}
+              onChange={(event) => update({ rolePrompt: event.target.value })}
+              value={data.rolePrompt ?? ""}
+            />
+          </Field>
+          <Field label="任务输入（支持 {{变量}}）">
+            <textarea
+              className={`${textInputClass()} min-h-32 resize-none leading-6`}
+              onChange={(event) => update({ taskInput: event.target.value })}
+              value={data.taskInput ?? ""}
             />
           </Field>
           <Field label="输出变量">

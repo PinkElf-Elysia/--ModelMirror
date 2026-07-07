@@ -1,12 +1,16 @@
 # workflow-native 自研工作流设计
 
+> 2026-07-06 状态补充：classic workflow 新增 `workflow_agent` 节点。该节点使用 `rolePrompt` 作为该节点 system prompt、`taskInput` 作为用户输入调用模型，流式输出结果并写入 `outputVariable`，同时登记 `workflow_agent` 子 run。当前是单步模型智能体执行，不接 MCP 工具、Handoff 自动调度或真实多 Agent 协作。
+
+> 2026-07-06 状态补充：Handoff Queue 进入人工处理闭环。`accept/reject/complete` 会记录处理者、处理时间和结果/原因摘要，并同步到 `agent_handoff` run metadata；`WorkflowRun` 子 run 摘要会展示 handler/result。当前不做自动调度、目标 Agent 执行、持久化队列或权限系统。
+
 > 2026-07-06 状态补充：Handoff 观测前端进入最小闭环。`GET /api/runtime/runs` 支持按 `parent_run_id` / `source_id` 查询，`WorkflowRun` 的“运行观测”可展示 workflow 下的 `agent_task` 与 `agent_handoff` 子 run；新增 `GET /api/runtime/agent-handoffs?task_id=&status=&target_agent=&limit=` 供 MetaAgent Handoff Inbox 查询。当前只做观测和手动状态操作，不做真实调度、队列或持久化。
 
 > 2026-07-05 状态补充：classic workflow 已接入 RunRegistry 最小可观测闭环，并恢复 `/workflow` 画布的节点库浮层与配置/运行 tabs 布局。
 
 ## 2026-07-05 增量：RunRegistry 与工作流运行观测
 
-Classic workflow 每次运行会登记一条 `workflow` run，并在 `workflow_meta` / `workflow_end` SSE 中携带 `run_id`。`agent_task` 节点创建 AgentTask 时同步登记 `agent_task` run；`agent_handoff` 节点创建 Handoff 时同步登记 `agent_handoff` run。三类 run 通过 `parent_run_id` 与 metadata 互相关联，保留现有 workflow `task_id`、AgentTask `task_id` 与 Handoff `handoff_id` 协议不变。
+Classic workflow 每次运行会登记一条 `workflow` run，并在 `workflow_meta` / `workflow_end` SSE 中携带 `run_id`。`workflow_agent` 节点执行模型智能体步骤时同步登记 `workflow_agent` run；`agent_task` 节点创建 AgentTask 时同步登记 `agent_task` run；`agent_handoff` 节点创建 Handoff 时同步登记 `agent_handoff` run。四类 run 通过 `parent_run_id` 与 metadata 互相关联，保留现有 workflow `task_id`、AgentTask `task_id` 与 Handoff `handoff_id` 协议不变。
 
 新增 Runtime Run API 用于最小观测：
 
@@ -472,6 +476,8 @@ Agent Task Runtime 包含三层：
 后端已开放最小 API：`POST /api/runtime/agent-tasks` 创建任务，`GET /api/runtime/agent-tasks/{task_id}` 查询任务，`POST /api/runtime/agent-tasks/{task_id}/cancel` 取消任务，`GET /api/runtime/agent-tasks` 列出任务。Handoff 最小闭环也已开放：`POST /api/runtime/agent-tasks/{task_id}/handoffs` 创建移交，`GET /api/runtime/agent-tasks/{task_id}/handoffs` 查询任务下的移交记录，`POST /api/runtime/agent-handoffs/{handoff_id}/accept|reject|complete` 更新状态。状态转移限定为 `pending -> accepted/rejected` 与 `accepted -> completed`，非法转移返回 400；每次创建或状态变更会写入 `agent.handoff.created/accepted/rejected/completed` runtime events。当前不做真实多 Agent 编排、不接数据库、不接 Redis/Celery 队列；后续将继续扩展 workflow handoff 节点、handoff queue、agent selection、持久化与前端任务面板。
 
 classic workflow 已新增 `agent_task` 节点，作为 Xpert Agent/Handoff 对齐的第一步闭环。前端可从节点调色板拖入“智能体任务”，配置 `taskTitle`、`taskInput`、`assignedAgent` 与 `outputVariable`；运行时会渲染 `{{变量}}` 模板，调用 `AgentTaskStore.create_task(...)` 创建一条 AgentTask，并将新任务的 `task_id` 写入 `outputVariable`。该节点当前只负责创建任务和输出 ID，不做真实队列分派、专家协作或任务执行；完整任务详情继续通过现有 Agent Task API 查询。
+
+classic workflow 已新增 `workflow_agent` 节点，作为 Xpert Workflow Agent 的最小执行闭环。前端可从节点调色板拖入“工作流智能体”，配置 `agentName`、`modelId`、`rolePrompt`、`taskInput` 与 `outputVariable`；运行时会先渲染 `{{变量}}`，再以 `rolePrompt` 作为该节点 system prompt、`taskInput` 作为用户输入调用现有工作流 LLM 流式函数，最终把模型输出写入 `outputVariable`。该节点会登记 `workflow_agent` 子 run，便于运行观测查看；当前不接 MCP Toolset、不做 Handoff 自动调度、不实现真实多 Agent 协作。
 
 ## 2026-06-17 增量：Agent 节点
 

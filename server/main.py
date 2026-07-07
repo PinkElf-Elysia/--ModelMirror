@@ -418,6 +418,7 @@ WorkflowNodeType = Literal[
     "human_intervention",
     "question_classifier",
     "agent",
+    "workflow_agent",
     "agent_task",
     "agent_handoff",
     "mcp_tool",
@@ -1227,6 +1228,7 @@ def workflow_node_kind(node: WorkflowNodePayload) -> WorkflowNodeType:
         "human_intervention",
         "question_classifier",
         "agent",
+        "workflow_agent",
         "agent_task",
         "agent_handoff",
         "mcp_tool",
@@ -1788,7 +1790,7 @@ async def generate_meta_agent_workflow(
 async def run_workflow(payload: WorkflowRunRequest, request: Request):
     requires_model = any(
         (node.data.get("kind") if isinstance(node.data.get("kind"), str) else node.type)
-        == "llm"
+        in {"llm", "workflow_agent"}
         for node in payload.workflow.nodes
     )
     if requires_model and not get_llm_gateway_config()[0]:
@@ -2973,6 +2975,99 @@ async def run_workflow(payload: WorkflowRunRequest, request: Request):
                             }
                         )
 
+                elif kind == "workflow_agent":
+                    output_variable = str(
+                        node.data.get("outputVariable") or "agent_output"
+                    ).strip() or "agent_output"
+                    workflow_agent_run = None
+                    try:
+                        agent_name = str(
+                            node.data.get("agentName") or "workflow-agent"
+                        ).strip() or "workflow-agent"
+                        model_id = str(
+                            node.data.get("modelId") or TEXT_FALLBACK_MODEL
+                        ).strip() or TEXT_FALLBACK_MODEL
+                        role_prompt = render_workflow_template(
+                            str(node.data.get("rolePrompt") or ""),
+                            variables,
+                        ).strip()
+                        task_input = render_workflow_template(
+                            str(node.data.get("taskInput") or ""),
+                            variables,
+                        ).strip()
+                        if not role_prompt:
+                            raise ValueError("workflow_agent 缺少角色提示词。")
+                        if not task_input:
+                            raise ValueError("workflow_agent 缺少任务输入。")
+
+                        workflow_agent_run = await run_registry.create_run(
+                            "workflow_agent",
+                            agent_name,
+                            status="running",
+                            source_id=f"{task_id}:{node.id}",
+                            parent_run_id=workflow_run.run_id,
+                            metadata={
+                                "workflow_id": payload.workflow.id,
+                                "workflow_title": payload.workflow.title,
+                                "workflow_task_id": task_id,
+                                "node_id": node.id,
+                                "node_title": title,
+                                "agent_name": agent_name,
+                                "model_id": model_id,
+                                "output_variable": output_variable,
+                            },
+                        )
+
+                        async for delta in stream_workflow_llm_text(
+                            model_id,
+                            task_input,
+                            system_prompt=role_prompt,
+                        ):
+                            output += delta
+                            yield sse_payload(
+                                {
+                                    "event": "node_delta",
+                                    "node_id": node.id,
+                                    "node_title": title,
+                                    "node_type": kind,
+                                    "output": delta,
+                                    "variable": output_variable,
+                                    "run_id": workflow_agent_run.run_id,
+                                }
+                            )
+                        variables[output_variable] = output
+                        await run_registry.update_run(
+                            workflow_agent_run.run_id,
+                            status="completed",
+                            metadata={
+                                "output_length": len(output or ""),
+                                "variables_count": len(variables),
+                            },
+                        )
+                    except Exception as exc:
+                        logger.warning("Workflow workflow_agent node failed: %s", exc)
+                        output = ""
+                        variables[output_variable] = output
+                        if workflow_agent_run is not None:
+                            try:
+                                await run_registry.update_run(
+                                    workflow_agent_run.run_id,
+                                    status="failed",
+                                    error=str(exc),
+                                )
+                            except Exception:
+                                logger.warning(
+                                    "Failed to update workflow_agent run status",
+                                    exc_info=True,
+                                )
+                        yield sse_payload(
+                            {
+                                "event": "error",
+                                "node_id": node.id,
+                                "message": str(exc),
+                            }
+                        )
+
                 elif kind == "agent_task":
                     output_variable = str(
                         node.data.get("outputVariable") or "agent_task_id"
@@ -3658,7 +3753,7 @@ async def list_runtime_runs(
     source_id: str | None = None,
     limit: int = 50,
 ):
-    valid_run_types = {"workflow", "agent_task", "agent_handoff"}
+    valid_run_types = {"workflow", "workflow_agent", "agent_task", "agent_handoff"}
     valid_statuses = {"pending", "running", "completed", "failed", "cancelled"}
     if run_type is not None and run_type not in valid_run_types:
         raise HTTPException(status_code=400, detail="Invalid runtime run type.")
@@ -4268,7 +4363,9 @@ async def list_agent_tasks(status: str | None = None, limit: int = 50):
 async def list_agent_handoffs_global(
     task_id: str | None = None,
     status: str | None = None,
+    source_agent: str | None = None,
     target_agent: str | None = None,
+    created_after: float | None = None,
     limit: int = 50,
 ):
     valid_statuses = {"pending", "accepted", "rejected", "completed"}
@@ -4277,11 +4374,23 @@ async def list_agent_handoffs_global(
     handoffs = await agent_task_store.list_handoffs(task_id=task_id)
     if status is not None:
         handoffs = [handoff for handoff in handoffs if handoff.status == status]
+    if source_agent is not None:
+        handoffs = [
+            handoff
+            for handoff in handoffs
+            if handoff.source_agent == source_agent
+        ]
     if target_agent is not None:
         handoffs = [
             handoff
             for handoff in handoffs
             if handoff.target_agent == target_agent
+        ]
+    if created_after is not None:
+        handoffs = [
+            handoff
+            for handoff in handoffs
+            if handoff.created_at >= created_after
         ]
     capped_limit = max(1, min(limit, 200))
     return [agent_handoff_to_payload(handoff) for handoff in handoffs[:capped_limit]]
@@ -4377,12 +4486,46 @@ async def update_agent_handoff_api(
     if metadata is not None and not isinstance(metadata, dict):
         raise HTTPException(status_code=400, detail="Handoff metadata must be an object.")
     merged_metadata = dict(metadata or {})
+    operator = str(
+        (payload or {}).get("operator")
+        or (payload or {}).get("handled_by")
+        or (payload or {}).get("handledBy")
+        or ""
+    ).strip()
     reason = (payload or {}).get("reason")
     if reason is not None:
         merged_metadata["reason"] = str(reason)
     result = (payload or {}).get("result")
     if result is not None:
         merged_metadata["result"] = str(result)
+    now = time.time()
+    if status == "accepted":
+        accepted_by = str(
+            (payload or {}).get("accepted_by")
+            or (payload or {}).get("acceptedBy")
+            or operator
+            or "meta-agent-operator"
+        ).strip()
+        merged_metadata["accepted_by"] = accepted_by or "meta-agent-operator"
+        merged_metadata["accepted_at"] = now
+    elif status == "rejected":
+        rejected_by = str(
+            (payload or {}).get("rejected_by")
+            or (payload or {}).get("rejectedBy")
+            or operator
+            or "meta-agent-operator"
+        ).strip()
+        merged_metadata["rejected_by"] = rejected_by or "meta-agent-operator"
+        merged_metadata["rejected_at"] = now
+    elif status == "completed":
+        completed_by = str(
+            (payload or {}).get("completed_by")
+            or (payload or {}).get("completedBy")
+            or operator
+            or "meta-agent-operator"
+        ).strip()
+        merged_metadata["completed_by"] = completed_by or "meta-agent-operator"
+        merged_metadata["completed_at"] = now
     try:
         handoff = await agent_task_store.update_handoff_status(
             handoff_id,

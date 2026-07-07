@@ -93,6 +93,13 @@ const nodeMeta = {
     bg: "bg-violet-400/10",
     text: "text-violet-100",
   },
+  workflow_agent: {
+    icon: "🧭",
+    label: "工作流智能体",
+    border: "border-cyan-300/40",
+    bg: "bg-cyan-300/10",
+    text: "text-cyan-100",
+  },
   agent_task: {
     icon: "▣",
     label: "Agent Task",
@@ -190,6 +197,9 @@ function outputName(data: WorkflowNode["data"]) {
   }
   if (data.kind === "agent") {
     return `🤖 ${data.agentMode ?? "tool_first"} → ${data.outputVariable ?? "agent_output"}`;
+  }
+  if (data.kind === "workflow_agent") {
+    return `${data.agentName ?? "workflow-agent"} · ${data.modelId ?? "model"} → ${data.outputVariable ?? "agent_output"}`;
   }
   if (data.kind === "agent_task") {
     return `${data.assignedAgent ?? "workflow-planner"} → ${data.outputVariable ?? "agent_task_id"}`;

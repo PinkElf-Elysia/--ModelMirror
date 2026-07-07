@@ -676,6 +676,16 @@ export default function WorkflowRun({
                               run.metadata,
                               "target_agent",
                             );
+                            const acceptedBy = runMetadataText(
+                              run.metadata,
+                              "accepted_by",
+                            );
+                            const completedBy = runMetadataText(
+                              run.metadata,
+                              "completed_by",
+                            );
+                            const result = runMetadataText(run.metadata, "result");
+                            const handler = completedBy || acceptedBy;
                             return (
                               <div
                                 className="rounded-md bg-slate-950/35 px-2 py-1.5"
@@ -695,6 +705,13 @@ export default function WorkflowRun({
                                   {agentTaskId ? ` · task=${agentTaskId}` : ""}
                                   {handoffId ? ` · handoff=${handoffId}` : ""}
                                 </p>
+                                {handler || result ? (
+                                  <p className="mt-1 truncate text-[11px] text-slate-500">
+                                    {handler ? `handler=${handler}` : ""}
+                                    {handler && result ? " 路 " : ""}
+                                    {result ? `result=${result}` : ""}
+                                  </p>
+                                ) : null}
                               </div>
                             );
                           })}

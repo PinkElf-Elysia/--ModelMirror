@@ -1088,6 +1088,121 @@ async def test_agent_task_output_variable_is_available_downstream(
 
 
 @pytest.mark.asyncio
+async def test_validate_workflow_agent_node_ok(client: httpx.AsyncClient) -> None:
+    workflow = linear_workflow()
+    workflow["nodes"][1] = {
+        "id": "workflow_agent",
+        "type": "workflow_agent",
+        "data": {
+            "kind": "workflow_agent",
+            "agentName": "research-agent",
+            "modelId": "deepseek/deepseek-chat",
+            "rolePrompt": "你是研究智能体，输入来自 {{user_input}}。",
+            "taskInput": "请处理：{{user_input}}",
+            "outputVariable": "agent_output",
+        },
+    }
+    workflow["nodes"][2]["data"]["outputVariable"] = "agent_output"
+    workflow["edges"] = [
+        {"id": "e1", "source": "input", "target": "workflow_agent"},
+        {"id": "e2", "source": "workflow_agent", "target": "output"},
+    ]
+
+    data = await validate(client, workflow)
+
+    assert data["valid"] is True
+    assert data["issues"] == []
+
+
+@pytest.mark.asyncio
+async def test_workflow_agent_missing_required_fields(
+    client: httpx.AsyncClient,
+) -> None:
+    workflow = linear_workflow()
+    workflow["nodes"][1] = {
+        "id": "workflow_agent",
+        "type": "workflow_agent",
+        "data": {
+            "kind": "workflow_agent",
+            "agentName": "research-agent",
+            "modelId": "deepseek/deepseek-chat",
+            "rolePrompt": "你是研究智能体。",
+        },
+    }
+    workflow["nodes"][2]["data"]["outputVariable"] = "user_input"
+    workflow["edges"] = [
+        {"id": "e1", "source": "input", "target": "workflow_agent"},
+        {"id": "e2", "source": "workflow_agent", "target": "output"},
+    ]
+
+    data = await validate(client, workflow)
+
+    codes = issue_codes(data)
+    assert data["valid"] is False
+    assert "missing_workflow_agent_task_input" in codes
+    assert "missing_workflow_agent_output_variable" in codes
+
+
+@pytest.mark.asyncio
+async def test_workflow_agent_template_variable_must_be_declared(
+    client: httpx.AsyncClient,
+) -> None:
+    workflow = linear_workflow()
+    workflow["nodes"][1] = {
+        "id": "workflow_agent",
+        "type": "workflow_agent",
+        "data": {
+            "kind": "workflow_agent",
+            "agentName": "research-agent",
+            "modelId": "deepseek/deepseek-chat",
+            "rolePrompt": "你是研究智能体，引用 {{missing_role}}。",
+            "taskInput": "请处理：{{missing_task}}",
+            "outputVariable": "agent_output",
+        },
+    }
+    workflow["nodes"][2]["data"]["outputVariable"] = "agent_output"
+    workflow["edges"] = [
+        {"id": "e1", "source": "input", "target": "workflow_agent"},
+        {"id": "e2", "source": "workflow_agent", "target": "output"},
+    ]
+
+    data = await validate(client, workflow)
+
+    assert data["valid"] is False
+    codes = issue_codes(data)
+    assert "missing_workflow_agent_template_variable" in codes
+
+
+@pytest.mark.asyncio
+async def test_workflow_agent_output_variable_is_available_downstream(
+    client: httpx.AsyncClient,
+) -> None:
+    workflow = linear_workflow()
+    workflow["nodes"][1] = {
+        "id": "workflow_agent",
+        "type": "workflow_agent",
+        "data": {
+            "kind": "workflow_agent",
+            "agentName": "research-agent",
+            "modelId": "deepseek/deepseek-chat",
+            "rolePrompt": "你是研究智能体。",
+            "taskInput": "{{user_input}}",
+            "outputVariable": "agent_output",
+        },
+    }
+    workflow["nodes"][2]["data"]["outputVariable"] = "agent_output"
+    workflow["edges"] = [
+        {"id": "e1", "source": "input", "target": "workflow_agent"},
+        {"id": "e2", "source": "workflow_agent", "target": "output"},
+    ]
+
+    data = await validate(client, workflow)
+
+    assert data["valid"] is True
+    assert "missing_output_variable_reference" not in issue_codes(data)
+
+
+@pytest.mark.asyncio
 async def test_validate_agent_handoff_node_ok(client: httpx.AsyncClient) -> None:
     workflow = linear_workflow()
     workflow["nodes"] = [
