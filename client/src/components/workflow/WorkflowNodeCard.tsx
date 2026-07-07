@@ -199,7 +199,7 @@ function outputName(data: WorkflowNode["data"]) {
     return `🤖 ${data.agentMode ?? "tool_first"} → ${data.outputVariable ?? "agent_output"}`;
   }
   if (data.kind === "workflow_agent") {
-    return `${data.agentName ?? "workflow-agent"} · ${data.modelId ?? "model"} → ${data.outputVariable ?? "agent_output"}`;
+    return `${data.agentName ?? "workflow-agent"} · ${data.toolMode ?? "none"} → ${data.outputVariable ?? "agent_output"}`;
   }
   if (data.kind === "agent_task") {
     return `${data.assignedAgent ?? "workflow-planner"} → ${data.outputVariable ?? "agent_task_id"}`;

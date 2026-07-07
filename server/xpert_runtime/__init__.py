@@ -29,6 +29,7 @@ from .models import (
 from .run_registry import (
     RunRegistry,
     RuntimeRun,
+    RuntimeRunCheckpoint,
     RuntimeRunStatus,
     RuntimeRunType,
 )
@@ -70,6 +71,7 @@ __all__ = [
     "RuntimeMiddlewareNode",
     "RuntimeMiddlewareRegistry",
     "RuntimeRun",
+    "RuntimeRunCheckpoint",
     "RuntimeRunStatus",
     "RuntimeRunType",
     "RuntimeTask",

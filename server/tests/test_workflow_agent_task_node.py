@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import httpx
 import pytest
 import pytest_asyncio
 
+import server.main as main_module
 from server.main import app
+from server.xpert_runtime import RuntimeTool, RuntimeToolResult
 
 
 @pytest_asyncio.fixture
@@ -238,6 +241,24 @@ async def test_workflow_agent_handoff_node_creates_runtime_handoff_and_runs(
         for item in child_runs
     )
 
+    task_checkpoints_response = await client.get(
+        f"/api/runtime/runs/{task_run['run_id']}/checkpoints",
+    )
+    assert task_checkpoints_response.status_code == 200
+    assert any(
+        item["event_type"] == "agent_task.created"
+        for item in task_checkpoints_response.json()
+    )
+
+    handoff_checkpoints_response = await client.get(
+        f"/api/runtime/runs/{handoff_run['run_id']}/checkpoints",
+    )
+    assert handoff_checkpoints_response.status_code == 200
+    assert any(
+        item["event_type"] == "agent_handoff.created"
+        for item in handoff_checkpoints_response.json()
+    )
+
 
 @pytest.mark.asyncio
 async def test_workflow_agent_node_streams_output_and_registers_run(
@@ -348,6 +369,326 @@ async def test_workflow_agent_node_streams_output_and_registers_run(
     assert agent_run["metadata"]["model_id"] == "deepseek/deepseek-chat"
     assert agent_run["metadata"]["output_variable"] == "agent_output"
 
+    workflow_checkpoints_response = await client.get(
+        f"/api/runtime/runs/{workflow_run_id}/checkpoints",
+    )
+    assert workflow_checkpoints_response.status_code == 200
+    workflow_checkpoint_types = [
+        item["event_type"] for item in workflow_checkpoints_response.json()
+    ]
+    assert "workflow.started" in workflow_checkpoint_types
+    assert "workflow.completed" in workflow_checkpoint_types
+
+    agent_checkpoints_response = await client.get(
+        f"/api/runtime/runs/{agent_run['run_id']}/checkpoints",
+    )
+    assert agent_checkpoints_response.status_code == 200
+    agent_checkpoint_types = [
+        item["event_type"] for item in agent_checkpoints_response.json()
+    ]
+    assert "workflow_agent.started" in agent_checkpoint_types
+    assert "workflow_agent.model_call" in agent_checkpoint_types
+    assert "workflow_agent.completed" in agent_checkpoint_types
+
+
+@pytest.mark.asyncio
+async def test_workflow_agent_mcp_tool_mode_uses_runtime_toolset(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider, restore_provider = _install_fake_tool_provider()
+    responses = iter(
+        [
+            '{"tool":"fetch","arguments":{"query":"handoff queue"}}',
+            '{"answer":"final from tool"}',
+        ]
+    )
+
+    async def fake_collect_chat_completion_text(*args, **kwargs):
+        return next(responses)
+
+    monkeypatch.setattr(
+        main_module,
+        "get_llm_gateway_config",
+        lambda: ("http://test-gateway.local/v1/chat/completions", "test-key"),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "collect_chat_completion_text",
+        fake_collect_chat_completion_text,
+    )
+    monkeypatch.setattr(main_module, "workflow_mcp_provider", provider)
+    try:
+        workflow = {
+            "id": "workflow-agent-tool-workflow",
+            "title": "workflow agent tool workflow",
+            "nodes": [
+                {
+                    "id": "input",
+                    "type": "input",
+                    "data": {"kind": "input", "variableName": "user_input"},
+                },
+                {
+                    "id": "workflow_agent",
+                    "type": "workflow_agent",
+                    "data": {
+                        "kind": "workflow_agent",
+                        "agentName": "tool-agent",
+                        "modelId": "deepseek/deepseek-chat",
+                        "rolePrompt": "你是工具智能体。",
+                        "taskInput": "请处理：{{user_input}}",
+                        "toolMode": "mcp_tools",
+                        "toolNames": "fetch",
+                        "maxIterations": "3",
+                        "outputVariable": "agent_output",
+                    },
+                },
+                {
+                    "id": "output",
+                    "type": "output",
+                    "data": {"kind": "output", "outputVariable": "agent_output"},
+                },
+            ],
+            "edges": [
+                {"id": "e1", "source": "input", "target": "workflow_agent"},
+                {"id": "e2", "source": "workflow_agent", "target": "output"},
+            ],
+        }
+
+        response = await client.post(
+            "/api/workflow/run",
+            json={
+                "workflow": workflow,
+                "inputs": {"user_input": "handoff queue"},
+            },
+        )
+    finally:
+        restore_provider()
+
+    assert response.status_code == 200, response.text
+    events = _parse_sse_events(response.text)
+    tool_deltas = [
+        event
+        for event in events
+        if event.get("event") == "node_delta"
+        and event.get("node_id") == "workflow_agent"
+        and "调用工具 fetch" in str(event.get("output"))
+    ]
+    assert tool_deltas
+
+    agent_end = next(
+        event
+        for event in events
+        if event.get("event") == "node_end" and event.get("node_id") == "workflow_agent"
+    )
+    assert agent_end["output"] == "final from tool"
+    assert agent_end["variables"]["agent_output"] == "final from tool"
+    assert len(provider.calls) == 1
+    assert provider.calls[0].tool_name == "fetch"
+    assert provider.calls[0].arguments == {"query": "handoff queue"}
+
+    workflow_meta = next(event for event in events if event.get("event") == "workflow_meta")
+    workflow_run_id = workflow_meta["run_id"]
+    child_runs_response = await client.get(
+        f"/api/runtime/runs?parent_run_id={workflow_run_id}&limit=20",
+    )
+    assert child_runs_response.status_code == 200, child_runs_response.text
+    workflow_agent_run = next(
+        item for item in child_runs_response.json() if item["run_type"] == "workflow_agent"
+    )
+    checkpoints_response = await client.get(
+        f"/api/runtime/runs/{workflow_agent_run['run_id']}/checkpoints",
+    )
+    assert checkpoints_response.status_code == 200, checkpoints_response.text
+    checkpoint_types = [item["event_type"] for item in checkpoints_response.json()]
+    assert "workflow_agent.tool_call" in checkpoint_types
+    assert "workflow_agent.model_answer" in checkpoint_types
+
+
+@pytest.mark.asyncio
+async def test_workflow_agent_tool_policy_denial_does_not_crash_workflow(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider, restore_provider = _install_fake_tool_provider()
+
+    async def fake_collect_chat_completion_text(*args, **kwargs):
+        return '{"tool":"fetch","arguments":{"query":"blocked"}}'
+
+    monkeypatch.setattr(
+        main_module,
+        "get_llm_gateway_config",
+        lambda: ("http://test-gateway.local/v1/chat/completions", "test-key"),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "collect_chat_completion_text",
+        fake_collect_chat_completion_text,
+    )
+    monkeypatch.setattr(main_module, "workflow_mcp_provider", provider)
+    try:
+        workflow = {
+            "id": "workflow-agent-policy-workflow",
+            "title": "workflow agent policy workflow",
+            "nodes": [
+                {
+                    "id": "input",
+                    "type": "input",
+                    "data": {"kind": "input", "variableName": "user_input"},
+                },
+                {
+                    "id": "policy",
+                    "type": "runtime_middleware",
+                    "data": {
+                        "kind": "runtime_middleware",
+                        "runtimeMiddlewareId": "tool_policy",
+                        "runtimeMiddlewareKind": "runtime_middleware.tool_policy",
+                        "runtimeMiddlewareConfig": {
+                            "denied_tools": "fetch",
+                            "allow_by_default": True,
+                        },
+                    },
+                },
+                {
+                    "id": "workflow_agent",
+                    "type": "workflow_agent",
+                    "data": {
+                        "kind": "workflow_agent",
+                        "agentName": "tool-agent",
+                        "modelId": "deepseek/deepseek-chat",
+                        "rolePrompt": "你是工具智能体。",
+                        "taskInput": "请处理：{{user_input}}",
+                        "toolMode": "mcp_tools",
+                        "toolNames": "fetch",
+                        "maxIterations": "2",
+                        "outputVariable": "agent_output",
+                    },
+                },
+                {
+                    "id": "output",
+                    "type": "output",
+                    "data": {"kind": "output", "outputVariable": "agent_output"},
+                },
+            ],
+            "edges": [
+                {"id": "e1", "source": "input", "target": "policy"},
+                {"id": "e2", "source": "policy", "target": "workflow_agent"},
+                {"id": "e3", "source": "workflow_agent", "target": "output"},
+            ],
+        }
+
+        response = await client.post(
+            "/api/workflow/run",
+            json={
+                "workflow": workflow,
+                "inputs": {"user_input": "blocked"},
+            },
+        )
+    finally:
+        restore_provider()
+
+    assert response.status_code == 200, response.text
+    events = _parse_sse_events(response.text)
+    errors = [
+        event
+        for event in events
+        if event.get("event") == "error" and event.get("node_id") == "workflow_agent"
+    ]
+    assert errors
+    assert "denied" in str(errors[0].get("message")).lower()
+    agent_end = next(
+        event
+        for event in events
+        if event.get("event") == "node_end" and event.get("node_id") == "workflow_agent"
+    )
+    assert agent_end["output"] == ""
+    assert provider.calls == []
+
+
+@pytest.mark.asyncio
+async def test_legacy_agent_tool_first_uses_runtime_toolset(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider, restore_provider = _install_fake_tool_provider()
+    responses = iter(
+        [
+            '{"tool":"fetch","arguments":{"query":"legacy agent"}}',
+            '{"answer":"legacy final"}',
+        ]
+    )
+
+    async def fake_collect_chat_completion_text(*args, **kwargs):
+        return next(responses)
+
+    monkeypatch.setattr(
+        main_module,
+        "get_llm_gateway_config",
+        lambda: ("http://test-gateway.local/v1/chat/completions", "test-key"),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "collect_chat_completion_text",
+        fake_collect_chat_completion_text,
+    )
+    monkeypatch.setattr(main_module, "workflow_mcp_provider", provider)
+    try:
+        workflow = {
+            "id": "legacy-agent-tool-workflow",
+            "title": "legacy agent tool workflow",
+            "nodes": [
+                {
+                    "id": "input",
+                    "type": "input",
+                    "data": {"kind": "input", "variableName": "user_input"},
+                },
+                {
+                    "id": "agent",
+                    "type": "agent",
+                    "data": {
+                        "kind": "agent",
+                        "agentMode": "tool_first",
+                        "instruction": "请处理：{{user_input}}",
+                        "modelId": "deepseek/deepseek-chat",
+                        "toolNames": "fetch",
+                        "maxIterations": "3",
+                        "temperature": "0.7",
+                        "outputVariable": "agent_output",
+                    },
+                },
+                {
+                    "id": "output",
+                    "type": "output",
+                    "data": {"kind": "output", "outputVariable": "agent_output"},
+                },
+            ],
+            "edges": [
+                {"id": "e1", "source": "input", "target": "agent"},
+                {"id": "e2", "source": "agent", "target": "output"},
+            ],
+        }
+
+        response = await client.post(
+            "/api/workflow/run",
+            json={
+                "workflow": workflow,
+                "inputs": {"user_input": "legacy agent"},
+            },
+        )
+    finally:
+        restore_provider()
+
+    assert response.status_code == 200, response.text
+    events = _parse_sse_events(response.text)
+    agent_end = next(
+        event
+        for event in events
+        if event.get("event") == "node_end" and event.get("node_id") == "agent"
+    )
+    assert agent_end["output"] == "legacy final"
+    assert len(provider.calls) == 1
+    assert provider.calls[0].tool_name == "fetch"
+
 
 def _parse_sse_events(sse_text: str) -> list[dict]:
     events: list[dict] = []
@@ -361,3 +702,46 @@ def _parse_sse_events(sse_text: str) -> list[dict]:
         if isinstance(payload, dict):
             events.append(payload)
     return events
+
+
+class FakeWorkflowToolProvider:
+    def __init__(self) -> None:
+        self.tools = [
+            RuntimeTool(
+                name="fetch",
+                description="Fetch test content",
+                input_schema={"type": "object"},
+                session_id="session-1",
+                server_id="server-1",
+            )
+        ]
+        self.calls = []
+
+    async def list_tools(self):
+        return list(self.tools)
+
+    async def find_tool(self, tool_name: str):
+        for tool in self.tools:
+            if tool.name == tool_name:
+                return tool
+        return None
+
+    async def call_tool(self, call):
+        self.calls.append(call)
+        return RuntimeToolResult(
+            output="tool response",
+            content=[{"type": "text", "text": "tool response"}],
+            metadata={"content_types": ["text"]},
+            is_error=False,
+        )
+
+
+def _install_fake_tool_provider() -> tuple[FakeWorkflowToolProvider, Any]:
+    provider = FakeWorkflowToolProvider()
+    original = main_module.runtime_capabilities.require("mcp_tools").implementation
+    main_module.runtime_capabilities.register("mcp_tools", provider)
+
+    def restore() -> None:
+        main_module.runtime_capabilities.register("mcp_tools", original)
+
+    return provider, restore

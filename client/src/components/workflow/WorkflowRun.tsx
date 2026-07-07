@@ -48,6 +48,17 @@ interface RuntimeRunSummary {
   error: string | null;
 }
 
+interface RuntimeRunCheckpoint {
+  checkpoint_id: string;
+  run_id: string;
+  event_type: string;
+  title: string;
+  summary: string;
+  severity: string;
+  metadata: Record<string, unknown>;
+  created_at: number;
+}
+
 interface WorkflowRunProps {
   definition: WorkflowDefinition;
   embedded?: boolean;
@@ -168,6 +179,61 @@ function runMetadataText(
   return "";
 }
 
+function checkpointSeverityClass(severity: string) {
+  if (severity === "error") return "text-rose-200";
+  if (severity === "warning") return "text-amber-200";
+  return "text-slate-300";
+}
+
+function RuntimeCheckpointList({
+  checkpoints,
+  limit = 6,
+}: {
+  checkpoints: RuntimeRunCheckpoint[];
+  limit?: number;
+}) {
+  if (checkpoints.length === 0) {
+    return (
+      <p className="mt-2 rounded-md bg-slate-950/25 px-2 py-1.5 text-[11px] text-slate-500">
+        暂无 checkpoint。
+      </p>
+    );
+  }
+
+  return (
+    <div className="mt-2 max-h-44 space-y-1 overflow-y-auto">
+      {checkpoints.slice(0, limit).map((checkpoint) => (
+        <div
+          className="rounded-md bg-slate-950/35 px-2 py-1.5"
+          key={checkpoint.checkpoint_id}
+        >
+          <div className="flex items-center justify-between gap-2">
+            <span
+              className={`truncate text-[11px] font-semibold ${checkpointSeverityClass(
+                checkpoint.severity,
+              )}`}
+            >
+              {checkpoint.title || checkpoint.event_type}
+            </span>
+            <span className="shrink-0 text-[10px] text-slate-500">
+              {formatObservationTime(checkpoint.created_at)}
+            </span>
+          </div>
+          <p className="mt-1 truncate text-[11px] text-slate-500">
+            {checkpoint.event_type}
+            {checkpoint.summary ? ` · ${checkpoint.summary}` : ""}
+          </p>
+        </div>
+      ))}
+      {checkpoints.length > limit ? (
+        <p className="text-[11px] text-slate-500">
+          仅展示最近 {limit} 条，共 {checkpoints.length} 条。
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
 function buildRunSteps(events: WorkflowRunEvent[]) {
   const steps: WorkflowRunStep[] = [];
   const byNodeId = new Map<string, WorkflowRunStep>();
@@ -259,6 +325,10 @@ export default function WorkflowRun({
   const [runSummaryLoading, setRunSummaryLoading] = useState(false);
   const [childRuns, setChildRuns] = useState<RuntimeRunSummary[]>([]);
   const [childRunsLoading, setChildRunsLoading] = useState(false);
+  const [runCheckpoints, setRunCheckpoints] = useState<
+    Record<string, RuntimeRunCheckpoint[]>
+  >({});
+  const [runCheckpointsLoading, setRunCheckpointsLoading] = useState(false);
 
   const inputVariable = useMemo(() => {
     const inputNode = definition.nodes.find((node) => node.data.kind === "input");
@@ -295,6 +365,8 @@ export default function WorkflowRun({
     setRunSummaryLoading(false);
     setChildRuns([]);
     setChildRunsLoading(false);
+    setRunCheckpoints({});
+    setRunCheckpointsLoading(false);
     setIsRunning(true);
 
     try {
@@ -423,6 +495,7 @@ export default function WorkflowRun({
     setObservationLoading(true);
     setRunSummaryLoading(Boolean(runId));
     setChildRunsLoading(Boolean(runId));
+    setRunCheckpointsLoading(Boolean(runId));
     try {
       const response = await fetch(`/api/workflow/runtime-events/${taskId}`);
       if (response.ok) {
@@ -430,6 +503,7 @@ export default function WorkflowRun({
         setObservationData(payload);
       }
       if (runId) {
+        const checkpointRunIds = [runId];
         const runResponse = await fetch(`/api/runtime/runs/${runId}`);
         if (runResponse.ok) {
           const runPayload = (await runResponse.json()) as RuntimeRunSummary;
@@ -442,7 +516,24 @@ export default function WorkflowRun({
           const childRunPayload =
             (await childRunsResponse.json()) as RuntimeRunSummary[];
           setChildRuns(childRunPayload);
+          checkpointRunIds.push(
+            ...childRunPayload.map((run) => run.run_id).filter(Boolean),
+          );
         }
+        const checkpointPairs = await Promise.all(
+          checkpointRunIds.map(async (checkpointRunId) => {
+            const checkpointsResponse = await fetch(
+              `/api/runtime/runs/${checkpointRunId}/checkpoints?limit=30`,
+            );
+            if (!checkpointsResponse.ok) {
+              return [checkpointRunId, []] as const;
+            }
+            const checkpoints =
+              (await checkpointsResponse.json()) as RuntimeRunCheckpoint[];
+            return [checkpointRunId, checkpoints] as const;
+          }),
+        );
+        setRunCheckpoints(Object.fromEntries(checkpointPairs));
       }
     } catch {
       // Observability is best-effort; workflow execution output remains primary.
@@ -450,6 +541,7 @@ export default function WorkflowRun({
       setObservationLoading(false);
       setRunSummaryLoading(false);
       setChildRunsLoading(false);
+      setRunCheckpointsLoading(false);
     }
   }
 
@@ -461,7 +553,10 @@ export default function WorkflowRun({
         taskId &&
         ((!observationData && !observationLoading) ||
           (runId && !runSummary && !runSummaryLoading) ||
-          (runId && childRuns.length === 0 && !childRunsLoading))
+          (runId && childRuns.length === 0 && !childRunsLoading) ||
+          (runId &&
+            Object.keys(runCheckpoints).length === 0 &&
+            !runCheckpointsLoading))
       ) {
         void fetchObservation();
       }
@@ -640,6 +735,22 @@ export default function WorkflowRun({
                           暂无 run 摘要。
                         </p>
                       )}
+                      <div className="mt-3 border-t border-white/10 pt-2">
+                        <div className="flex items-center justify-between gap-3">
+                          <p className="text-[11px] font-semibold text-slate-300">
+                            Checkpoints
+                          </p>
+                          <span className="text-[10px] text-slate-500">
+                            {runCheckpointsLoading
+                              ? "..."
+                              : runCheckpoints[runId]?.length ?? 0}
+                          </span>
+                        </div>
+                        <RuntimeCheckpointList
+                          checkpoints={runCheckpoints[runId] ?? []}
+                          limit={8}
+                        />
+                      </div>
                     </div>
                   ) : null}
 
@@ -712,6 +823,10 @@ export default function WorkflowRun({
                                     {result ? `result=${result}` : ""}
                                   </p>
                                 ) : null}
+                                <RuntimeCheckpointList
+                                  checkpoints={runCheckpoints[run.run_id] ?? []}
+                                  limit={3}
+                                />
                               </div>
                             );
                           })}

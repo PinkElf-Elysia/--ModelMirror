@@ -285,6 +285,10 @@ function createNodeData(
       modelId: "deepseek/deepseek-chat",
       rolePrompt: "你是负责执行当前工作流步骤的智能体，请直接输出结果。",
       taskInput: "{{user_input}}",
+      toolMode: "none",
+      toolNames: "",
+      maxIterations: "5",
+      promptSuffix: "",
       outputVariable: "agent_output",
     };
   }
@@ -1191,7 +1195,7 @@ function NodeConfig({ node, onChange }: NodeConfigProps) {
       {data.kind === "workflow_agent" ? (
         <>
           <div className="rounded-lg border border-cyan-300/25 bg-cyan-300/10 px-3 py-2 text-xs leading-5 text-cyan-50">
-            该节点会以角色提示词调用模型执行一个工作流步骤，并将结果写入输出变量；当前不接工具和真实多智能体调度。
+            该节点会以角色提示词调用模型执行一个工作流步骤；启用 MCP 工具时会复用 runtime toolset、权限策略和审计。
           </div>
           <Field label="智能体名称">
             <input
@@ -1232,6 +1236,57 @@ function NodeConfig({ node, onChange }: NodeConfigProps) {
               className={`${textInputClass()} min-h-32 resize-none leading-6`}
               onChange={(event) => update({ taskInput: event.target.value })}
               value={data.taskInput ?? ""}
+            />
+          </Field>
+          <Field label="工具模式">
+            <select
+              className={textInputClass()}
+              onChange={(event) => update({ toolMode: event.target.value })}
+              value={data.toolMode ?? "none"}
+            >
+              <option className="bg-slate-950" value="none">
+                none：直接调用模型
+              </option>
+              <option className="bg-slate-950" value="mcp_tools">
+                mcp_tools：允许调用 MCP 工具
+              </option>
+            </select>
+          </Field>
+          {data.toolMode === "mcp_tools" ? (
+            <>
+              <Field label="允许工具名（逗号分隔，留空代表全部已注册工具）">
+                <input
+                  className={textInputClass()}
+                  onChange={(event) => update({ toolNames: event.target.value })}
+                  placeholder={
+                    registryTools.length
+                      ? registryTools.map((tool) => tool.name).slice(0, 3).join(", ")
+                      : "先在 MCP 页面连接工具 Server"
+                  }
+                  value={data.toolNames ?? ""}
+                />
+              </Field>
+              <Field label="最大工具循环次数">
+                <input
+                  className={textInputClass()}
+                  inputMode="numeric"
+                  max={20}
+                  min={1}
+                  onChange={(event) =>
+                    update({ maxIterations: event.target.value })
+                  }
+                  type="number"
+                  value={data.maxIterations ?? "5"}
+                />
+              </Field>
+            </>
+          ) : null}
+          <Field label="补充提示词（可选，支持 {{变量}}）">
+            <textarea
+              className={`${textInputClass()} min-h-24 resize-none leading-6`}
+              onChange={(event) => update({ promptSuffix: event.target.value })}
+              placeholder="可加入输出格式、语气或额外约束。"
+              value={data.promptSuffix ?? ""}
             />
           </Field>
           <Field label="输出变量">

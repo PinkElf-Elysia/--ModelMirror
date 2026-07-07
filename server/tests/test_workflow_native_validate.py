@@ -1203,6 +1203,72 @@ async def test_workflow_agent_output_variable_is_available_downstream(
 
 
 @pytest.mark.asyncio
+async def test_workflow_agent_mcp_tool_mode_is_valid(
+    client: httpx.AsyncClient,
+) -> None:
+    workflow = linear_workflow()
+    workflow["nodes"][1] = {
+        "id": "workflow_agent",
+        "type": "workflow_agent",
+        "data": {
+            "kind": "workflow_agent",
+            "agentName": "tool-agent",
+            "modelId": "deepseek/deepseek-chat",
+            "rolePrompt": "你是工具智能体。",
+            "taskInput": "{{user_input}}",
+            "toolMode": "mcp_tools",
+            "toolNames": "fetch",
+            "maxIterations": "3",
+            "outputVariable": "agent_output",
+        },
+    }
+    workflow["nodes"][2]["data"]["outputVariable"] = "agent_output"
+    workflow["edges"] = [
+        {"id": "e1", "source": "input", "target": "workflow_agent"},
+        {"id": "e2", "source": "workflow_agent", "target": "output"},
+    ]
+
+    data = await validate(client, workflow)
+
+    assert data["valid"] is True
+    assert "invalid_workflow_agent_tool_mode" not in issue_codes(data)
+    assert "invalid_workflow_agent_max_iterations" not in issue_codes(data)
+
+
+@pytest.mark.asyncio
+async def test_workflow_agent_invalid_tool_mode_and_iterations(
+    client: httpx.AsyncClient,
+) -> None:
+    workflow = linear_workflow()
+    workflow["nodes"][1] = {
+        "id": "workflow_agent",
+        "type": "workflow_agent",
+        "data": {
+            "kind": "workflow_agent",
+            "agentName": "tool-agent",
+            "modelId": "deepseek/deepseek-chat",
+            "rolePrompt": "你是工具智能体。",
+            "taskInput": "{{user_input}}",
+            "toolMode": "unknown",
+            "maxIterations": "99",
+            "outputVariable": "agent_output",
+        },
+    }
+    workflow["nodes"][2]["data"]["outputVariable"] = "agent_output"
+    workflow["edges"] = [
+        {"id": "e1", "source": "input", "target": "workflow_agent"},
+        {"id": "e2", "source": "workflow_agent", "target": "output"},
+    ]
+
+    data = await validate(client, workflow)
+
+    codes = issue_codes(data)
+    assert data["valid"] is False
+    assert "invalid_workflow_agent_tool_mode" in codes
+    assert "invalid_workflow_agent_max_iterations" in codes
+
+
+@pytest.mark.asyncio
 async def test_validate_agent_handoff_node_ok(client: httpx.AsyncClient) -> None:
     workflow = linear_workflow()
     workflow["nodes"] = [

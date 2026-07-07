@@ -1,5 +1,8 @@
 # Xpert 对齐总纲
 
+> 2026-07-07 状态补充：RunRegistry Trace 已进入“部分实现”。`RuntimeRun` 现在可挂载内存态 checkpoint，记录 workflow、workflow_agent、agent_task、agent_handoff 的关键执行时间线；新增 `GET /api/runtime/runs/{run_id}/checkpoints` 供前端运行观测读取。当前仍不做持久化、自动重试、队列调度或 checkpoint resume。
+> 2026-07-07 状态补充：Workflow Agent Toolset 已进入“部分实现”。`workflow_agent` 现在支持 `toolMode=none/mcp_tools`，启用 MCP 工具时复用 Runtime Toolset、`tool_policy` 与 `tool_audit`；旧 `agent.tool_first` 也收敛到同一条 `run_tool_with_runtime` 路径。当前仍是轻量 JSON 决策协议，不做 OpenAI function calling、自动 Handoff 或真实多 Agent 调度。
+
 > 2026-07-06 状态补充：Workflow Agent 节点已进入“部分实现”。Classic workflow 现在可拖入 `workflow_agent` 节点，用角色提示词和任务输入调用模型，输出结果到变量，并登记 `workflow_agent` 子 run。当前仍是单步模型执行，不接工具调用、Handoff 自动调度或真实多 Agent 协作。
 
 > 2026-07-06 状态补充：Handoff Queue 已进入“部分实现”。Handoff metadata 现在记录 accepted/rejected/completed 的处理者、时间和结果/原因；MetaAgent Handoff Inbox 支持按状态和目标 Agent 筛选，并可填写完成结果。当前仍是内存态人工处理闭环，不做真实调度、worker 队列或持久化。
@@ -18,9 +21,10 @@ Classic workflow 运行时会创建 workflow run，并在 `workflow_meta` / `wor
 
 - `GET /api/runtime/runs?run_type=&status=&limit=`
 - `GET /api/runtime/runs/{run_id}`
+- `GET /api/runtime/runs/{run_id}/checkpoints`
 - `POST /api/runtime/runs/{run_id}/cancel`
 
-当前边界：RunRegistry 仅为内存态可观测索引，不是持久化调度器；取消 run 只更新 registry 状态，不中断真实 workflow、AgentTask 或 Handoff 执行。下一步可在此基础上继续补齐 Handoff 前端观测、RunRegistry 页面、checkpoint、死信与持久化存储。
+当前边界：RunRegistry 仅为内存态可观测索引，不是持久化调度器；取消 run 只更新 registry 状态，不中断真实 workflow、AgentTask 或 Handoff 执行。Checkpoint 只保存摘要与元信息，不保存完整 prompt、工具输出、模型输出或密钥。下一步可在此基础上继续补齐 Handoff 自动编排、RunRegistry 页面、死信与持久化存储。
 
 最后更新日期：2026-07-06
 维护人：模镜团队
@@ -36,9 +40,9 @@ EvoAgentX 只保留为历史参考：此前元智能体曾借鉴其 `goal -> sub
 | 能力域 | Xpert 对齐目标 | 当前状态 | 下一步 |
 | --- | --- | --- | --- |
 | Runtime / Execution | 中间件生命周期、任务注册、事件记录、运行观测 | 部分实现 | 建立 Handoff / RunRegistry 闭环 |
-| Agent / Handoff | AgentTask、任务移交、子 Agent、主管-专家协作 | 部分实现 | 将 workflow_agent 接入工具与 Handoff 编排 |
-| Workflow | Xpert 节点类型、Agent 节点、工具节点、知识流水线节点 | 部分实现 | 扩展 workflow_agent toolset、subflow、知识类节点 |
-| Toolset / MCP | 统一 Toolset Provider、权限、审计、偏好 | 部分实现 | 将聊天 Agent 和工作流 Agent 统一接入 toolset capability |
+| Agent / Handoff | AgentTask、任务移交、子 Agent、主管-专家协作 | 部分实现 | 将 workflow_agent 输出与 Handoff 编排连接 |
+| Workflow | Xpert 节点类型、Agent 节点、工具节点、知识流水线节点 | 部分实现 | 扩展 subflow、知识类节点与 Agent trace |
+| Toolset / MCP | 统一 Toolset Provider、权限、审计、偏好 | 部分实现 | 将聊天 Agent 继续收敛到 toolset capability |
 | Knowledge Pipeline | FileAsset、Artifact、Chunk、CitationAnchor、Embedding | 待实现 | 从本地 RAG 元数据模型开始拆分 |
 | Claw / Skill | 用户偏好、工作区 Skill、会话临时选择 | 待实现 | 在 Xpert workspace / skill 抽象稳定后接入 |
 | Environment / Sandbox | 工作区文件、受限执行、浏览器/终端能力 | 待实现 | 先做受限文件 API 和 workspace volume |
@@ -51,17 +55,23 @@ EvoAgentX 只保留为历史参考：此前元智能体曾借鉴其 `goal -> sub
 - Toolset / MCP：`mcp_tool` 已通过 `MCPToolsetProvider`、`CapabilityRegistry`、`run_tool_with_runtime` 调用工具。
 - Tool Policy / Audit：`tool_policy` 可影响 workflow 内 MCP 工具调用，`InMemoryToolAuditStore` 提供最小审计记录。
 - Runtime Middleware Node：前端可拖入 `runtime_middleware` 节点，`system_prompt_injector`、`tool_policy`、`event_recorder`、`tool_audit` 已逐步进入真实执行或可见状态。
-- Workflow Agent Node：classic workflow 可拖入 `workflow_agent` 节点，使用 `rolePrompt` 作为该节点 system prompt、`taskInput` 作为用户输入调用模型，结果写入 `outputVariable`，并登记 `workflow_agent` 子 run。
+- Workflow Agent Node：classic workflow 可拖入 `workflow_agent` 节点，使用 `rolePrompt` 作为该节点 system prompt、`taskInput` 作为用户输入调用模型，结果写入 `outputVariable`，并登记 `workflow_agent` 子 run；启用 `toolMode=mcp_tools` 时可通过 Runtime Toolset 调用 MCP 工具。
 - Agent Task Runtime：已提供 `AgentTaskStore`、最小 AgentTask API、MetaAgent 任务工作台，以及 classic workflow `agent_task` 节点；该节点当前负责创建任务并输出 `task_id`，暂不做真实多 Agent 调度。
 - Handoff API：已提供 handoff 创建、按任务查询、接受、拒绝、完成的内存态 API，状态转移限定为 `pending -> accepted/rejected`、`accepted -> completed`，并写入 `agent.handoff.created/accepted/rejected/completed` runtime events。
 - 运行观测：classic workflow 可查询 per-task runtime events 和 tool audit records，前端 `WorkflowRun` 已提供“运行观测”折叠区。
 
 ## 近期交付顺序
 
-1. **Workflow Agent Toolset**：让 `workflow_agent` 可选择 MCP Toolset，复用 tool policy / audit。
-2. **RunRegistry Trace 增强**：补齐 workflow_agent / handoff 的 trace、checkpoint、失败摘要与重试入口。
-3. **Handoff 自动编排雏形**：将 workflow_agent 输出与 handoff queue 连接，但仍保持人工可控。
+1. **RunRegistry Trace 增强**：补齐 workflow_agent / handoff 的 trace、checkpoint、失败摘要与重试入口。
+2. **Handoff 自动编排雏形**：将 workflow_agent 输出与 handoff queue 连接，但仍保持人工可控。
+3. **Chat Agent Toolset 收敛**：将聊天 Agent 的工具调用继续迁入 Runtime Toolset capability。
 4. **知识流水线底座**：拆分本地 RAG 的文件元数据，建立 FileAsset -> Artifact -> Chunk -> CitationAnchor 的最小模型。
+
+## 2026-07-07 增量：RunRegistry Trace / Checkpoint
+
+RunRegistry 现在提供内存态 checkpoint：每条 `RuntimeRun` 可记录 `event_type`、标题、摘要、severity、metadata 与创建时间。Workflow 运行、`workflow_agent` 模型/工具步骤、`agent_task` 创建、`agent_handoff` 创建与手动状态变更都会写入 checkpoint。新增 API `GET /api/runtime/runs/{run_id}/checkpoints`，前端 `WorkflowRun` 的“运行观测”会展示当前 run 与子 run 的 checkpoint 摘要。
+
+边界：checkpoint 只保存摘要和元信息，不保存完整 prompt、模型输出、工具结果、API key 或用户隐私内容；当前仍是内存态可观测索引，不做持久化、自动重试、队列调度或 checkpoint resume。
 
 ## 源码与协议策略
 

@@ -738,6 +738,31 @@ def validate_node_configuration(
                 )
             )
 
+        tool_mode = str(data.get("toolMode") or "none").strip()
+        if tool_mode not in {"none", "mcp_tools"}:
+            issues.append(
+                ValidationIssue(
+                    code="invalid_workflow_agent_tool_mode",
+                    message="Workflow agent toolMode must be none or mcp_tools.",
+                    node_id=node.id,
+                )
+            )
+
+        max_iterations = str(data.get("maxIterations") or "").strip()
+        if max_iterations:
+            try:
+                max_iterations_value = int(max_iterations)
+            except ValueError:
+                max_iterations_value = 0
+            if max_iterations_value < 1 or max_iterations_value > 20:
+                issues.append(
+                    ValidationIssue(
+                        code="invalid_workflow_agent_max_iterations",
+                        message="Workflow agent maxIterations must be between 1 and 20.",
+                        node_id=node.id,
+                    )
+                )
+
         output_variable = str(data.get("outputVariable") or "").strip()
         if not output_variable:
             issues.append(
