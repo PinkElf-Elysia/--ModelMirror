@@ -1,5 +1,50 @@
 # workflow-native 自研工作流设计
 
+> 2026-07-08 路线重整：classic `/workflow` 后续节点规划改为按 Xpert 真实菜单分类推进。下一步不再盲目追加单点节点，而是先做节点注册表、调色板分类和右侧配置面板对齐；已有执行语义保持不变。
+> 2026-07-08 工作空间入口：`/studio` 已纳入 Xpert 式工作空间资源 Hub，统一展示工作流、知识库、MCP、Skill、提示词、环境与 RunRegistry 摘要。Classic `/workflow` 仍是画布主入口，后续节点与配置面板对齐会从该 Hub 进入。
+
+## Xpert 工作流节点规划
+
+真实 Xpert 画布把节点入口分成工作流、中间件、知识流水线、工具集等菜单。ModelMirror 后续仍基于现有 React/FastAPI classic workflow 迭代，但节点规划按 Xpert 分类收敛。
+
+### 工作流节点分类
+
+| Xpert 分类 | Xpert 菜单示例 | ModelMirror 已有/对应节点 | 下一步 |
+| --- | --- | --- | --- |
+| 逻辑 | 触发器、路由、迭代、子流程、列表操作、变量聚合、变量赋值 | `input`、`condition`、`iteration`、`list_operation`、`variable_aggregator`、`variable_assign` | 用节点 registry 统一分类与元数据 |
+| 转换 | 问题分类器、知识检索、代码执行、模板、JSON 序列化、JSON 反序列化、回答 | `question_classifier`、`knowledge_retrieval`、`knowledge_citation`、`code`、`template_transform`、`output` | 补 JSON 序列化/反序列化节点前先统一 registry |
+| 工具 | HTTP、工具调用、智能体工作流、任务移交 | `http_request`、`mcp_tool`、`workflow_agent`、`agent_task`、`agent_handoff`、`handoff_router` | 继续收敛到 Runtime Toolset 与 RunRegistry |
+| 记忆 | 数据库 | 暂无完整数据库/记忆节点，仅有 RunRegistry 与 RAG 元数据 | 等工作空间资源与记忆模型稳定后推进 |
+| 其他 | 注释 | 暂无 | 作为 UI-only 节点，低优先级 |
+
+### 中间件分类
+
+当前已注册/实现的最小中间件包括 `system_prompt_injector`、`event_recorder`、`tool_policy`、`tool_audit`、`mcp_tools`。Xpert 真实菜单还包含文件记忆、浏览器自动化、上下文压缩、人机协同、插件 Hooks、结构化输出事件等。后续不直接追完整列表，先保证 middleware registry、配置表单、运行链路和观测一致。
+
+### 知识流水线分类
+
+Xpert 知识流水线菜单按数据源、处理器、分块器、图像理解组织。ModelMirror 当前只有 RAG pipeline 只读元数据和 `knowledge_citation` 节点；下一阶段先做可视化草稿层，不迁移向量库、不改变 `/api/rag/query`、不改上传/切分/embedding 主路径。
+
+### 对齐顺序
+
+1. `XPERT-WORKFLOW-PALETTE-01`：节点注册表与 Xpert 分类菜单。
+2. `XPERT-STUDIO-PANEL-01`：右侧配置面板按参数、中间件、知识库、工具、重试、输出结构、记忆等分区。
+3. `XPERT-KNOWLEDGE-PIPELINE-02`：知识流水线草稿 schema 与 stage UI。
+4. `XPERT-RUNTIME-OPS-01`：MCP Runtime、工具集、插件/Skill、环境和运行观测入口。
+5. `XPERT-WORKSPACE-HUB-02`：在 `/studio` 上继续补资源创建、标签过滤和运行摘要。
+
+### 2026-07-08 增量：Xpert 分类节点库
+
+`/workflow` 节点库已从平铺静态数组迁移为前端 `workflowNodeRegistry` 分类渲染。节点库仍位于画布顶部附近的浮层中，不恢复为常驻左栏；右侧仍使用 `配置 / 运行` tabs，避免节点库、配置和运行结果纵向堆叠。
+
+当前节点库分为三个 tab：
+
+- `工作流`：按逻辑、转换、工具、记忆、其他分组展示现有可运行节点。
+- `中间件`：继续从 `GET /api/runtime/middleware-nodes` 拉取 runtime middleware metadata，并保持现有 JSON 拖拽 payload。
+- `知识流水线`：先暴露可运行的 `knowledge_citation` 节点，并用禁用占位展示数据源、处理器、分块器、图像理解等后续 stage。
+
+本轮不新增后端节点类型，不修改 `NativeNodeKind`、validate、classic runner、SSE 协议或 React Flow 拖拽协议。数据库、注释、JSON 序列化/反序列化和知识流水线 stage 仅显示“待接入”占位，不会生成无法运行的画布节点。
+
 > 2026-07-08 状态补充：Chat Toolset 运行观测进入最小闭环。`tool_mode=mcp_tools` 的聊天请求会登记 `chat` run，响应 header 返回 `X-ModelMirror-Runtime-Run-Id` / `X-ModelMirror-Runtime-Task-Id`；前端聊天页展示 run 状态、checkpoint、tool events 与 audit 摘要。普通聊天仍不创建 chat run，SSE wire format 不变。
 > 2026-07-08 状态补充：`/api/chat` 已接入默认关闭的 Runtime Toolset 工具模式。前端聊天页可显式开启 MCP 工具循环，后端复用 `run_tool_with_runtime`、`tool_policy` 与 `tool_audit`，并继续使用现有 OpenAI SSE delta 结构输出最终答案。当前不是 OpenAI function calling，不自动创建 Handoff，也不改变 workflow、RAG、Skill 或 MCP 连接主路径。
 > 2026-07-07 状态补充：RunRegistry Trace / Checkpoint 进入最小闭环。Workflow run、`workflow_agent`、`agent_task`、`agent_handoff` 会写入内存态 checkpoint；前端“运行观测”会读取 `GET /api/runtime/runs/{run_id}/checkpoints` 展示当前 run 与子 run 的时间线摘要。当前不做持久化、自动重试、队列调度或 checkpoint resume。

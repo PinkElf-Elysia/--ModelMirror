@@ -1,0 +1,186 @@
+# Xpert UI 参考记录
+
+最后更新日期：2026-07-08
+维护人：模镜团队
+
+## 目的
+
+本文记录 2026-07-08 对真实 Xpert 前端界面与本地 `xpert-main` 源码的观察结果，用于指导 ModelMirror 后续对齐。本文只记录概念、字段、交互和源码参考位置，不复制 Xpert 源码实现。
+
+## 参考来源
+
+- 本地源码：`C:\Users\21547\Downloads\xpert-main\xpert-main`
+- 本地真实界面：`http://localhost:8088/xpert/w/2b9d44a2-b95e-44e2-8a76-97e0d9bb86be`
+- 用户提供的 2026-07-08 Xpert 前端截图
+- 主要源码参考点：
+  - `apps/cloud/src/assets/i18n/zh-Hans.json`
+  - `apps/cloud/src/app/features/xpert`
+  - `apps/cloud/src/app/features/xpert/studio`
+  - `apps/cloud/src/app/features/xpert/knowledge`
+  - `apps/cloud/src/app/features/operations/mcp-runtimes.component.*`
+  - `apps/cloud/src/app/features/setting/plugins`
+  - `packages/plugin-sdk/src/lib/workflow`
+  - `packages/plugin-sdk/src/lib/toolset`
+  - `packages/server-ai/src/xpert-toolset`
+  - `packages/server-ai/src/xpert-workspace`
+
+## 产品骨架
+
+Xpert 的核心不是单个工作流节点，而是一套工作空间级产品骨架：
+
+1. 工作空间资源首页：统一展示数字专家、内置工具、MCP 工具集、API 工具、知识库、数据库、Skill、提示词、环境。
+2. Xpert Studio：左侧资源/设置导航，中间画布，右侧节点配置，顶部预览、环境、功能、发布入口。
+3. 节点库：通过浮层菜单添加智能体、外部专家、知识库、工具集、中间件、工作流、知识流水线。
+4. Runtime 运维：MCP Runtime 运维页展示实例统计、筛选器、空态和刷新入口。
+5. 市场与资产：插件市场、技能市场、智能体广场、提示词工作流、环境变量面板。
+
+## 画布与节点库
+
+### 顶层菜单
+
+截图中的画布左下菜单包含：
+
+- 新建智能体
+- 添加外部专家
+- 添加知识库
+- 添加工具集
+- 添加中间件
+- 添加工作流
+- 添加知识流水线
+- 删除
+- 粘贴到这里
+
+ModelMirror 对齐策略：先在 classic `/workflow` 中完成节点注册表和分类菜单，不一次性复制完整 Xpert Studio。
+
+### 工作流节点分类
+
+Xpert “添加工作流”菜单按以下分类组织：
+
+| 分类 | 节点 |
+| --- | --- |
+| 逻辑 | 触发器、路由、迭代、子流程、列表操作、变量聚合、变量赋值 |
+| 转换 | 问题分类器、知识检索、代码执行、模板、JSON 序列化、JSON 反序列化、回答 |
+| 工具 | HTTP、工具调用、智能体工作流、任务移交 |
+| 记忆 | 数据库 |
+| 其他 | 注释 |
+
+ModelMirror 已有对应基础：`input`、`condition`、`iteration`、`list_operation`、`variable_aggregator`、`variable_assign`、`question_classifier`、`knowledge_retrieval`、`code`、`template_transform`、`mcp_tool`、`workflow_agent`、`agent_task`、`agent_handoff`、`handoff_router`、`knowledge_citation`、`output`。
+
+`XPERT-WORKFLOW-PALETTE-01` 已完成第一版本地映射：ModelMirror 在前端建立 `workflowNodeRegistry`，并让 `/workflow` 节点库以“工作流 / 中间件 / 知识流水线”三个 tab 呈现。工作流 tab 内按 Xpert 的逻辑、转换、工具、记忆、其他分类渲染；中间件 tab 继续读取 `/api/runtime/middleware-nodes`；知识流水线 tab 先暴露可运行的 `knowledge_citation`，并以禁用占位呈现数据源、处理器、分块器、图像理解等后续 stage。
+
+当前映射边界：
+
+- 普通工作流节点仍使用原有 `application/modelmirror-node = kind` 拖拽协议。
+- runtime middleware 仍使用现有 JSON payload，不改变 `WorkflowEditor` 解析逻辑。
+- 数据库、注释、JSON 序列化/反序列化、知识流水线 stage 等 Xpert 节点暂不创建真实节点，只显示“待接入”占位，避免用户拖入无法运行的节点。
+- registry 先放在前端本地，后续如节点元数据继续扩张，再评估后端统一 registry API。
+
+## 中间件菜单
+
+截图中的“添加中间件”菜单包括：
+
+- Xpert 编写中间件
+- 知识库写入器
+- 技能中间件
+- 技能创建中间件
+- 沙箱服务
+- 沙箱命令行工具
+- Xpert 文件记忆
+- 浏览器自动化
+- 客户端工具中间件
+- 上下文压缩中间件
+- 人机协同中间件
+- Office 自动化
+- Ralph 循环
+- 定时任务
+- 插件 Hooks
+- Data X 指标管理
+- 待办事项中间件
+- LLM 工具选择器
+- 客户端副作用中间件
+- 沙箱文件工具
+- 结构化输出事件中间件
+
+ModelMirror 已有最小底座：`system_prompt_injector`、`event_recorder`、`tool_policy`、`tool_audit`、`mcp_tools`。后续不要直接追逐完整列表，应先补齐中间件 registry、配置表单、运行链路和观测。
+
+## 知识流水线菜单
+
+截图中的“添加知识流水线”菜单按 stage 分类：
+
+| 分类 | 示例 |
+| --- | --- |
+| 数据源 | 默认、PDF 图文、文本 |
+| 处理器 | 处理器类节点 |
+| 分块器 | 递归字符、Markdown 递归、父子关系 |
+| 图像理解 | 视觉语言模型 |
+
+ModelMirror 当前只完成只读 Knowledge Pipeline 元数据视图和 `knowledge_citation` 节点。后续 `XPERT-KNOWLEDGE-PIPELINE-02` 应先做 stage 草稿 schema 与 UI，不迁移向量库和 embedding 策略。
+
+## 工具集菜单与市场
+
+截图中的工具集菜单有 Provider、内置、MCP、API 四个页签，示例包括对话 BI、对话数据库、指标管理、语义模型管理、规划、Tavily、SearchApi、电子邮件、Bing、钉钉、Slack、Discord、Serper。
+
+ModelMirror 已有 MCP Server、ToolRegistry、MCPToolsetProvider、Skill 页面和部分安装能力。后续应把这些入口收口为 Xpert 式 Toolset 资源模型，再补 MCP Runtime 运维和插件市场。
+
+## 智能体配置侧栏
+
+截图中的右侧配置侧栏包含：
+
+- 节点基础信息：标题、描述、模型、提示词。
+- 节点开关：禁用输出、文件理解、并行工具调用。
+- 参数：名称、可选、操作。
+- 中间件：已添加中间件列表。
+- 知识库：召回设置与知识库列表。
+- 工具：工具卡片列表。
+- 运行策略：失败时重试、备用模型、异常处理。
+- 输出结构：content/string 等结构化输出。
+- 记忆写入：将结果写入记忆或文件工作区。
+- 消息历史、附件和文件变量。
+
+ModelMirror 当前的 `NodeConfig` 仍偏节点表单。后续 `XPERT-STUDIO-PANEL-01` 应先做 UI 分区和配置存储，不急于实现所有执行语义。
+
+## 运维与资源页面
+
+截图中已确认的 Xpert 资源/运维页：
+
+- MCP Runtime 运维：总实例数、活跃、失败、已关闭、筛选器、空态。
+- 插件市场：已安装、探索插件市场、标签/来源筛选、插件卡片。
+- 技能页：已安装技能、文件树、文件内容、上传/仓库注册。
+- 提示词页：工作流列表、创建表单、标签、模板。
+- 数据库页：表列表、状态、版本、激活时间、消息。
+- 环境页：环境列表与变量表。
+
+ModelMirror 后续应先做 `XPERT-WORKSPACE-HUB-01`，再分步补 Runtime Ops，而不是直接散改每个页面。
+
+## ModelMirror `/studio` 第一版映射
+
+`/studio` 已作为 Xpert 工作空间资源首页的第一版本地映射。它不复制 Xpert 页面实现，只对齐资源组织方式：
+
+- 数字专家：链接 `/agents` 与 `/agents/meta-agent`，展示本地智能体数量和样例。
+- 工作流：链接 classic `/workflow`，提示当前承载 workflow agent、AgentTask、Handoff、Toolset 与 RunRegistry。
+- 知识库：读取 `/api/rag/knowledge_bases`、`/api/rag/pipeline/assets`、`/api/rag/pipeline/artifacts`，展示知识库、FileAsset、Artifact 摘要。
+- MCP 工具集：读取 `/api/mcp/sessions` 与 `/api/registry/tools`，展示运行会话与全局工具注册表数量。
+- Skill：读取 `/api/skills/installed`，并结合本地 Skill 市场候选数据展示安装状态。
+- 提示词、环境：当前为规划中入口，分别指向 `/prompts` 与 `/settings`。
+- 运行记录：读取 `/api/runtime/runs?limit=8`，展示 workflow/chat/agent/handoff 等最近 run 摘要。
+
+该页采用独立资源加载和软降级策略：任一资源 API 失败时，只在对应卡片显示“暂不可用”，不影响工作空间首页和其他入口。
+
+## 对齐风险
+
+- 风险：继续按单个节点补功能，会导致 UI、运行器、文档和资源模型继续发散。  
+  缓解：下一步先做工作空间资源总览，再做节点注册表。
+
+- 风险：直接复制 Xpert Angular/NestJS 代码会带来许可证、架构和技术债。  
+  缓解：只参考领域模型、交互结构和文案分类，ModelMirror 内用 React/FastAPI 原生实现。
+
+- 风险：Knowledge Pipeline、Toolset、Plugin、Skill 同时推进会互相污染边界。  
+  缓解：按资源总览、节点 registry、配置侧栏、知识流水线、Runtime Ops 的顺序推进。
+
+## 下一步建议
+
+1. `XPERT-WORKFLOW-PALETTE-01`：建立工作流节点 registry 与 Xpert 分类菜单。
+2. `XPERT-STUDIO-PANEL-01`：对齐智能体配置侧栏结构。
+3. `XPERT-KNOWLEDGE-PIPELINE-02`：把知识流水线从只读元数据推进到可视化草稿。
+4. `XPERT-RUNTIME-OPS-01`：补齐 MCP Runtime 运维、插件/Skill 市场与环境观测。
+5. `XPERT-WORKSPACE-HUB-02`：继续增强 `/studio` 的资源创建、标签过滤和运行观测摘要。
