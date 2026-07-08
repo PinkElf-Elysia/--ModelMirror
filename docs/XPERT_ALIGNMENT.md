@@ -1,112 +1,124 @@
 # Xpert 对齐总纲
 
-> 2026-07-08 状态补充：Chat Toolset 运行观测已进入“部分实现”。`tool_mode=mcp_tools` 的聊天请求会登记 `chat` run，响应 header 暴露 runtime run/task id，并记录 `chat.started/model_decision/tool_call/answer/failed` checkpoint；聊天页会展示轻量“运行观测 Beta”。普通聊天仍不创建 chat run，SSE 格式不变。
-> 2026-07-08 状态补充：Chat Agent Toolset 已进入“部分实现”。`/api/chat` 新增默认关闭的 `tool_mode=mcp_tools`，显式开启后使用轻量 JSON 决策协议调用 MCP 工具，并复用 `MCPToolsetProvider`、`run_tool_with_runtime`、`tool_policy` 与 `tool_audit`。普通聊天请求保持 `tool_mode=none`，SSE wire format 不变；当前不是 OpenAI function calling，不做 Handoff 自动调度或真实多 Agent 协作。
-> 2026-07-08 状态补充：Handoff Router 已进入“部分实现”。Classic workflow 新增 `handoff_router` 节点，可读取 `workflow_agent` 等上游节点输出，创建 AgentTask，并向目标 Agent 创建 pending Handoff，让结果进入 MetaAgent Handoff Inbox。当前不自动 accept、不执行目标 Agent、不接队列 worker 或持久化。
-> 2026-07-07 状态补充：RunRegistry Trace 已进入“部分实现”。`RuntimeRun` 现在可挂载内存态 checkpoint，记录 workflow、workflow_agent、agent_task、agent_handoff 的关键执行时间线；新增 `GET /api/runtime/runs/{run_id}/checkpoints` 供前端运行观测读取。当前仍不做持久化、自动重试、队列调度或 checkpoint resume。
-> 2026-07-07 状态补充：Workflow Agent Toolset 已进入“部分实现”。`workflow_agent` 现在支持 `toolMode=none/mcp_tools`，启用 MCP 工具时复用 Runtime Toolset、`tool_policy` 与 `tool_audit`；旧 `agent.tool_first` 也收敛到同一条 `run_tool_with_runtime` 路径。当前仍是轻量 JSON 决策协议，不做 OpenAI function calling、自动 Handoff 或真实多 Agent 调度。
-
-> 2026-07-06 状态补充：Workflow Agent 节点已进入“部分实现”。Classic workflow 现在可拖入 `workflow_agent` 节点，用角色提示词和任务输入调用模型，输出结果到变量，并登记 `workflow_agent` 子 run。当前仍是单步模型执行，不接工具调用、Handoff 自动调度或真实多 Agent 协作。
-
-> 2026-07-06 状态补充：Handoff Queue 已进入“部分实现”。Handoff metadata 现在记录 accepted/rejected/completed 的处理者、时间和结果/原因；MetaAgent Handoff Inbox 支持按状态和目标 Agent 筛选，并可填写完成结果。当前仍是内存态人工处理闭环，不做真实调度、worker 队列或持久化。
-
-> 2026-07-06 状态补充：Handoff 前端观测已进入“部分实现”。Workflow 运行观测可以按 `parent_run_id` 拉取 `agent_task` / `agent_handoff` 子 run；MetaAgent 任务工作台可以查看任务 handoff 记录，并通过 Handoff Inbox Beta 手动 accept / reject / complete。当前仍不做真实多 Agent 调度、队列分派、数据库持久化或目标 Agent 自动执行。
-
-> 2026-07-05 状态补充：RunRegistry 已进入最小可观测闭环阶段，详见文末“RunRegistry 最小可观测闭环”。
-
-## 2026-07-05 增量：RunRegistry 最小可观测闭环
-
-RunRegistry 已从“下一步”进入“部分实现”。当前新增 `server/xpert_runtime/run_registry.py`，提供内存态 `RuntimeRun` 与 `RunRegistry`，统一登记 `workflow`、`workflow_agent`、`agent_task`、`agent_handoff` 四类 run，支持创建、查询、过滤列表、状态更新和取消。
-
-Classic workflow 运行时会创建 workflow run，并在 `workflow_meta` / `workflow_end` SSE 中携带 `run_id`；`workflow_agent` 节点执行模型智能体步骤时登记 workflow_agent run；`agent_task` 节点创建任务时登记 agent_task run；`agent_handoff` 节点创建移交时登记 agent_handoff run。Run 之间通过 `parent_run_id` 和 metadata 关联，不强行合并现有 workflow `task_id`，避免破坏既有 SSE、status 和 resume 协议。
-
-新增 API：
-
-- `GET /api/runtime/runs?run_type=&status=&limit=`
-- `GET /api/runtime/runs/{run_id}`
-- `GET /api/runtime/runs/{run_id}/checkpoints`
-- `POST /api/runtime/runs/{run_id}/cancel`
-
-当前边界：RunRegistry 仅为内存态可观测索引，不是持久化调度器；取消 run 只更新 registry 状态，不中断真实 workflow、AgentTask 或 Handoff 执行。Checkpoint 只保存摘要与元信息，不保存完整 prompt、工具输出、模型输出或密钥。下一步可在此基础上继续补齐 Handoff 自动编排、RunRegistry 页面、死信与持久化存储。
-
 最后更新日期：2026-07-08
-
-## 2026-07-08 增量：Knowledge Citation 工作流节点
-
-Classic workflow 新增 `knowledge_citation` 节点，作为 Knowledge Pipeline 进入工作流的最小闭环。节点字段包括 `queryVariable`、`knowledgeBaseId`、`top_k` 与 `outputVariable`；`knowledgeBaseId` 留空时沿用本地 RAG 默认策略，使用第一个知识库。运行时会调用 `RagService.create_pipeline_citations(...)`，把结果写入 JSON 字符串：`{"citations":[...],"citation_count":N}`。
-
-该节点同步登记 `knowledge_citation` 子 run，`parent_run_id` 指向 workflow run，并记录 `knowledge_citation.started/completed/failed` checkpoint。metadata 只保存 `workflow_task_id`、`node_id`、`kb_id`、`query_variable`、`output_variable`、`citation_count` 等摘要；不保存完整 query、chunk 全文、embedding、本地文件路径或密钥。当前不改 `/api/rag/query`、聊天 RAG、上传、切分、向量存储或 embedding 策略。
 维护人：模镜团队
 
 ## 对齐原则
 
-模镜接下来以 `C:\Users\21547\Downloads\xpert-main\xpert-main` 为主要参考源，采用“原生移植 + 参考改写”的策略对齐 Xpert 的能力边界。项目继续保留现有 React、FastAPI、Pydantic、pytest 架构，不迁移 Xpert 的 Nx、NestJS、Angular 主框架，也不整文件复制上游源码。
+模镜接下来以 `C:\Users\21547\Downloads\xpert-main\xpert-main` 和真实 Xpert 前端界面作为主要参考源，采用“领域模型对齐 + 原生实现改写”的策略推进。项目继续保留现有 React、FastAPI、Pydantic、pytest 架构，不迁移 Xpert 的 Nx、NestJS、Angular 主框架，也不整文件复制上游源码。
 
-EvoAgentX 只保留为历史参考：此前元智能体曾借鉴其 `goal -> sub_tasks -> inferred edges` 的规划形态，但后续不再以 EvoAgentX 作为近期功能规划来源。未对齐的 EvoAgentX 能力会在 Xpert 架构主线稳定后再评估是否补齐。
+EvoAgentX 只保留为历史参考：此前元智能体曾借鉴其 `goal -> sub_tasks -> inferred edges` 的规划形态，但后续近期功能规划不再以 EvoAgentX 为来源。未对齐的 EvoAgentX 能力会在 Xpert 架构主线稳定后再评估。
 
-## 长期能力目标
+## 对齐主线
 
-| 能力域 | Xpert 对齐目标 | 当前状态 | 下一步 |
-| --- | --- | --- | --- |
-| Runtime / Execution | 中间件生命周期、任务注册、事件记录、运行观测 | 部分实现 | 建立 Handoff / RunRegistry 闭环 |
-| Agent / Handoff | AgentTask、任务移交、子 Agent、主管-专家协作 | 部分实现 | 将 workflow_agent 输出与 Handoff 编排连接 |
-| Workflow | Xpert 节点类型、Agent 节点、工具节点、知识流水线节点 | 部分实现 | 扩展 subflow、知识类节点与 Agent trace |
-| Toolset / MCP | 统一 Toolset Provider、权限、审计、偏好 | 部分实现 | 扩展 Chat 工具偏好、观测与安全边界 |
-| Knowledge Pipeline | FileAsset、Artifact、Chunk、CitationAnchor、Embedding | 待实现 | 从本地 RAG 元数据模型开始拆分 |
-| Claw / Skill | 用户偏好、工作区 Skill、会话临时选择 | 待实现 | 在 Xpert workspace / skill 抽象稳定后接入 |
-| Environment / Sandbox | 工作区文件、受限执行、浏览器/终端能力 | 待实现 | 先做受限文件 API 和 workspace volume |
-| Observability | trace、checkpoint、usage、事件查询面板 | 部分实现 | 运行观测从工具事件扩展到 Agent/Handoff |
+长期主线按产品骨架排序，而不是按单个节点或单个 API 随机扩展：
 
-## 当前已落地能力
+1. 工作空间资源：统一呈现智能体、知识库、MCP 工具集、API 工具、Skill、提示词、环境、运行记录。
+2. Xpert Studio 画布：对齐智能体画布、节点库、右侧配置面板、预览/发布/运行入口。
+3. Agent / Handoff / RunRegistry：建立任务、移交、运行记录、checkpoint、人工处理与未来调度的稳定底座。
+4. Toolset / MCP / Plugin / Skill：统一工具来源、工具权限、工具审计、插件市场和技能库。
+5. Knowledge Pipeline：把现有 RAG 逐步拆成 FileAsset、Artifact、Chunk、CitationAnchor、流水线草稿与执行观测。
+6. Environment / Sandbox / Memory / Observability：补齐环境变量、受限执行、文件工作区、记忆写入、日志与监测面板。
 
-- Runtime Middleware：已具备 `before_agent`、`before_model`、`wrap_model_call`、`after_model`、`after_agent`、`wrap_tool_call` 生命周期。
-- Chat Runtime：`/api/chat` 已接入默认 runtime pipeline，支持 system prompt 注入和模型调用事件记录；显式设置 `tool_mode=mcp_tools` 时可进入 Runtime Toolset 工具循环，并登记 `chat` run、checkpoint、tool events 与审计摘要。默认仍保持普通聊天路径。
-- Toolset / MCP：`mcp_tool` 已通过 `MCPToolsetProvider`、`CapabilityRegistry`、`run_tool_with_runtime` 调用工具。
-- Tool Policy / Audit：`tool_policy` 可影响 workflow 内 MCP 工具调用，`InMemoryToolAuditStore` 提供最小审计记录。
-- Runtime Middleware Node：前端可拖入 `runtime_middleware` 节点，`system_prompt_injector`、`tool_policy`、`event_recorder`、`tool_audit` 已逐步进入真实执行或可见状态。
-- Workflow Agent Node：classic workflow 可拖入 `workflow_agent` 节点，使用 `rolePrompt` 作为该节点 system prompt、`taskInput` 作为用户输入调用模型，结果写入 `outputVariable`，并登记 `workflow_agent` 子 run；启用 `toolMode=mcp_tools` 时可通过 Runtime Toolset 调用 MCP 工具。
-- Agent Task Runtime：已提供 `AgentTaskStore`、最小 AgentTask API、MetaAgent 任务工作台，以及 classic workflow `agent_task` 节点；该节点当前负责创建任务并输出 `task_id`，暂不做真实多 Agent 调度。
-- Handoff API：已提供 handoff 创建、按任务查询、接受、拒绝、完成的内存态 API，状态转移限定为 `pending -> accepted/rejected`、`accepted -> completed`，并写入 `agent.handoff.created/accepted/rejected/completed` runtime events。
-- Handoff Router Node：classic workflow 可拖入 `handoff_router` 节点，读取上游变量作为 AgentTask input，创建 AgentTask 后立即创建 pending Handoff，并登记 `agent_task` / `agent_handoff` 子 run 与 checkpoint；当前仍由 Handoff Inbox 人工处理，不做自动调度。
-- 运行观测：classic workflow 可查询 per-task runtime events 和 tool audit records，前端 `WorkflowRun` 已提供“运行观测”折叠区。
+## 能力矩阵
 
-## 近期交付顺序
+| 能力域 | 当前状态 | 已完成 | 当前边界 | 下一步 |
+| --- | --- | --- | --- | --- |
+| 工作空间资源 | 部分实现 | `/studio` 已作为 Xpert 式资源总览，聚合智能体、工作流、知识库、MCP、Skill、提示词、环境、运行记录 | 当前是只读聚合视图，不做 workspace 权限、持久化资源表或资源创建编排 | `XPERT-WORKSPACE-HUB-02` |
+| Xpert Studio 画布 | 部分实现 | classic `/workflow`、节点库浮层、配置/运行 tabs、前端节点 registry、Xpert 分类节点菜单、多个 Xpert 对齐节点 | 仍是 classic workflow 画布，不是完整 Xpert Studio；节点 registry 先放前端本地 | `XPERT-STUDIO-PANEL-01` |
+| Runtime Middleware | 部分实现 | middleware lifecycle、`event_recorder`、`system_prompt_injector`、`tool_policy`、`tool_audit` | 仍以内存态为主，部分 middleware 仅最小执行 | 继续挂到 Agent/Workflow 节点运行链 |
+| Agent Task | 部分实现 | AgentTask API、MetaAgent 任务工作台、workflow `agent_task` 节点 | 不做真实多 Agent 调度或持久化队列 | 与 Handoff/RunRegistry 继续闭环 |
+| Handoff | 部分实现 | Handoff API、workflow `agent_handoff`、`handoff_router`、MetaAgent Inbox 手动处理 | pending/accepted/completed 仍是人工内存态流程 | 后续做队列、死信、目标 Agent 执行 |
+| RunRegistry / Trace | 部分实现 | workflow/chat/agent_task/agent_handoff run，checkpoint，运行观测 | 内存态，可观测索引，不是调度器 | 增强 UI 汇总、失败摘要、重试入口 |
+| Workflow Agent | 部分实现 | `workflow_agent` 节点，模型执行，Runtime Toolset 工具模式 | 轻量 JSON 决策，不是 function calling，不自动 handoff | 对齐 Xpert Agent 配置侧栏 |
+| Chat Toolset | 部分实现 | `/api/chat` 可选 MCP 工具模式，chat run 与 checkpoint | 默认关闭，不改变普通聊天；无自动 handoff | 补工具偏好、安全提示和观测 UI |
+| Toolset / MCP | 部分实现 | `MCPToolsetProvider`、`run_tool_with_runtime`、tool policy/audit、MCP 管理基础 | 缺 Xpert 式 Toolset 资源模型与 MCP Runtime 运维页闭环 | `XPERT-RUNTIME-OPS-01` |
+| Plugin / Skill | 部分实现 | `/skills` 与 Skill 安装基础，Docker 已补 git/npm/npx 依赖 | 尚未形成 Xpert 插件市场/Skill 工作区统一模型 | 先建资源总览，再补市场与安装状态 |
+| Knowledge Pipeline | 部分实现 | RAG pipeline 只读元数据 API，`knowledge_citation` 工作流节点 | 不改上传、切分、向量库和聊天 RAG 主路径 | `XPERT-KNOWLEDGE-PIPELINE-02` |
+| Prompt / Slash Command | 下一步 | 仅有提示词资源页雏形和聊天 prompt 使用 | 尚无 Xpert 式工作区提示词/命令配置 | 放在工作空间资源后推进 |
+| Environment / Sandbox | 暂缓 | Docker/MCP/Skill 运行依赖逐步补齐 | 尚无 Xpert 环境变量、沙箱实例、文件工作区语义 | 等 Workspace Hub 和 Runtime Ops 稳定后推进 |
+| Memory / Logs / Monitor | 暂缓 | RunRegistry events/checkpoints/audit 摘要 | 尚无完整记忆写入、日志和监测页面 | 等 Agent 配置侧栏与运行观测稳定后推进 |
 
-1. **RunRegistry Trace 增强**：补齐 workflow_agent / handoff 的 trace、checkpoint、失败摘要与重试入口。
-2. **Handoff 自动编排雏形**：将 workflow_agent 输出与 handoff queue 连接，但仍保持人工可控。
-3. **Chat Agent Toolset 安全增强**：补齐聊天工具偏好、工具 schema 提示和更细粒度安全提示。
-4. **知识流水线底座**：拆分本地 RAG 的文件元数据，建立 FileAsset -> Artifact -> Chunk -> CitationAnchor 的最小模型。
+## 已实现基线
 
-## 2026-07-07 增量：RunRegistry Trace / Checkpoint
+- `/api/chat` 默认保持普通 SSE 聊天；显式启用 `tool_mode=mcp_tools` 时进入 Runtime Toolset 工具循环，登记 chat run、checkpoint、tool events 与审计摘要。
+- Classic workflow 已支持 `workflow_agent`、`agent_task`、`agent_handoff`、`handoff_router`、`knowledge_citation`、`mcp_tool`、`runtime_middleware` 等 Xpert 对齐节点。
+- `/workflow` 节点库已从平铺数组收敛为前端 `workflowNodeRegistry`，按工作流、中间件、知识流水线 tab 和逻辑、转换、工具、记忆、其他等 Xpert 分类渲染；拖拽协议和运行语义不变。
+- `MCPToolsetProvider`、`CapabilityRegistry`、`run_tool_with_runtime` 已成为 MCP 工具调用主路径。
+- `ToolPermissionPolicy` 与 `InMemoryToolAuditStore` 已对 workflow/chat 工具调用提供最小权限与审计。
+- AgentTask/Handoff API 已支持创建、查询、accept、reject、complete；MetaAgent 页面可查看任务和 Handoff Inbox。
+- RunRegistry 已支持 workflow、workflow_agent、agent_task、agent_handoff、chat 等 run 类型，并提供 checkpoint 查询。
+- 本地 RAG 之上已有 Knowledge Pipeline 只读元数据视图：FileAsset、Artifact、KnowledgeChunk、CitationAnchor。
+- `/studio` 已成为 Xpert 对齐工作空间入口，前端以软降级方式读取现有 RAG、MCP、Skill 与 RunRegistry API，展示资源卡片、分类筛选、搜索和最近运行摘要。
 
-RunRegistry 现在提供内存态 checkpoint：每条 `RuntimeRun` 可记录 `event_type`、标题、摘要、severity、metadata 与创建时间。Workflow 运行、`workflow_agent` 模型/工具步骤、`agent_task` 创建、`agent_handoff` 创建与手动状态变更都会写入 checkpoint。新增 API `GET /api/runtime/runs/{run_id}/checkpoints`，前端 `WorkflowRun` 的“运行观测”会展示当前 run 与子 run 的 checkpoint 摘要。
+## Xpert UI 证据摘要
 
-边界：checkpoint 只保存摘要和元信息，不保存完整 prompt、模型输出、工具结果、API key 或用户隐私内容；当前仍是内存态可观测索引，不做持久化、自动重试、队列调度或 checkpoint resume。
+详见 `docs/XPERT_UI_REFERENCE.md`。本轮截图与源码侦察确认 Xpert 的产品骨架主要包括：
 
-## 源码与协议策略
+- Xpert Studio：左侧工作区导航、中心画布、右侧节点配置、顶部预览/发布/功能入口。
+- 节点库菜单：工作流、中间件、知识流水线、工具集分别有清晰分类。
+- 智能体配置侧栏：参数、中间件、知识库、工具、失败重试、备用模型、异常处理、输出结构、记忆写入。
+- 工作空间资源：数字专家、内置工具、MCP 工具集、API 工具、知识库、数据库、Skill、提示词、环境。
+- 运维与市场：MCP Runtime 运维、插件市场、技能市场、提示词工作流、环境变量面板。
 
-- Xpert：仅参考协议、领域模型、运行时分层和测试思路；默认参考改写，不整文件复制。
-- EvoAgentX：保留历史归因说明，不继续扩展其 runtime、optimizer、RAG、MCP toolkit 或 dependency graph。
-- 第三方协议：任何复制片段前必须确认许可证兼容，并在文档中记录来源；默认不复制源码。
+## 分阶段路线
+
+### 阶段 1：资源与导航归拢
+
+目标：先让用户能从一个 Xpert 式工作空间入口理解系统中有哪些资源，而不是继续在分散页面之间跳转。
+
+- `XPERT-WORKSPACE-HUB-01`：已完成第一版工作空间资源总览，聚合智能体、知识库、MCP、Skill、提示词、环境、Run 入口。
+- 当前边界：只读聚合、软降级、不破坏现有入口；暂不引入 workspace 权限、资源创建编排或后端聚合 API。
+
+### 阶段 2：画布节点体系收敛
+
+目标：把 classic workflow 节点从散落的静态列表收敛为 Xpert 分类节点注册表。
+
+- `XPERT-WORKFLOW-PALETTE-01`：已完成第一版前端节点 registry，按逻辑、转换、工具、记忆、其他、中间件、知识流水线分类渲染节点库。
+- 当前边界：registry 先放前端本地；未实现的数据库、注释、知识流水线 stage 只显示禁用占位，不生成节点；拖拽 payload、validate、runner 和 SSE 协议保持不变。
+
+### 阶段 3：智能体配置面板对齐
+
+目标：把当前节点配置表单升级为 Xpert 式智能体配置侧栏，但不一次性实现全部高级语义。
+
+- `XPERT-STUDIO-PANEL-01`：补齐参数、中间件、知识库、工具、失败重试、备用模型、异常处理、输出结构、记忆写入等 UI 分区。
+- 验收重点：先做可见与配置存储，执行语义按后续小步接入。
+
+### 阶段 4：知识流水线从只读到草稿
+
+目标：从当前 RAG 元数据视图推进到可视化知识流水线草稿。
+
+- `XPERT-KNOWLEDGE-PIPELINE-02`：引入数据源、处理器、分块器、图像理解四类 stage 的草稿 schema 与 UI。
+- 验收重点：不迁移向量库，不改变 `/api/rag/query`，只新增可观测草稿层。
+
+### 阶段 5：运行与工具运维收口
+
+目标：补齐 Xpert 的运行、插件、工具、环境和观测管理体验。
+
+- `XPERT-RUNTIME-OPS-01`：MCP Runtime 运维页、插件/Skill 市场、环境变量与运行观测统一入口。
+- 验收重点：只显示元信息，不暴露密钥；MCP/Skill 安装主路径不回归。
+
+## 近期 5 步工程顺序
+
+1. `XPERT-STUDIO-PANEL-01`：智能体配置侧栏对齐，补齐参数、中间件、知识库、工具、重试、输出结构、记忆等分区。
+2. `XPERT-KNOWLEDGE-PIPELINE-02`：从只读 Citation/Artifact 视图推进到可视化知识流水线草稿。
+3. `XPERT-RUNTIME-OPS-01`：MCP Runtime 运维、插件/Skill 市场、环境与运行观测统一收口。
+4. `XPERT-WORKSPACE-HUB-02`：在工作空间 Hub 上接入资源创建入口、标签过滤和更完整的运行摘要。
+5. `XPERT-WORKFLOW-REGISTRY-API-01`：评估是否把前端节点 registry 升级为后端统一 registry API，避免未来前后端元数据漂移。
 
 ## 验收护栏
 
 每个后续对齐任务至少包含：
 
-- 后端语法检查：`python -m py_compile server/main.py server/xpert_runtime/*.py`
-- 相关 pytest：按模块新增 `server/tests/test_xpert_runtime_*.py` 或 workflow 节点测试。
+- 后端语法检查：`python -m py_compile server/main.py server/xpert_runtime/*.py server/workflow_native/*.py`
+- 相关 pytest：按模块新增或更新 `server/tests/test_xpert_runtime_*.py`、workflow 节点测试或 RAG 测试。
 - 前端构建：涉及前端时运行 `cd client && npm.cmd run build`。
-- Docker smoke：影响主路径时运行 `docker compose -p modelmirror up -d --build --force-recreate` 和 `/api/health`。
-- 文档更新：同步更新本文件或相关模块文档，说明状态、边界和下一步。
+- Docker smoke：影响主路径时运行 `docker compose -p modelmirror up -d --build --force-recreate` 与 `/api/health`。
+- 文档更新：同步更新本总纲或相关模块文档，说明状态、边界和下一步。
+- 安全检查：不得提交 `.env`、真实 API key、完整工具输出、完整 prompt、embedding、本地绝对文件路径或密钥。
 
-## 2026-07-08 增量：Knowledge Pipeline 元数据视图
+## 开源与参考边界
 
-Knowledge Pipeline 已从“待实现”进入“部分实现”。当前在本地 RAG 之上新增只读元数据层，将既有知识库、文档与 chunk 映射为 `FileAsset -> Artifact -> KnowledgeChunk -> CitationAnchor`：
-
-- `GET /api/rag/pipeline/assets?kb_id=` 返回上传文件视图，不暴露本地绝对路径。
-- `GET /api/rag/pipeline/artifacts?kb_id=` 返回可检索文档产物与 chunk 计数。
-- `GET /api/rag/pipeline/artifacts/{artifact_id}/chunks` 返回 chunk 摘要、长度和稳定 ID，不返回 embedding。
-- `POST /api/rag/pipeline/citations` 复用现有检索路径返回 citation anchors。
-- `/rag` 新增“知识流水线 Beta”折叠区，可查看当前知识库的 assets / artifacts / chunks 摘要。
-
-边界：本轮不迁移 Chroma/LocalJsonVectorStore，不改变上传、切分、embedding、检索、RAG 问答或聊天协议；该层只是 Xpert Knowledge Pipeline 的本地可观测 schema 底座。
+- Xpert：只参考领域模型、交互结构、文案分类、运行时分层和测试思路；默认参考改写，不复制源码。
+- EvoAgentX：只保留历史归因说明，不继续扩展其 runtime、optimizer、RAG、MCP toolkit 或 dependency graph。
+- 第三方仓库：可用于确认公开能力边界和术语，但不得直接搬运实现；如必须引用片段，先确认许可证兼容并在文档记录来源。
