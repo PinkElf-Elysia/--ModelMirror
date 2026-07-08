@@ -67,6 +67,75 @@ class RagQueryResponse(BaseModel):
     sources: list[RagSourcePayload]
 
 
+class FileAssetPayload(BaseModel):
+    file_asset_id: str
+    document_id: str
+    knowledge_base_id: str
+    filename: str
+    size: int
+    extension: str
+    mime_type: str | None = None
+    created_at: float
+
+
+class FileAssetListResponse(BaseModel):
+    assets: list[FileAssetPayload]
+    asset_count: int
+
+
+class ArtifactPayload(BaseModel):
+    artifact_id: str
+    file_asset_id: str
+    document_id: str
+    knowledge_base_id: str
+    title: str
+    chunk_count: int
+    created_at: float
+
+
+class ArtifactListResponse(BaseModel):
+    artifacts: list[ArtifactPayload]
+    artifact_count: int
+
+
+class KnowledgeChunkPayload(BaseModel):
+    chunk_id: str
+    artifact_id: str
+    knowledge_base_id: str
+    document_id: str
+    index: int
+    text_preview: str
+    text_length: int
+
+
+class KnowledgeChunkListResponse(BaseModel):
+    artifact_id: str
+    chunks: list[KnowledgeChunkPayload]
+    chunk_count: int
+
+
+class CitationAnchorPayload(BaseModel):
+    citation_id: str
+    chunk_id: str
+    artifact_id: str
+    document_id: str
+    document_name: str
+    score: float
+    snippet: str
+
+
+class CitationAnchorRequest(BaseModel):
+    kb_id: str = Field(min_length=1, max_length=160)
+    question: str = Field(min_length=1, max_length=20_000)
+    top_k: int = Field(default=4, ge=1, le=10)
+
+
+class CitationAnchorResponse(BaseModel):
+    kb_id: str
+    citations: list[CitationAnchorPayload]
+    citation_count: int
+
+
 def get_rag_service() -> RagService:
     """Return the process-wide RAG service."""
 
@@ -145,6 +214,62 @@ async def delete_document(doc_id: str) -> dict[str, bool]:
         return {"ok": True}
     except DocumentNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/pipeline/assets", response_model=FileAssetListResponse)
+async def list_pipeline_assets(kb_id: str | None = None) -> FileAssetListResponse:
+    try:
+        assets = get_rag_service().list_pipeline_assets(kb_id=kb_id)
+        return FileAssetListResponse(
+            assets=[FileAssetPayload.model_validate(item) for item in assets],
+            asset_count=len(assets),
+        )
+    except KnowledgeBaseNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/pipeline/artifacts", response_model=ArtifactListResponse)
+async def list_pipeline_artifacts(kb_id: str | None = None) -> ArtifactListResponse:
+    try:
+        artifacts = get_rag_service().list_pipeline_artifacts(kb_id=kb_id)
+        return ArtifactListResponse(
+            artifacts=[ArtifactPayload.model_validate(item) for item in artifacts],
+            artifact_count=len(artifacts),
+        )
+    except KnowledgeBaseNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/pipeline/artifacts/{artifact_id}/chunks", response_model=KnowledgeChunkListResponse)
+async def list_pipeline_artifact_chunks(artifact_id: str) -> KnowledgeChunkListResponse:
+    try:
+        chunks = get_rag_service().list_pipeline_artifact_chunks(artifact_id)
+        return KnowledgeChunkListResponse(
+            artifact_id=artifact_id,
+            chunks=[KnowledgeChunkPayload.model_validate(item) for item in chunks],
+            chunk_count=len(chunks),
+        )
+    except DocumentNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/pipeline/citations", response_model=CitationAnchorResponse)
+async def create_pipeline_citations(payload: CitationAnchorRequest) -> CitationAnchorResponse:
+    try:
+        citations = await get_rag_service().create_pipeline_citations(
+            payload.kb_id,
+            payload.question,
+            top_k=payload.top_k,
+        )
+        return CitationAnchorResponse(
+            kb_id=payload.kb_id,
+            citations=[CitationAnchorPayload.model_validate(item) for item in citations],
+            citation_count=len(citations),
+        )
+    except KnowledgeBaseNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/query", response_model=RagQueryResponse)

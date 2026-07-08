@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import mimetypes
 import os
 import re
 import shutil
@@ -181,6 +182,75 @@ class RagService:
         ]
         return sorted(documents, key=lambda item: item["created_at"], reverse=True)
 
+    def list_pipeline_assets(self, kb_id: str | None = None) -> list[dict[str, Any]]:
+        """Return FileAsset views derived from uploaded documents."""
+
+        metadata = self._read_metadata()
+        self._ensure_kb_exists(metadata, kb_id)
+        assets = [
+            self._file_asset_payload(document)
+            for document in metadata["documents"].values()
+            if kb_id is None or document["kb_id"] == kb_id
+        ]
+        return sorted(assets, key=lambda item: item["created_at"], reverse=True)
+
+    def list_pipeline_artifacts(self, kb_id: str | None = None) -> list[dict[str, Any]]:
+        """Return Artifact views derived from uploaded documents."""
+
+        metadata = self._read_metadata()
+        self._ensure_kb_exists(metadata, kb_id)
+        artifacts = [
+            self._artifact_payload(document)
+            for document in metadata["documents"].values()
+            if kb_id is None or document["kb_id"] == kb_id
+        ]
+        return sorted(artifacts, key=lambda item: item["created_at"], reverse=True)
+
+    def list_pipeline_artifact_chunks(self, artifact_id: str) -> list[dict[str, Any]]:
+        """Return chunk metadata for one artifact without exposing embeddings."""
+
+        document = self._document_for_artifact_id(artifact_id)
+        chunks = self.vector_store.list_document_chunks(document["id"])
+        return [
+            {
+                "chunk_id": chunk.chunk_id,
+                "artifact_id": self._artifact_id(document["id"]),
+                "knowledge_base_id": chunk.kb_id or document["kb_id"],
+                "document_id": document["id"],
+                "index": chunk.chunk_index,
+                "text_preview": _preview_text(chunk.text),
+                "text_length": len(chunk.text),
+            }
+            for chunk in chunks
+        ]
+
+    async def create_pipeline_citations(
+        self,
+        kb_id: str,
+        question: str,
+        *,
+        top_k: int = 4,
+    ) -> list[dict[str, Any]]:
+        """Return citation anchors using the existing RAG retrieval path."""
+
+        result = await self.query(kb_id, question, top_k=top_k)
+        citations: list[dict[str, Any]] = []
+        for source in result.get("sources", []):
+            chunk_id = str(source.get("chunk_id", ""))
+            doc_id = str(source.get("doc_id", ""))
+            citations.append(
+                {
+                    "citation_id": f"citation_{chunk_id}" if chunk_id else f"citation_{len(citations)}",
+                    "chunk_id": chunk_id,
+                    "artifact_id": self._artifact_id(doc_id) if doc_id else "",
+                    "document_id": doc_id,
+                    "document_name": str(source.get("document_name", "")),
+                    "score": float(source.get("score", 0.0)),
+                    "snippet": _preview_text(str(source.get("text", ""))),
+                }
+            )
+        return citations
+
     def delete_document(self, doc_id: str) -> None:
         """Delete one document and its vector chunks."""
 
@@ -328,7 +398,57 @@ class RagService:
             "created_at": document["created_at"],
         }
 
+    def _ensure_kb_exists(self, metadata: dict[str, Any], kb_id: str | None) -> None:
+        if kb_id is not None and kb_id not in metadata["knowledge_bases"]:
+            raise KnowledgeBaseNotFoundError("知识库不存在。")
+
+    def _document_for_artifact_id(self, artifact_id: str) -> dict[str, Any]:
+        doc_id = artifact_id.removeprefix("artifact_")
+        metadata = self._read_metadata()
+        document = metadata["documents"].get(doc_id)
+        if not document:
+            raise DocumentNotFoundError("文档不存在。")
+        return document
+
+    def _file_asset_payload(self, document: dict[str, Any]) -> dict[str, Any]:
+        extension = Path(document["filename"]).suffix.lower()
+        mime_type, _ = mimetypes.guess_type(document["filename"])
+        return {
+            "file_asset_id": self._file_asset_id(document["id"]),
+            "document_id": document["id"],
+            "knowledge_base_id": document["kb_id"],
+            "filename": document["filename"],
+            "size": document["size"],
+            "extension": extension,
+            "mime_type": mime_type,
+            "created_at": document["created_at"],
+        }
+
+    def _artifact_payload(self, document: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "artifact_id": self._artifact_id(document["id"]),
+            "file_asset_id": self._file_asset_id(document["id"]),
+            "document_id": document["id"],
+            "knowledge_base_id": document["kb_id"],
+            "title": document["filename"],
+            "chunk_count": document["chunk_count"],
+            "created_at": document["created_at"],
+        }
+
+    def _artifact_id(self, document_id: str) -> str:
+        return f"artifact_{document_id}"
+
+    def _file_asset_id(self, document_id: str) -> str:
+        return f"file_{document_id}"
+
 
 def _safe_filename(filename: str) -> str:
     cleaned = Path(filename).name.strip() or "document.txt"
     return re.sub(r"[^A-Za-z0-9._\-\u4e00-\u9fff]+", "_", cleaned)
+
+
+def _preview_text(text: str, limit: int = 240) -> str:
+    normalized = " ".join(text.split())
+    if len(normalized) <= limit:
+        return normalized
+    return f"{normalized[:limit].rstrip()}..."

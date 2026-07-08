@@ -6,7 +6,14 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-RuntimeRunType = Literal["workflow", "workflow_agent", "agent_task", "agent_handoff"]
+RuntimeRunType = Literal[
+    "workflow",
+    "workflow_agent",
+    "agent_task",
+    "agent_handoff",
+    "chat",
+    "knowledge_citation",
+]
 RuntimeRunStatus = Literal["pending", "running", "completed", "failed", "cancelled"]
 
 

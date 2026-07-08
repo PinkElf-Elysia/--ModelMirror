@@ -400,6 +400,133 @@ async def test_validate_knowledge_retrieval_top_k(client: httpx.AsyncClient) -> 
 
 
 @pytest.mark.asyncio
+async def test_validate_knowledge_citation_node_ok(client: httpx.AsyncClient) -> None:
+    workflow = linear_workflow()
+    workflow["nodes"][1] = {
+        "id": "citation",
+        "type": "knowledge_citation",
+        "data": {
+            "kind": "knowledge_citation",
+            "queryVariable": "user_input",
+            "knowledgeBaseId": "",
+            "top_k": "4",
+            "outputVariable": "citation_anchors_json",
+        },
+    }
+    workflow["nodes"][2]["data"]["outputVariable"] = "citation_anchors_json"
+    workflow["edges"] = [
+        {"id": "e1", "source": "input", "target": "citation"},
+        {"id": "e2", "source": "citation", "target": "output"},
+    ]
+
+    data = await validate(client, workflow)
+
+    assert data["valid"] is True
+    assert data["issues"] == []
+
+
+@pytest.mark.asyncio
+async def test_validate_knowledge_citation_required_fields(
+    client: httpx.AsyncClient,
+) -> None:
+    workflow = linear_workflow()
+    workflow["nodes"][1] = {
+        "id": "citation",
+        "type": "knowledge_citation",
+        "data": {
+            "kind": "knowledge_citation",
+            "queryVariable": "",
+            "top_k": "11",
+            "outputVariable": "",
+        },
+    }
+    workflow["edges"] = [
+        {"id": "e1", "source": "input", "target": "citation"},
+        {"id": "e2", "source": "citation", "target": "output"},
+    ]
+
+    data = await validate(client, workflow)
+    codes = issue_codes(data)
+
+    assert data["valid"] is False
+    assert "missing_knowledge_citation_query_variable" in codes
+    assert "invalid_knowledge_citation_top_k" in codes
+    assert "missing_knowledge_citation_output_variable" in codes
+
+
+@pytest.mark.asyncio
+async def test_knowledge_citation_query_variable_must_be_declared(
+    client: httpx.AsyncClient,
+) -> None:
+    workflow = linear_workflow()
+    workflow["nodes"][1] = {
+        "id": "citation",
+        "type": "knowledge_citation",
+        "data": {
+            "kind": "knowledge_citation",
+            "queryVariable": "missing_query",
+            "top_k": "3",
+            "outputVariable": "citation_anchors_json",
+        },
+    }
+    workflow["nodes"][2]["data"]["outputVariable"] = "citation_anchors_json"
+    workflow["edges"] = [
+        {"id": "e1", "source": "input", "target": "citation"},
+        {"id": "e2", "source": "citation", "target": "output"},
+    ]
+
+    data = await validate(client, workflow)
+
+    assert data["valid"] is False
+    assert "missing_knowledge_citation_query_variable_reference" in issue_codes(data)
+
+
+@pytest.mark.asyncio
+async def test_knowledge_citation_output_variable_is_declared(
+    client: httpx.AsyncClient,
+) -> None:
+    workflow = linear_workflow()
+    workflow["nodes"][1] = {
+        "id": "citation",
+        "type": "knowledge_citation",
+        "data": {
+            "kind": "knowledge_citation",
+            "queryVariable": "user_input",
+            "top_k": "2",
+            "outputVariable": "citation_anchors_json",
+        },
+    }
+    workflow["nodes"][2] = {
+        "id": "template",
+        "type": "template_transform",
+        "data": {
+            "kind": "template_transform",
+            "template": "Citations: {{citation_anchors_json}}",
+            "outputVariable": "final_text",
+        },
+    }
+    workflow["nodes"].append(
+        {
+            "id": "output",
+            "type": "output",
+            "data": {
+                "kind": "output",
+                "outputVariable": "final_text",
+            },
+        }
+    )
+    workflow["edges"] = [
+        {"id": "e1", "source": "input", "target": "citation"},
+        {"id": "e2", "source": "citation", "target": "template"},
+        {"id": "e3", "source": "template", "target": "output"},
+    ]
+
+    data = await validate(client, workflow)
+
+    assert data["valid"] is True
+
+
+@pytest.mark.asyncio
 async def test_validate_document_extractor_required_fields(
     client: httpx.AsyncClient,
 ) -> None:

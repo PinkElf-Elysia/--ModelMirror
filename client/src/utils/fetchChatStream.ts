@@ -19,6 +19,12 @@ export interface ChatApiMessage {
   content: ChatMessageContent;
 }
 
+export interface ChatRuntimeMeta {
+  runId: string;
+  taskId: string;
+  toolMode: string;
+}
+
 interface FetchChatStreamOptions {
   modelId: string;
   messages: ChatApiMessage[];
@@ -32,6 +38,7 @@ interface FetchChatStreamOptions {
   maxToolIterations?: number;
   promptSuffix?: string;
   signal?: AbortSignal;
+  onRuntimeMeta?: (meta: ChatRuntimeMeta) => void;
   onDelta: (text: string) => void;
 }
 
@@ -206,6 +213,7 @@ export async function fetchChatStream({
   maxToolIterations = 5,
   promptSuffix = "",
   signal,
+  onRuntimeMeta,
   onDelta,
 }: FetchChatStreamOptions) {
   const response = await fetch("/api/chat", {
@@ -242,6 +250,17 @@ export async function fetchChatStream({
       error: errorPayload,
     });
     throw new Error(message);
+  }
+
+  const runtimeRunId = response.headers.get("X-ModelMirror-Runtime-Run-Id") ?? "";
+  const runtimeTaskId = response.headers.get("X-ModelMirror-Runtime-Task-Id") ?? "";
+  const runtimeToolMode = response.headers.get("X-ModelMirror-Tool-Mode") ?? "";
+  if (onRuntimeMeta && (runtimeRunId || runtimeTaskId)) {
+    onRuntimeMeta({
+      runId: runtimeRunId,
+      taskId: runtimeTaskId,
+      toolMode: runtimeToolMode,
+    });
   }
 
   const reader = response.body?.getReader();

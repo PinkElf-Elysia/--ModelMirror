@@ -33,6 +33,7 @@ import {
   fetchChatStream,
   type ChatApiMessage,
   type ChatMessageContent,
+  type ChatRuntimeMeta,
   type ChatRole,
 } from "../utils/fetchChatStream";
 
@@ -95,6 +96,74 @@ interface InstalledSkillsResponse {
 interface SkillContentResponse {
   skill_id: string;
   content: string;
+}
+
+interface RuntimeRunPayload {
+  run_id: string;
+  run_type: string;
+  status: string;
+  title: string;
+  metadata: Record<string, unknown>;
+  error: string | null;
+}
+
+interface RuntimeCheckpointPayload {
+  checkpoint_id: string;
+  event_type: string;
+  title: string;
+  summary: string;
+  severity: string;
+  created_at: number;
+}
+
+interface ChatRuntimeEventPayload {
+  id: string;
+  type: string;
+  severity: string;
+  payload: Record<string, unknown>;
+  created_at: number;
+}
+
+interface ChatToolAuditPayload {
+  record_id: string;
+  tool_name: string;
+  status: string;
+  duration_ms: number | null;
+  output_length: number | null;
+  error: string | null;
+}
+
+interface ChatRuntimeEventsResponse {
+  task_id: string;
+  run_id: string | null;
+  events: ChatRuntimeEventPayload[];
+  event_count: number;
+  tool_audit_records: ChatToolAuditPayload[];
+  tool_audit_count: number;
+}
+
+interface ChatRuntimeObservation {
+  run: RuntimeRunPayload | null;
+  checkpoints: RuntimeCheckpointPayload[];
+  events: ChatRuntimeEventPayload[];
+  auditRecords: ChatToolAuditPayload[];
+  eventCount: number;
+  auditCount: number;
+}
+
+function shortRuntimeId(value: string | null | undefined) {
+  if (!value) return "未登记";
+  return value.length > 12 ? `${value.slice(0, 8)}...${value.slice(-4)}` : value;
+}
+
+function formatRuntimeTimestamp(value: number | null | undefined) {
+  if (!value) return "";
+  return new Date(value * 1000).toLocaleTimeString("zh-CN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
 }
 
 const modalityLabels: Record<string, string> = {
@@ -491,6 +560,11 @@ export default function ChatPage() {
   const [runtimeToolNames, setRuntimeToolNames] = useState("");
   const [runtimeMaxToolIterations, setRuntimeMaxToolIterations] = useState("5");
   const [runtimePromptSuffix, setRuntimePromptSuffix] = useState("");
+  const [runtimeMeta, setRuntimeMeta] = useState<ChatRuntimeMeta | null>(null);
+  const [runtimeObservation, setRuntimeObservation] =
+    useState<ChatRuntimeObservation | null>(null);
+  const [runtimeObservationLoading, setRuntimeObservationLoading] = useState(false);
+  const [runtimeObservationError, setRuntimeObservationError] = useState("");
   const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBase[]>([]);
   const [selectedKnowledgeBaseId, setSelectedKnowledgeBaseId] = useState("");
   const [isLoadingKnowledgeBases, setIsLoadingKnowledgeBases] = useState(false);
@@ -690,6 +764,45 @@ export default function ChatPage() {
     }
   }
 
+  async function loadRuntimeObservation(meta: ChatRuntimeMeta | null = runtimeMeta) {
+    if (!meta?.taskId || !meta.runId) return;
+    setRuntimeObservationLoading(true);
+    setRuntimeObservationError("");
+    try {
+      const [runResponse, checkpointResponse, eventsResponse] = await Promise.all([
+        fetch(`/api/runtime/runs/${meta.runId}`),
+        fetch(`/api/runtime/runs/${meta.runId}/checkpoints?limit=30`),
+        fetch(`/api/chat/runtime-events/${meta.taskId}`),
+      ]);
+      if (!runResponse.ok) throw new Error(await readApiError(runResponse));
+      if (!checkpointResponse.ok) {
+        throw new Error(await readApiError(checkpointResponse));
+      }
+      if (!eventsResponse.ok) throw new Error(await readApiError(eventsResponse));
+
+      const run = (await runResponse.json()) as RuntimeRunPayload;
+      const checkpoints =
+        (await checkpointResponse.json()) as RuntimeCheckpointPayload[];
+      const eventsData = (await eventsResponse.json()) as ChatRuntimeEventsResponse;
+      setRuntimeObservation({
+        run,
+        checkpoints,
+        events: eventsData.events,
+        auditRecords: eventsData.tool_audit_records,
+        eventCount: eventsData.event_count,
+        auditCount: eventsData.tool_audit_count,
+      });
+    } catch (loadError) {
+      setRuntimeObservationError(
+        loadError instanceof Error
+          ? loadError.message
+          : "运行观测加载失败",
+      );
+    } finally {
+      setRuntimeObservationLoading(false);
+    }
+  }
+
   async function loadSkillContent(skillId: string) {
     if (!skillId) return "";
     const cached = skillContentCache[skillId];
@@ -793,7 +906,13 @@ export default function ChatPage() {
     if (!overrideText) setUploadedImages([]);
     setError("");
     setIsSending(true);
+    if (runtimeToolsEnabled) {
+      setRuntimeMeta(null);
+      setRuntimeObservation(null);
+      setRuntimeObservationError("");
+    }
 
+    let activeRuntimeMeta: ChatRuntimeMeta | null = null;
     try {
       if (selectedKnowledgeBaseId && rawText) {
         const ragQuestion = activeSkillContent
@@ -841,6 +960,12 @@ export default function ChatPage() {
           Math.max(1, Number(runtimeMaxToolIterations) || 5),
         ),
         promptSuffix: runtimePromptSuffix,
+        onRuntimeMeta: (meta) => {
+          activeRuntimeMeta = meta;
+          setRuntimeMeta(meta);
+          setRuntimeObservation(null);
+          setRuntimeObservationError("");
+        },
         onDelta: (delta) => {
           setMessages((current) =>
             current.map((message) =>
@@ -858,6 +983,9 @@ export default function ChatPage() {
           );
         },
       });
+      if (activeRuntimeMeta) {
+        await loadRuntimeObservation(activeRuntimeMeta);
+      }
 
       setMessages((current) =>
         current.map((message) =>
@@ -871,6 +999,9 @@ export default function ChatPage() {
         ),
       );
     } catch (streamError) {
+      if (activeRuntimeMeta) {
+        await loadRuntimeObservation(activeRuntimeMeta);
+      }
       const message =
         streamError instanceof Error && streamError.message
           ? streamError.message
@@ -1328,6 +1459,106 @@ export default function ChatPage() {
                     </div>
                   ) : null}
                 </div>
+                {runtimeToolsEnabled &&
+                (runtimeMeta || runtimeObservation || runtimeObservationError) ? (
+                  <div className="mb-3 rounded-lg border border-cyan-300/15 bg-cyan-300/[0.055] px-3 py-3">
+                    <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                      <div>
+                        <p className="text-xs font-semibold text-cyan-100">
+                          运行观测 Beta
+                        </p>
+                        <p className="mt-1 text-xs leading-5 text-slate-400">
+                          run {shortRuntimeId(runtimeMeta?.runId)} · task{" "}
+                          {shortRuntimeId(runtimeMeta?.taskId)}
+                        </p>
+                      </div>
+                      <button
+                        className="rounded-full border border-cyan-300/20 px-3 py-1.5 text-xs font-semibold text-cyan-100 transition hover:border-cyan-300/45 hover:bg-cyan-300/10 disabled:cursor-not-allowed disabled:opacity-60"
+                        disabled={runtimeObservationLoading || !runtimeMeta}
+                        onClick={() => void loadRuntimeObservation()}
+                        type="button"
+                      >
+                        {runtimeObservationLoading ? "加载中" : "刷新观测"}
+                      </button>
+                    </div>
+                    {runtimeObservationError ? (
+                      <p className="mt-3 rounded-lg border border-rose-300/20 bg-rose-400/10 px-3 py-2 text-xs text-rose-100">
+                        {runtimeObservationError}
+                      </p>
+                    ) : null}
+                    {runtimeObservation ? (
+                      <div className="mt-3 grid gap-3 xl:grid-cols-3">
+                        <div className="rounded-lg border border-white/10 bg-ink-950/55 p-3">
+                          <p className="text-[11px] font-semibold text-slate-400">
+                            Run 状态
+                          </p>
+                          <p className="mt-1 text-sm font-semibold text-white">
+                            {runtimeObservation.run?.status ?? "unknown"}
+                          </p>
+                          {runtimeObservation.run?.error ? (
+                            <p className="mt-1 truncate text-xs leading-5 text-rose-100">
+                              {runtimeObservation.run.error}
+                            </p>
+                          ) : (
+                            <p className="mt-1 text-xs leading-5 text-slate-400">
+                              事件 {runtimeObservation.eventCount} 条，审计{" "}
+                              {runtimeObservation.auditCount} 条。
+                            </p>
+                          )}
+                        </div>
+                        <div className="rounded-lg border border-white/10 bg-ink-950/55 p-3">
+                          <p className="text-[11px] font-semibold text-slate-400">
+                            Checkpoint
+                          </p>
+                          <div className="mt-2 space-y-2">
+                            {runtimeObservation.checkpoints.slice(0, 4).map((item) => (
+                              <div key={item.checkpoint_id}>
+                                <p className="truncate text-xs font-semibold text-slate-100">
+                                  {item.event_type}
+                                </p>
+                                <p className="truncate text-[11px] text-slate-400">
+                                  {formatRuntimeTimestamp(item.created_at)}
+                                  {item.summary ? ` · ${item.summary}` : ""}
+                                </p>
+                              </div>
+                            ))}
+                            {runtimeObservation.checkpoints.length === 0 ? (
+                              <p className="text-xs text-slate-500">暂无 checkpoint。</p>
+                            ) : null}
+                          </div>
+                        </div>
+                        <div className="rounded-lg border border-white/10 bg-ink-950/55 p-3">
+                          <p className="text-[11px] font-semibold text-slate-400">
+                            Tool 事件 / 审计
+                          </p>
+                          <div className="mt-2 space-y-2">
+                            {runtimeObservation.auditRecords.slice(0, 3).map((item) => (
+                              <div key={item.record_id}>
+                                <p className="truncate text-xs font-semibold text-slate-100">
+                                  {item.tool_name} · {item.status}
+                                </p>
+                                <p className="truncate text-[11px] text-slate-400">
+                                  {item.duration_ms != null
+                                    ? `${item.duration_ms.toFixed(0)}ms`
+                                    : "无耗时"}
+                                  {item.output_length != null
+                                    ? ` · ${item.output_length} chars`
+                                    : ""}
+                                  {item.error ? ` · ${item.error}` : ""}
+                                </p>
+                              </div>
+                            ))}
+                            {runtimeObservation.auditRecords.length === 0 ? (
+                              <p className="text-xs text-slate-500">
+                                暂无工具审计记录。
+                              </p>
+                            ) : null}
+                          </div>
+                        </div>
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
                 <div
                   className={`rounded-lg border p-2 transition ${
                     superPromptMode

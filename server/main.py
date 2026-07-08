@@ -28,9 +28,9 @@ except ModuleNotFoundError:
     from api.dify_proxy import router as dify_router
 
 try:
-    from server.rag.api import router as rag_router
+    from server.rag.api import get_rag_service, router as rag_router
 except ModuleNotFoundError:
-    from rag.api import router as rag_router
+    from rag.api import get_rag_service, router as rag_router
 
 try:
     from server.skills.api import router as skills_router
@@ -224,6 +224,12 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
     allow_headers=["*"],
+    expose_headers=[
+        "X-ModelMirror-Actual-Model",
+        "X-ModelMirror-Tool-Mode",
+        "X-ModelMirror-Runtime-Run-Id",
+        "X-ModelMirror-Runtime-Task-Id",
+    ],
 )
 
 app.include_router(dify_router)
@@ -250,6 +256,7 @@ runtime_capabilities.register(
     description="MCP tools runtime capability for workflow and agents.",
 )
 workflow_task_store: dict[str, dict[str, Any]] = {}
+chat_runtime_task_store: dict[str, dict[str, Any]] = {}
 
 
 class TextContentPart(BaseModel):
@@ -418,6 +425,7 @@ WorkflowNodeType = Literal[
     "variable_aggregator",
     "parameter_extractor",
     "knowledge_retrieval",
+    "knowledge_citation",
     "document_extractor",
     "human_intervention",
     "question_classifier",
@@ -959,6 +967,30 @@ def runtime_tool_result_text(call_result: Any) -> str:
     return output_text
 
 
+async def record_chat_checkpoint(
+    run_id: str | None,
+    *,
+    event_type: str,
+    title: str,
+    summary: str = "",
+    severity: str = "info",
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    if not run_id:
+        return
+    try:
+        await run_registry.record_checkpoint(
+            run_id,
+            event_type=event_type,
+            title=title,
+            summary=summary,
+            severity=severity,
+            metadata=metadata,
+        )
+    except Exception as exc:
+        logger.warning("Chat runtime checkpoint recording failed: %s", exc)
+
+
 async def collect_chat_completion_text(
     model_id: str,
     messages: list[ChatMessage],
@@ -1000,6 +1032,8 @@ async def stream_chat_toolset_text(
     *,
     runtime_pipeline: MiddlewarePipeline,
     runtime_context: MiddlewareContext,
+    run_id: str | None = None,
+    audit_store: InMemoryToolAuditStore | None = None,
 ) -> AsyncIterator[str]:
     requested_tools = parse_chat_tool_names(payload.tool_names)
     all_tools = await workflow_mcp_provider.list_tools()
@@ -1050,13 +1084,52 @@ async def stream_chat_toolset_text(
             )
         ).strip()
         decision = extract_json_decision(raw_response)
+        decision_type = "raw"
+        if isinstance(decision, dict):
+            if isinstance(decision.get("answer"), str) and str(decision.get("answer")).strip():
+                decision_type = "answer"
+            elif str(decision.get("tool") or "").strip():
+                decision_type = "tool"
+        await record_chat_checkpoint(
+            run_id,
+            event_type="chat.model_decision",
+            title="Model decision",
+            summary=f"iteration={iteration_index + 1}, type={decision_type}",
+            metadata={
+                "iteration": iteration_index + 1,
+                "decision_type": decision_type,
+                "raw_length": len(raw_response),
+            },
+        )
         if decision is None:
+            await record_chat_checkpoint(
+                run_id,
+                event_type="chat.answer",
+                title="Final answer",
+                summary=f"length={len(raw_response)}",
+                metadata={
+                    "iteration": iteration_index + 1,
+                    "answer_length": len(raw_response),
+                    "fallback_raw": True,
+                },
+            )
             yield raw_response
             return
 
         answer = decision.get("answer")
         if isinstance(answer, str) and answer.strip():
-            yield answer.strip()
+            answer_text = answer.strip()
+            await record_chat_checkpoint(
+                run_id,
+                event_type="chat.answer",
+                title="Final answer",
+                summary=f"length={len(answer_text)}",
+                metadata={
+                    "iteration": iteration_index + 1,
+                    "answer_length": len(answer_text),
+                },
+            )
+            yield answer_text
             return
 
         tool_name = str(decision.get("tool") or "").strip()
@@ -1104,9 +1177,26 @@ async def stream_chat_toolset_text(
             runtime_pipeline,
             tool_context,
             policy=workflow_tool_policy,
-            audit_store=workflow_tool_audit_store,
+            audit_store=audit_store or workflow_tool_audit_store,
         )
         tool_result_text = runtime_tool_result_text(call_result)
+        await record_chat_checkpoint(
+            run_id,
+            event_type="chat.tool_call",
+            title="Tool call",
+            summary=f"{tool_name} output_length={len(tool_result_text)}",
+            metadata={
+                "iteration": iteration_index + 1,
+                "tool_name": tool_name,
+                "output_length": len(tool_result_text),
+                "content_types": getattr(call_result, "metadata", {}).get(
+                    "content_types",
+                    [],
+                )
+                if isinstance(getattr(call_result, "metadata", {}), dict)
+                else [],
+            },
+        )
         yield (
             f"\n[Runtime 工具调用 {iteration_index + 1}/{payload.max_tool_iterations}] "
             f"{tool_name} 完成，结果预览：{tool_result_text[:240]}\n"
@@ -1421,6 +1511,7 @@ def workflow_node_kind(node: WorkflowNodePayload) -> WorkflowNodeType:
         "variable_aggregator",
         "parameter_extractor",
         "knowledge_retrieval",
+        "knowledge_citation",
         "document_extractor",
         "human_intervention",
         "question_classifier",
@@ -2898,6 +2989,182 @@ async def run_workflow(payload: WorkflowRunRequest, request: Request):
                             }
                         )
 
+                elif kind == "knowledge_citation":
+                    output_variable = str(
+                        node.data.get("outputVariable") or "citation_anchors_json"
+                    )
+                    output = json.dumps(
+                        {"citations": [], "citation_count": 0},
+                        ensure_ascii=False,
+                    )
+                    citation_run = None
+                    try:
+                        query_variable = str(
+                            node.data.get("queryVariable") or "user_input"
+                        ).strip()
+                        query_text = variables.get(query_variable, "")
+                        knowledge_base_id = str(
+                            node.data.get("knowledgeBaseId") or ""
+                        ).strip()
+                        try:
+                            top_k = int(str(node.data.get("top_k") or "4"))
+                        except ValueError:
+                            top_k = 4
+                        top_k = max(1, min(top_k, 10))
+
+                        service = get_rag_service()
+                        if not knowledge_base_id:
+                            knowledge_bases = service.list_knowledge_bases()
+                            if knowledge_bases:
+                                knowledge_base_id = str(knowledge_bases[0]["id"])
+
+                        citation_run = await run_registry.create_run(
+                            "knowledge_citation",
+                            title,
+                            status="running",
+                            source_id=f"{task_id}:{node.id}",
+                            parent_run_id=workflow_run.run_id,
+                            metadata={
+                                "workflow_id": payload.workflow.id,
+                                "workflow_title": payload.workflow.title,
+                                "workflow_task_id": task_id,
+                                "node_id": node.id,
+                                "node_title": title,
+                                "kb_id": knowledge_base_id,
+                                "query_variable": query_variable,
+                                "output_variable": output_variable,
+                                "top_k": top_k,
+                            },
+                        )
+                        await run_registry.record_checkpoint(
+                            citation_run.run_id,
+                            event_type="knowledge_citation.started",
+                            title="Knowledge citation started",
+                            summary=f"query_variable={query_variable}, top_k={top_k}",
+                            metadata={
+                                "node_id": node.id,
+                                "kb_id": knowledge_base_id,
+                                "query_variable": query_variable,
+                                "output_variable": output_variable,
+                                "top_k": top_k,
+                            },
+                        )
+
+                        if not knowledge_base_id:
+                            variables[output_variable] = output
+                            await run_registry.update_run(
+                                citation_run.run_id,
+                                status="completed",
+                                metadata={"citation_count": 0},
+                            )
+                            await run_registry.record_checkpoint(
+                                citation_run.run_id,
+                                event_type="knowledge_citation.completed",
+                                title="Knowledge citation completed",
+                                summary="citation_count=0",
+                                metadata={
+                                    "node_id": node.id,
+                                    "citation_count": 0,
+                                },
+                            )
+                            yield sse_payload(
+                                {
+                                    "event": "error",
+                                    "node_id": node.id,
+                                    "message": "RAG 索引尚未就绪，暂无可查询知识库。",
+                                }
+                            )
+                            yield sse_payload(
+                                {
+                                    "event": "node_delta",
+                                    "node_id": node.id,
+                                    "node_title": title,
+                                    "node_type": kind,
+                                    "output": "未找到可查询知识库，已写入空 CitationAnchor JSON。",
+                                    "variable": output_variable,
+                                    "run_id": citation_run.run_id,
+                                    "citation_count": 0,
+                                }
+                            )
+                        else:
+                            citations = await service.create_pipeline_citations(
+                                knowledge_base_id,
+                                query_text,
+                                top_k=top_k,
+                            )
+                            payload_json = {
+                                "citations": citations,
+                                "citation_count": len(citations),
+                            }
+                            output = json.dumps(payload_json, ensure_ascii=False)
+                            variables[output_variable] = output
+                            await run_registry.update_run(
+                                citation_run.run_id,
+                                status="completed",
+                                metadata={
+                                    "kb_id": knowledge_base_id,
+                                    "citation_count": len(citations),
+                                    "output_length": len(output),
+                                },
+                            )
+                            await run_registry.record_checkpoint(
+                                citation_run.run_id,
+                                event_type="knowledge_citation.completed",
+                                title="Knowledge citation completed",
+                                summary=f"citation_count={len(citations)}",
+                                metadata={
+                                    "node_id": node.id,
+                                    "kb_id": knowledge_base_id,
+                                    "citation_count": len(citations),
+                                    "output_variable": output_variable,
+                                },
+                            )
+                            yield sse_payload(
+                                {
+                                    "event": "node_delta",
+                                    "node_id": node.id,
+                                    "node_title": title,
+                                    "node_type": kind,
+                                    "output": (
+                                        f"已生成 {len(citations)} 个 CitationAnchor，"
+                                        f"写入 {output_variable}。"
+                                    ),
+                                    "variable": output_variable,
+                                    "run_id": citation_run.run_id,
+                                    "citation_count": len(citations),
+                                }
+                            )
+                    except Exception as exc:
+                        logger.warning("Workflow knowledge_citation node failed: %s", exc)
+                        variables[output_variable] = output
+                        if citation_run is not None:
+                            try:
+                                await run_registry.record_checkpoint(
+                                    citation_run.run_id,
+                                    event_type="knowledge_citation.failed",
+                                    title="Knowledge citation failed",
+                                    summary=str(exc),
+                                    severity="error",
+                                    metadata={"node_id": node.id},
+                                )
+                                await run_registry.update_run(
+                                    citation_run.run_id,
+                                    status="failed",
+                                    error=str(exc),
+                                )
+                            except Exception:
+                                logger.warning(
+                                    "Failed to update knowledge_citation run status",
+                                    exc_info=True,
+                                )
+                        yield sse_payload(
+                            {
+                                "event": "error",
+                                "node_id": node.id,
+                                "message": str(exc),
+                            }
+                        )
+
                 elif kind == "document_extractor":
                     try:
                         output_variable = str(
@@ -4277,6 +4544,32 @@ async def get_workflow_task_status(task_id: str):
     )
 
 
+def runtime_event_to_payload(event: Any) -> dict[str, Any]:
+    return {
+        "id": event.id,
+        "type": event.type,
+        "payload": dict(event.payload or {}),
+        "task_id": event.task_id,
+        "trace_id": event.trace_id,
+        "severity": event.severity,
+        "created_at": event.created_at,
+    }
+
+
+def tool_audit_record_to_payload(record: Any) -> dict[str, Any]:
+    return {
+        "record_id": record.record_id,
+        "tool_name": record.tool_name,
+        "status": record.status,
+        "started_at": record.started_at,
+        "finished_at": record.finished_at,
+        "duration_ms": record.duration_ms,
+        "output_length": record.output_length,
+        "content_types": record.content_types,
+        "error": record.error,
+    }
+
+
 @app.get("/api/workflow/runtime-events/{task_id}")
 async def get_workflow_runtime_events(task_id: str):
     task = get_workflow_task_or_none(task_id)
@@ -4287,18 +4580,7 @@ async def get_workflow_runtime_events(task_id: str):
     events: list[dict[str, Any]] = []
     if isinstance(event_store, RuntimeEventStore):
         event_list = await event_store.list_events(task_id=task_id)
-        events = [
-            {
-                "id": event.id,
-                "type": event.type,
-                "payload": dict(event.payload or {}),
-                "task_id": event.task_id,
-                "trace_id": event.trace_id,
-                "severity": event.severity,
-                "created_at": event.created_at,
-            }
-            for event in event_list
-        ]
+        events = [runtime_event_to_payload(event) for event in event_list]
 
     audit_store = task.get("tool_audit_store")
     if not isinstance(audit_store, InMemoryToolAuditStore):
@@ -4306,25 +4588,45 @@ async def get_workflow_runtime_events(task_id: str):
     audit_records: list[dict[str, Any]] = []
     try:
         record_list = await audit_store.list_records()
-        audit_records = [
-            {
-                "record_id": record.record_id,
-                "tool_name": record.tool_name,
-                "status": record.status,
-                "started_at": record.started_at,
-                "finished_at": record.finished_at,
-                "duration_ms": record.duration_ms,
-                "output_length": record.output_length,
-                "content_types": record.content_types,
-                "error": record.error,
-            }
-            for record in record_list
-        ]
+        audit_records = [tool_audit_record_to_payload(record) for record in record_list]
     except Exception as exc:
         logger.warning("Workflow runtime audit listing failed: %s", exc)
 
     return {
         "task_id": task_id,
+        "events": events,
+        "event_count": len(events),
+        "tool_audit_records": audit_records,
+        "tool_audit_count": len(audit_records),
+    }
+
+
+@app.get("/api/chat/runtime-events/{task_id}")
+async def get_chat_runtime_events(task_id: str):
+    task = chat_runtime_task_store.get(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Chat runtime task not found.")
+
+    event_store = task.get("runtime_event_store")
+    events: list[dict[str, Any]] = []
+    if isinstance(event_store, RuntimeEventStore):
+        event_list = await event_store.list_events(task_id=task_id)
+        events = [runtime_event_to_payload(event) for event in event_list]
+
+    audit_store = task.get("tool_audit_store")
+    audit_records: list[dict[str, Any]] = []
+    if isinstance(audit_store, InMemoryToolAuditStore):
+        try:
+            record_list = await audit_store.list_records()
+            audit_records = [
+                tool_audit_record_to_payload(record) for record in record_list
+            ]
+        except Exception as exc:
+            logger.warning("Chat runtime audit listing failed: %s", exc)
+
+    return {
+        "task_id": task_id,
+        "run_id": task.get("run_id"),
         "events": events,
         "event_count": len(events),
         "tool_audit_records": audit_records,
@@ -4431,7 +4733,14 @@ async def list_runtime_runs(
     source_id: str | None = None,
     limit: int = 50,
 ):
-    valid_run_types = {"workflow", "workflow_agent", "agent_task", "agent_handoff"}
+    valid_run_types = {
+        "workflow",
+        "workflow_agent",
+        "agent_task",
+        "agent_handoff",
+        "chat",
+        "knowledge_citation",
+    }
     valid_statuses = {"pending", "running", "completed", "failed", "cancelled"}
     if run_type is not None and run_type not in valid_run_types:
         raise HTTPException(status_code=400, detail="Invalid runtime run type.")
@@ -5490,17 +5799,67 @@ async def chat(payload: ChatRequest, request: Request):
             logger.warning("Xpert runtime chat finalize failed: %s", exc)
 
     if payload.tool_mode == "mcp_tools":
+        chat_event_store = RuntimeEventStore()
+        chat_audit_store = InMemoryToolAuditStore()
+        requested_tools = parse_chat_tool_names(payload.tool_names)
+        chat_run = await run_registry.create_run(
+            "chat",
+            "Chat Runtime Toolset",
+            status="running",
+            source_id=runtime_task_id,
+            metadata={
+                "model_id": payload.model_id,
+                "tool_mode": payload.tool_mode,
+                "message_count": len(payload.messages),
+                "tool_names": sorted(requested_tools),
+                "max_tool_iterations": payload.max_tool_iterations,
+            },
+        )
+        chat_runtime_task_store[runtime_task_id] = {
+            "run_id": chat_run.run_id,
+            "created_at": time.time(),
+            "runtime_event_store": chat_event_store,
+            "tool_audit_store": chat_audit_store,
+            "model_id": payload.model_id,
+        }
+
         if runtime_pipeline is None or runtime_context is None:
             runtime_pipeline, runtime_context = create_default_runtime(
+                store=chat_event_store,
                 middlewares=[event_recorder]
             )
-            runtime_context.task_id = runtime_task_id
-            runtime_context.trace_id = request.headers.get("x-trace-id") or runtime_task_id
-            runtime_context.metadata = {
+        else:
+            runtime_context.store = chat_event_store
+        runtime_context.task_id = runtime_task_id
+        runtime_context.trace_id = request.headers.get("x-trace-id") or runtime_task_id
+        runtime_context.metadata = {
+            "model_id": payload.model_id,
+            "message_count": len(payload.messages),
+            "tool_mode": payload.tool_mode,
+            "run_id": chat_run.run_id,
+        }
+        try:
+            await runtime_pipeline.before_agent(
+                {
+                    "model_id": payload.model_id,
+                    "messages": chat_messages_json(payload.messages),
+                    "tool_mode": payload.tool_mode,
+                },
+                runtime_context,
+            )
+        except Exception as exc:
+            logger.warning("Chat runtime tool mode start event failed: %s", exc)
+        await record_chat_checkpoint(
+            chat_run.run_id,
+            event_type="chat.started",
+            title="Chat toolset started",
+            summary=f"model={payload.model_id}, tools={len(requested_tools) or 'all'}",
+            metadata={
                 "model_id": payload.model_id,
-                "message_count": len(payload.messages),
-                "tool_mode": payload.tool_mode,
-            }
+                "tool_names_count": len(requested_tools),
+                "max_tool_iterations": payload.max_tool_iterations,
+            },
+        )
 
         async def stream_tool_response():
             accumulated_chunks: list[str] = []
@@ -5511,6 +5870,8 @@ async def chat(payload: ChatRequest, request: Request):
                     payload,
                     runtime_pipeline=runtime_pipeline,
                     runtime_context=runtime_context,
+                    run_id=chat_run.run_id,
+                    audit_store=chat_audit_store,
                 ):
                     accumulated_chunks.append(delta)
                     yield chat_sse_delta(delta)
@@ -5519,8 +5880,36 @@ async def chat(payload: ChatRequest, request: Request):
                 runtime_status = "error"
                 runtime_error = str(exc)
                 logger.warning("Runtime chat toolset failed: %s", exc)
+                await record_chat_checkpoint(
+                    chat_run.run_id,
+                    event_type="chat.failed",
+                    title="Chat toolset failed",
+                    summary=str(exc)[:500],
+                    severity="error",
+                    metadata={"model_id": payload.model_id},
+                )
+                try:
+                    await run_registry.update_run(
+                        chat_run.run_id,
+                        status="failed",
+                        error=runtime_error,
+                        metadata={"output_length": len("".join(accumulated_chunks))},
+                    )
+                except Exception as update_exc:
+                    logger.warning("Chat runtime run failure update failed: %s", update_exc)
                 yield chat_sse_error(str(exc))
             finally:
+                if runtime_status == "completed":
+                    try:
+                        await run_registry.update_run(
+                            chat_run.run_id,
+                            status="completed",
+                            metadata={
+                                "output_length": len("".join(accumulated_chunks)),
+                            },
+                        )
+                    except Exception as update_exc:
+                        logger.warning("Chat runtime run completion update failed: %s", update_exc)
                 await client.aclose()
                 await finalize_runtime(
                     runtime_status,
@@ -5537,6 +5926,8 @@ async def chat(payload: ChatRequest, request: Request):
                 "Connection": "keep-alive",
                 "X-ModelMirror-Actual-Model": payload.model_id,
                 "X-ModelMirror-Tool-Mode": "mcp_tools",
+                "X-ModelMirror-Runtime-Run-Id": chat_run.run_id,
+                "X-ModelMirror-Runtime-Task-Id": runtime_task_id,
             },
         )
 

@@ -222,6 +222,18 @@ function createNodeData(
     };
   }
 
+  if (kind === "knowledge_citation") {
+    return {
+      kind,
+      title: "知识引用锚点",
+      description: "把本地 RAG 检索结果转换为 CitationAnchor JSON。",
+      queryVariable: "user_input",
+      knowledgeBaseId: "",
+      top_k: "4",
+      outputVariable: "citation_anchors_json",
+    };
+  }
+
   if (kind === "document_extractor") {
     return {
       kind,
@@ -930,6 +942,47 @@ function NodeConfig({ node, onChange }: NodeConfigProps) {
               onChange={(event) => update({ top_k: event.target.value })}
               type="number"
               value={data.top_k ?? "3"}
+            />
+          </Field>
+          <Field label="输出变量">
+            <input
+              className={textInputClass()}
+              onChange={(event) => update({ outputVariable: event.target.value })}
+              value={data.outputVariable ?? ""}
+            />
+          </Field>
+        </>
+      ) : null}
+
+      {data.kind === "knowledge_citation" ? (
+        <>
+          <div className="rounded-lg border border-teal-300/25 bg-teal-300/10 px-3 py-2 text-xs leading-5 text-teal-50">
+            输出为 JSON 字符串，包含 citations 与 citation_count；不返回本地文件路径或向量内容。
+          </div>
+          <Field label="查询变量">
+            <input
+              className={textInputClass()}
+              onChange={(event) => update({ queryVariable: event.target.value })}
+              value={data.queryVariable ?? ""}
+            />
+          </Field>
+          <Field label="知识库 ID（可选）">
+            <input
+              className={textInputClass()}
+              onChange={(event) => update({ knowledgeBaseId: event.target.value })}
+              placeholder="留空时使用第一个知识库"
+              value={data.knowledgeBaseId ?? ""}
+            />
+          </Field>
+          <Field label="返回引用数 Top K">
+            <input
+              className={textInputClass()}
+              inputMode="numeric"
+              max={10}
+              min={1}
+              onChange={(event) => update({ top_k: event.target.value })}
+              type="number"
+              value={data.top_k ?? "4"}
             />
           </Field>
           <Field label="输出变量">
