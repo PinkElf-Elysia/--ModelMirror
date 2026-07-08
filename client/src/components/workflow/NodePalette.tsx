@@ -111,6 +111,12 @@ const paletteItems: PaletteItem[] = [
     description: "把 Agent Task 显式移交给另一个智能体，输出 handoff_id。",
   },
   {
+    kind: "handoff_router",
+    icon: "↪",
+    title: "移交路由器",
+    description: "读取智能体输出，创建 AgentTask 并投递到目标 Agent 的 Handoff Inbox。",
+  },
+  {
     kind: "mcp_tool",
     icon: "🔧",
     title: "MCP Tool",

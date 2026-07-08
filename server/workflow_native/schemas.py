@@ -22,6 +22,7 @@ NativeNodeKind = Literal[
     "workflow_agent",
     "agent_task",
     "agent_handoff",
+    "handoff_router",
     "mcp_tool",
     "time_tool",
     "http_request",

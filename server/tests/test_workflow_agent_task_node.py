@@ -392,6 +392,165 @@ async def test_workflow_agent_node_streams_output_and_registers_run(
 
 
 @pytest.mark.asyncio
+async def test_workflow_handoff_router_creates_task_handoff_and_runs(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_stream_workflow_llm_text(
+        model_id: str,
+        prompt: str,
+        *,
+        system_prompt: str | None = None,
+    ):
+        yield "ready for review"
+
+    monkeypatch.setattr(
+        "server.main.get_llm_gateway_config",
+        lambda: ("http://test-gateway.local/v1/chat/completions", "test-key"),
+    )
+    monkeypatch.setattr(
+        "server.main.stream_workflow_llm_text",
+        fake_stream_workflow_llm_text,
+    )
+
+    workflow = {
+        "id": "handoff-router-workflow",
+        "title": "handoff router workflow",
+        "nodes": [
+            {
+                "id": "input",
+                "type": "input",
+                "data": {"kind": "input", "variableName": "user_input"},
+            },
+            {
+                "id": "workflow_agent",
+                "type": "workflow_agent",
+                "data": {
+                    "kind": "workflow_agent",
+                    "agentName": "router-agent",
+                    "modelId": "deepseek/deepseek-chat",
+                    "rolePrompt": "You prepare handoff input.",
+                    "taskInput": "{{user_input}}",
+                    "outputVariable": "agent_output",
+                },
+            },
+            {
+                "id": "router",
+                "type": "handoff_router",
+                "data": {
+                    "kind": "handoff_router",
+                    "sourceVariable": "agent_output",
+                    "taskTitle": "Review {{user_input}}",
+                    "sourceAgent": "workflow-agent",
+                    "targetAgent": "review-agent",
+                    "reasonTemplate": "Please review {{agent_output}}",
+                    "outputVariable": "agent_handoff_id",
+                },
+            },
+            {
+                "id": "output",
+                "type": "output",
+                "data": {"kind": "output", "outputVariable": "agent_handoff_id"},
+            },
+        ],
+        "edges": [
+            {"id": "e1", "source": "input", "target": "workflow_agent"},
+            {"id": "e2", "source": "workflow_agent", "target": "router"},
+            {"id": "e3", "source": "router", "target": "output"},
+        ],
+    }
+
+    response = await client.post(
+        "/api/workflow/run",
+        json={
+            "workflow": workflow,
+            "inputs": {"user_input": "handoff this summary"},
+        },
+    )
+    assert response.status_code == 200, response.text
+
+    events = _parse_sse_events(response.text)
+    workflow_meta = next(event for event in events if event.get("event") == "workflow_meta")
+    workflow_run_id = workflow_meta.get("run_id")
+    assert isinstance(workflow_run_id, str)
+
+    router_delta = next(
+        event
+        for event in events
+        if event.get("event") == "node_delta" and event.get("node_id") == "router"
+    )
+    assert "Created routed Handoff" in str(router_delta.get("output"))
+    task_id = router_delta.get("agent_task_id")
+    handoff_id = router_delta.get("agent_handoff_id")
+    assert isinstance(task_id, str)
+    assert isinstance(handoff_id, str)
+
+    router_end = next(
+        event
+        for event in events
+        if event.get("event") == "node_end" and event.get("node_id") == "router"
+    )
+    assert router_end["output"] == handoff_id
+    assert router_end["variables"]["agent_handoff_id"] == handoff_id
+
+    task_response = await client.get(f"/api/runtime/agent-tasks/{task_id}")
+    assert task_response.status_code == 200, task_response.text
+    task_payload = task_response.json()
+    assert task_payload["title"] == "Review handoff this summary"
+    assert task_payload["input"] == "ready for review"
+    assert task_payload["source_agent"] == "workflow-agent"
+    assert task_payload["assigned_agent"] == "review-agent"
+    assert task_payload["metadata"]["router"] == "handoff_router"
+
+    handoff_response = await client.get(
+        "/api/runtime/agent-handoffs?target_agent=review-agent&limit=50",
+    )
+    assert handoff_response.status_code == 200, handoff_response.text
+    handoffs = handoff_response.json()
+    handoff_payload = next(item for item in handoffs if item["handoff_id"] == handoff_id)
+    assert handoff_payload["task_id"] == task_id
+    assert handoff_payload["status"] == "pending"
+    assert handoff_payload["source_agent"] == "workflow-agent"
+    assert handoff_payload["target_agent"] == "review-agent"
+
+    child_runs_response = await client.get(
+        f"/api/runtime/runs?parent_run_id={workflow_run_id}&limit=50",
+    )
+    assert child_runs_response.status_code == 200, child_runs_response.text
+    child_runs = child_runs_response.json()
+    task_run = next(
+        item
+        for item in child_runs
+        if item["run_type"] == "agent_task" and item["source_id"] == task_id
+    )
+    handoff_run = next(
+        item
+        for item in child_runs
+        if item["run_type"] == "agent_handoff" and item["source_id"] == handoff_id
+    )
+    assert task_run["metadata"]["router"] == "handoff_router"
+    assert handoff_run["metadata"]["router"] == "handoff_router"
+
+    task_checkpoints_response = await client.get(
+        f"/api/runtime/runs/{task_run['run_id']}/checkpoints",
+    )
+    assert task_checkpoints_response.status_code == 200
+    assert any(
+        item["event_type"] == "agent_task.created"
+        for item in task_checkpoints_response.json()
+    )
+
+    handoff_checkpoints_response = await client.get(
+        f"/api/runtime/runs/{handoff_run['run_id']}/checkpoints",
+    )
+    assert handoff_checkpoints_response.status_code == 200
+    assert any(
+        item["event_type"] == "agent_handoff.created"
+        for item in handoff_checkpoints_response.json()
+    )
+
+
+@pytest.mark.asyncio
 async def test_workflow_agent_mcp_tool_mode_uses_runtime_toolset(
     client: httpx.AsyncClient,
     monkeypatch: pytest.MonkeyPatch,

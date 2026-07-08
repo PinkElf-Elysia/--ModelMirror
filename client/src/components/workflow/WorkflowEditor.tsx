@@ -318,6 +318,20 @@ function createNodeData(
     };
   }
 
+  if (kind === "handoff_router") {
+    return {
+      kind,
+      title: "移交路由器",
+      description: "读取工作流智能体输出，创建 AgentTask 并投递 pending Handoff。",
+      sourceVariable: "agent_output",
+      taskTitle: "来自工作流智能体的任务",
+      targetAgent: "review-agent",
+      sourceAgent: "workflow-agent",
+      reasonTemplate: "请处理工作流智能体输出：{{agent_output}}",
+      outputVariable: "agent_handoff_id",
+    };
+  }
+
   if (kind === "mcp_tool") {
     return {
       kind,
@@ -1366,6 +1380,56 @@ function NodeConfig({ node, onChange }: NodeConfigProps) {
               className={`${textInputClass()} min-h-28 resize-none leading-6`}
               onChange={(event) => update({ reason: event.target.value })}
               value={data.reason ?? ""}
+            />
+          </Field>
+          <Field label="输出变量">
+            <input
+              className={textInputClass()}
+              onChange={(event) => update({ outputVariable: event.target.value })}
+              value={data.outputVariable ?? ""}
+            />
+          </Field>
+        </>
+      ) : null}
+
+      {data.kind === "handoff_router" ? (
+        <>
+          <div className="rounded-lg border border-fuchsia-300/25 bg-fuchsia-300/10 px-3 py-2 text-xs leading-5 text-fuchsia-50">
+            读取上游智能体输出，创建 AgentTask 并投递一条 pending Handoff；目标 Agent 仍需在 Inbox 中人工接受和完成。
+          </div>
+          <Field label="来源变量">
+            <input
+              className={textInputClass()}
+              onChange={(event) => update({ sourceVariable: event.target.value })}
+              value={data.sourceVariable ?? ""}
+            />
+          </Field>
+          <Field label="任务标题（支持 {{变量}}）">
+            <input
+              className={textInputClass()}
+              onChange={(event) => update({ taskTitle: event.target.value })}
+              value={data.taskTitle ?? ""}
+            />
+          </Field>
+          <Field label="来源智能体">
+            <input
+              className={textInputClass()}
+              onChange={(event) => update({ sourceAgent: event.target.value })}
+              value={data.sourceAgent ?? ""}
+            />
+          </Field>
+          <Field label="目标智能体">
+            <input
+              className={textInputClass()}
+              onChange={(event) => update({ targetAgent: event.target.value })}
+              value={data.targetAgent ?? ""}
+            />
+          </Field>
+          <Field label="移交理由模板（支持 {{变量}}）">
+            <textarea
+              className={`${textInputClass()} min-h-28 resize-none leading-6`}
+              onChange={(event) => update({ reasonTemplate: event.target.value })}
+              value={data.reasonTemplate ?? ""}
             />
           </Field>
           <Field label="输出变量">
