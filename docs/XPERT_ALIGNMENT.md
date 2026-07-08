@@ -1,5 +1,6 @@
 # Xpert 对齐总纲
 
+> 2026-07-08 状态补充：Chat Toolset 运行观测已进入“部分实现”。`tool_mode=mcp_tools` 的聊天请求会登记 `chat` run，响应 header 暴露 runtime run/task id，并记录 `chat.started/model_decision/tool_call/answer/failed` checkpoint；聊天页会展示轻量“运行观测 Beta”。普通聊天仍不创建 chat run，SSE 格式不变。
 > 2026-07-08 状态补充：Chat Agent Toolset 已进入“部分实现”。`/api/chat` 新增默认关闭的 `tool_mode=mcp_tools`，显式开启后使用轻量 JSON 决策协议调用 MCP 工具，并复用 `MCPToolsetProvider`、`run_tool_with_runtime`、`tool_policy` 与 `tool_audit`。普通聊天请求保持 `tool_mode=none`，SSE wire format 不变；当前不是 OpenAI function calling，不做 Handoff 自动调度或真实多 Agent 协作。
 > 2026-07-08 状态补充：Handoff Router 已进入“部分实现”。Classic workflow 新增 `handoff_router` 节点，可读取 `workflow_agent` 等上游节点输出，创建 AgentTask，并向目标 Agent 创建 pending Handoff，让结果进入 MetaAgent Handoff Inbox。当前不自动 accept、不执行目标 Agent、不接队列 worker 或持久化。
 > 2026-07-07 状态补充：RunRegistry Trace 已进入“部分实现”。`RuntimeRun` 现在可挂载内存态 checkpoint，记录 workflow、workflow_agent、agent_task、agent_handoff 的关键执行时间线；新增 `GET /api/runtime/runs/{run_id}/checkpoints` 供前端运行观测读取。当前仍不做持久化、自动重试、队列调度或 checkpoint resume。
@@ -29,6 +30,12 @@ Classic workflow 运行时会创建 workflow run，并在 `workflow_meta` / `wor
 当前边界：RunRegistry 仅为内存态可观测索引，不是持久化调度器；取消 run 只更新 registry 状态，不中断真实 workflow、AgentTask 或 Handoff 执行。Checkpoint 只保存摘要与元信息，不保存完整 prompt、工具输出、模型输出或密钥。下一步可在此基础上继续补齐 Handoff 自动编排、RunRegistry 页面、死信与持久化存储。
 
 最后更新日期：2026-07-08
+
+## 2026-07-08 增量：Knowledge Citation 工作流节点
+
+Classic workflow 新增 `knowledge_citation` 节点，作为 Knowledge Pipeline 进入工作流的最小闭环。节点字段包括 `queryVariable`、`knowledgeBaseId`、`top_k` 与 `outputVariable`；`knowledgeBaseId` 留空时沿用本地 RAG 默认策略，使用第一个知识库。运行时会调用 `RagService.create_pipeline_citations(...)`，把结果写入 JSON 字符串：`{"citations":[...],"citation_count":N}`。
+
+该节点同步登记 `knowledge_citation` 子 run，`parent_run_id` 指向 workflow run，并记录 `knowledge_citation.started/completed/failed` checkpoint。metadata 只保存 `workflow_task_id`、`node_id`、`kb_id`、`query_variable`、`output_variable`、`citation_count` 等摘要；不保存完整 query、chunk 全文、embedding、本地文件路径或密钥。当前不改 `/api/rag/query`、聊天 RAG、上传、切分、向量存储或 embedding 策略。
 维护人：模镜团队
 
 ## 对齐原则
@@ -53,7 +60,7 @@ EvoAgentX 只保留为历史参考：此前元智能体曾借鉴其 `goal -> sub
 ## 当前已落地能力
 
 - Runtime Middleware：已具备 `before_agent`、`before_model`、`wrap_model_call`、`after_model`、`after_agent`、`wrap_tool_call` 生命周期。
-- Chat Runtime：`/api/chat` 已接入默认 runtime pipeline，支持 system prompt 注入和模型调用事件记录；显式设置 `tool_mode=mcp_tools` 时可进入 Runtime Toolset 工具循环，默认仍保持普通聊天路径。
+- Chat Runtime：`/api/chat` 已接入默认 runtime pipeline，支持 system prompt 注入和模型调用事件记录；显式设置 `tool_mode=mcp_tools` 时可进入 Runtime Toolset 工具循环，并登记 `chat` run、checkpoint、tool events 与审计摘要。默认仍保持普通聊天路径。
 - Toolset / MCP：`mcp_tool` 已通过 `MCPToolsetProvider`、`CapabilityRegistry`、`run_tool_with_runtime` 调用工具。
 - Tool Policy / Audit：`tool_policy` 可影响 workflow 内 MCP 工具调用，`InMemoryToolAuditStore` 提供最小审计记录。
 - Runtime Middleware Node：前端可拖入 `runtime_middleware` 节点，`system_prompt_injector`、`tool_policy`、`event_recorder`、`tool_audit` 已逐步进入真实执行或可见状态。
@@ -67,7 +74,7 @@ EvoAgentX 只保留为历史参考：此前元智能体曾借鉴其 `goal -> sub
 
 1. **RunRegistry Trace 增强**：补齐 workflow_agent / handoff 的 trace、checkpoint、失败摘要与重试入口。
 2. **Handoff 自动编排雏形**：将 workflow_agent 输出与 handoff queue 连接，但仍保持人工可控。
-3. **Chat Agent Toolset 观测增强**：补齐聊天工具模式的任务级 trace、工具偏好和更细粒度安全提示。
+3. **Chat Agent Toolset 安全增强**：补齐聊天工具偏好、工具 schema 提示和更细粒度安全提示。
 4. **知识流水线底座**：拆分本地 RAG 的文件元数据，建立 FileAsset -> Artifact -> Chunk -> CitationAnchor 的最小模型。
 
 ## 2026-07-07 增量：RunRegistry Trace / Checkpoint
@@ -91,3 +98,15 @@ RunRegistry 现在提供内存态 checkpoint：每条 `RuntimeRun` 可记录 `ev
 - 前端构建：涉及前端时运行 `cd client && npm.cmd run build`。
 - Docker smoke：影响主路径时运行 `docker compose -p modelmirror up -d --build --force-recreate` 和 `/api/health`。
 - 文档更新：同步更新本文件或相关模块文档，说明状态、边界和下一步。
+
+## 2026-07-08 增量：Knowledge Pipeline 元数据视图
+
+Knowledge Pipeline 已从“待实现”进入“部分实现”。当前在本地 RAG 之上新增只读元数据层，将既有知识库、文档与 chunk 映射为 `FileAsset -> Artifact -> KnowledgeChunk -> CitationAnchor`：
+
+- `GET /api/rag/pipeline/assets?kb_id=` 返回上传文件视图，不暴露本地绝对路径。
+- `GET /api/rag/pipeline/artifacts?kb_id=` 返回可检索文档产物与 chunk 计数。
+- `GET /api/rag/pipeline/artifacts/{artifact_id}/chunks` 返回 chunk 摘要、长度和稳定 ID，不返回 embedding。
+- `POST /api/rag/pipeline/citations` 复用现有检索路径返回 citation anchors。
+- `/rag` 新增“知识流水线 Beta”折叠区，可查看当前知识库的 assets / artifacts / chunks 摘要。
+
+边界：本轮不迁移 Chroma/LocalJsonVectorStore，不改变上传、切分、embedding、检索、RAG 问答或聊天协议；该层只是 Xpert Knowledge Pipeline 的本地可观测 schema 底座。

@@ -31,6 +31,16 @@ class SearchResult:
     score: float
 
 
+@dataclass(slots=True)
+class StoredVectorChunk:
+    chunk_id: str
+    kb_id: str
+    doc_id: str
+    document_name: str
+    text: str
+    chunk_index: int
+
+
 class VectorStore(Protocol):
     """Protocol implemented by vector-store backends."""
 
@@ -45,6 +55,9 @@ class VectorStore(Protocol):
 
     def delete_knowledge_base(self, kb_id: str) -> None:
         """Delete all chunks for a knowledge base."""
+
+    def list_document_chunks(self, doc_id: str) -> list[StoredVectorChunk]:
+        """List stored chunks for one document without exposing embeddings."""
 
 
 class LocalJsonVectorStore:
@@ -90,6 +103,21 @@ class LocalJsonVectorStore:
         self._write_records(
             [record for record in self._read_records() if record.get("kb_id") != kb_id]
         )
+
+    def list_document_chunks(self, doc_id: str) -> list[StoredVectorChunk]:
+        chunks = [
+            StoredVectorChunk(
+                chunk_id=str(record["id"]),
+                kb_id=str(record["kb_id"]),
+                doc_id=str(record["doc_id"]),
+                document_name=str(record["document_name"]),
+                text=str(record["text"]),
+                chunk_index=int(record.get("chunk_index", 0)),
+            )
+            for record in self._read_records()
+            if record.get("doc_id") == doc_id
+        ]
+        return sorted(chunks, key=lambda item: item.chunk_index)
 
     def _read_records(self) -> list[dict[str, Any]]:
         if not self.storage_path.exists():
@@ -172,6 +200,31 @@ class ChromaVectorStore:
 
     def delete_knowledge_base(self, kb_id: str) -> None:
         self._collection.delete(where={"kb_id": kb_id})
+
+    def list_document_chunks(self, doc_id: str) -> list[StoredVectorChunk]:
+        response = self._collection.get(
+            where={"doc_id": doc_id},
+            include=["documents", "metadatas"],
+        )
+        ids = response.get("ids") or []
+        documents = response.get("documents") or []
+        metadatas = response.get("metadatas") or []
+
+        chunks: list[StoredVectorChunk] = []
+        for index, chunk_id in enumerate(ids):
+            metadata = metadatas[index] if index < len(metadatas) else {}
+            metadata = metadata or {}
+            chunks.append(
+                StoredVectorChunk(
+                    chunk_id=str(chunk_id),
+                    kb_id=str(metadata.get("kb_id", "")),
+                    doc_id=str(metadata.get("doc_id", doc_id)),
+                    document_name=str(metadata.get("document_name", "")),
+                    text=str(documents[index] if index < len(documents) else ""),
+                    chunk_index=int(metadata.get("chunk_index", index)),
+                )
+            )
+        return sorted(chunks, key=lambda item: item.chunk_index)
 
 
 def create_vector_store(storage_dir: Path) -> VectorStore:

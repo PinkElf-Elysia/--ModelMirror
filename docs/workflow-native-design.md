@@ -1,5 +1,6 @@
 # workflow-native 自研工作流设计
 
+> 2026-07-08 状态补充：Chat Toolset 运行观测进入最小闭环。`tool_mode=mcp_tools` 的聊天请求会登记 `chat` run，响应 header 返回 `X-ModelMirror-Runtime-Run-Id` / `X-ModelMirror-Runtime-Task-Id`；前端聊天页展示 run 状态、checkpoint、tool events 与 audit 摘要。普通聊天仍不创建 chat run，SSE wire format 不变。
 > 2026-07-08 状态补充：`/api/chat` 已接入默认关闭的 Runtime Toolset 工具模式。前端聊天页可显式开启 MCP 工具循环，后端复用 `run_tool_with_runtime`、`tool_policy` 与 `tool_audit`，并继续使用现有 OpenAI SSE delta 结构输出最终答案。当前不是 OpenAI function calling，不自动创建 Handoff，也不改变 workflow、RAG、Skill 或 MCP 连接主路径。
 > 2026-07-07 状态补充：RunRegistry Trace / Checkpoint 进入最小闭环。Workflow run、`workflow_agent`、`agent_task`、`agent_handoff` 会写入内存态 checkpoint；前端“运行观测”会读取 `GET /api/runtime/runs/{run_id}/checkpoints` 展示当前 run 与子 run 的时间线摘要。当前不做持久化、自动重试、队列调度或 checkpoint resume。
 > 2026-07-07 状态补充：`workflow_agent` 已支持 Runtime Toolset 工具模式。`toolMode=none` 保持单步模型执行；`toolMode=mcp_tools` 使用轻量 JSON 决策协议调用 MCP 工具，并复用 `run_tool_with_runtime`、`tool_policy`、`tool_audit`。旧 `agent.tool_first` 也已收敛到同一条 runtime toolset 路径。当前不是 OpenAI function calling，不做自动 Handoff 或真实多 Agent 协作。
@@ -531,6 +532,20 @@ Classic workflow 新增 handoff_router 节点，作为 workflow_agent -> Handoff
 
 工具调用统一经过 `MCPToolsetProvider`、`run_tool_with_runtime` 与 `MiddlewarePipeline.wrap_tool_call`，因此现有 `tool_policy`、`tool_audit` 和 `event_recorder` 可复用到聊天工具循环。`tool_names` 提供逗号或换行分隔的白名单，留空代表允许当前已注册 MCP 工具；`max_tool_iterations` 限制为 1-20，避免无限工具循环。
 
+本轮补齐最小运行观测：工具模式请求会在内存态 RunRegistry 中创建 `chat` run，并通过响应 header 暴露 run/task id。后端新增 `GET /api/chat/runtime-events/{task_id}` 返回本次聊天的 runtime events 与 per-chat audit 摘要；前端“Runtime 工具模式 Beta”区域展示 run 状态、checkpoint、tool event 和审计摘要。
+
 当前边界：不是 OpenAI function calling，不自动创建 Handoff，不接真实多 Agent 调度，也不保存完整 prompt、工具输出、模型回答或 API key 到运行元数据中。
 
 最后更新日期：2026-07-08
+
+## 2026-07-08 增量：Knowledge Citation 工作流节点
+
+Classic workflow 新增 `knowledge_citation` 节点，用于把本地 RAG Knowledge Pipeline 的 `CitationAnchor` 变成可拖拽、可配置、可运行、可观测的工作流能力。前端字段为 `queryVariable`、`knowledgeBaseId`、`top_k`、`outputVariable`；`knowledgeBaseId` 留空时使用第一个知识库，`top_k` 静态校验范围为 1-10。
+
+运行时读取 `variables[queryVariable]` 作为检索问题，调用 `RagService.create_pipeline_citations(kb_id, query_text, top_k=...)`，并将输出变量写成 JSON 字符串：
+
+```json
+{"citations":[{"chunk_id":"...","document_name":"...","score":0.91,"snippet":"..."}],"citation_count":1}
+```
+
+节点会登记 `knowledge_citation` 子 run，`parent_run_id` 指向 workflow run，并写入 `knowledge_citation.started/completed/failed` checkpoint。metadata 只保存知识库 ID、变量名、输出变量、引用数量等摘要，不返回本地文件路径、embedding、完整上传文件内容或密钥。该节点与既有 `knowledge_retrieval` 并存，不改变 `/api/rag/query`、聊天 RAG 或向量库行为。

@@ -65,6 +65,13 @@ const nodeMeta = {
     bg: "bg-teal-300/10",
     text: "text-teal-100",
   },
+  knowledge_citation: {
+    icon: "🔖",
+    label: "引用锚点",
+    border: "border-teal-200/40",
+    bg: "bg-teal-200/10",
+    text: "text-teal-100",
+  },
   document_extractor: {
     icon: "📄",
     label: "文档工位",
@@ -192,6 +199,9 @@ function outputName(data: WorkflowNode["data"]) {
   }
   if (data.kind === "knowledge_retrieval") {
     return `${data.queryVariable ?? "query"} top ${data.top_k ?? "3"} -> ${data.outputVariable ?? "rag_context"}`;
+  }
+  if (data.kind === "knowledge_citation") {
+    return `${data.queryVariable ?? "query"} top ${data.top_k ?? "4"} -> ${data.outputVariable ?? "citation_anchors_json"}`;
   }
   if (data.kind === "document_extractor") {
     return `${data.sourcePathVariable ?? "path"} -> ${data.outputVariable ?? "document_text"}`;

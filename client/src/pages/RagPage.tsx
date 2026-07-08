@@ -26,6 +26,37 @@ interface DocumentListResponse {
   documents: RagDocument[];
 }
 
+interface PipelineAsset {
+  file_asset_id: string;
+  document_id: string;
+  knowledge_base_id: string;
+  filename: string;
+  size: number;
+  extension: string;
+  mime_type?: string | null;
+  created_at: number;
+}
+
+interface PipelineAssetListResponse {
+  assets: PipelineAsset[];
+  asset_count: number;
+}
+
+interface PipelineArtifact {
+  artifact_id: string;
+  file_asset_id: string;
+  document_id: string;
+  knowledge_base_id: string;
+  title: string;
+  chunk_count: number;
+  created_at: number;
+}
+
+interface PipelineArtifactListResponse {
+  artifacts: PipelineArtifact[];
+  artifact_count: number;
+}
+
 const MAX_FILE_BYTES = 10 * 1024 * 1024;
 const SUPPORTED_EXTENSIONS = [".txt", ".md", ".markdown", ".pdf"];
 
@@ -80,11 +111,21 @@ export default function RagPage() {
   const [notice, setNotice] = useState("");
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [newKbName, setNewKbName] = useState("");
+  const [isPipelineOpen, setIsPipelineOpen] = useState(false);
+  const [isLoadingPipeline, setIsLoadingPipeline] = useState(false);
+  const [pipelineError, setPipelineError] = useState("");
+  const [pipelineAssets, setPipelineAssets] = useState<PipelineAsset[]>([]);
+  const [pipelineArtifacts, setPipelineArtifacts] = useState<PipelineArtifact[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const selectedKnowledgeBase = useMemo(
     () => knowledgeBases.find((item) => item.id === selectedKbId) ?? null,
     [knowledgeBases, selectedKbId],
+  );
+
+  const pipelineChunkCount = useMemo(
+    () => pipelineArtifacts.reduce((total, artifact) => total + artifact.chunk_count, 0),
+    [pipelineArtifacts],
   );
 
   useEffect(() => {
@@ -95,10 +136,14 @@ export default function RagPage() {
   useEffect(() => {
     if (!selectedKbId) {
       setDocuments([]);
+      setPipelineAssets([]);
+      setPipelineArtifacts([]);
+      setPipelineError("");
       return;
     }
     void loadDocuments(selectedKbId);
-  }, [selectedKbId]);
+    if (isPipelineOpen) void loadPipeline(selectedKbId);
+  }, [isPipelineOpen, selectedKbId]);
 
   async function loadKnowledgeBases(nextSelectedId?: string) {
     setIsLoadingKbs(true);
@@ -137,6 +182,30 @@ export default function RagPage() {
       setError(loadError instanceof Error ? loadError.message : "文档列表加载失败。");
     } finally {
       setIsLoadingDocs(false);
+    }
+  }
+
+  async function loadPipeline(kbId: string) {
+    setIsLoadingPipeline(true);
+    setPipelineError("");
+    try {
+      const query = new URLSearchParams({ kb_id: kbId }).toString();
+      const [assetsResponse, artifactsResponse] = await Promise.all([
+        fetch(`/api/rag/pipeline/assets?${query}`),
+        fetch(`/api/rag/pipeline/artifacts?${query}`),
+      ]);
+      if (!assetsResponse.ok) throw new Error(await readError(assetsResponse));
+      if (!artifactsResponse.ok) throw new Error(await readError(artifactsResponse));
+      const assetsData = (await assetsResponse.json()) as PipelineAssetListResponse;
+      const artifactsData = (await artifactsResponse.json()) as PipelineArtifactListResponse;
+      setPipelineAssets(assetsData.assets);
+      setPipelineArtifacts(artifactsData.artifacts);
+    } catch (loadError) {
+      setPipelineError(
+        loadError instanceof Error ? loadError.message : "知识流水线加载失败。",
+      );
+    } finally {
+      setIsLoadingPipeline(false);
     }
   }
 
@@ -208,6 +277,7 @@ export default function RagPage() {
       const uploaded = (await response.json()) as RagDocument;
       setNotice(`文档「${uploaded.filename}」已入库，切成 ${uploaded.chunk_count} 个片段。`);
       await Promise.all([loadDocuments(selectedKbId), loadKnowledgeBases(selectedKbId)]);
+      if (isPipelineOpen) await loadPipeline(selectedKbId);
     } catch (uploadError) {
       setError(uploadError instanceof Error ? uploadError.message : "上传文档失败。");
     } finally {
@@ -227,6 +297,7 @@ export default function RagPage() {
       if (!response.ok) throw new Error(await readError(response));
       setNotice(`文档「${document.filename}」已删除。`);
       await Promise.all([loadDocuments(selectedKbId), loadKnowledgeBases(selectedKbId)]);
+      if (isPipelineOpen) await loadPipeline(selectedKbId);
     } catch (deleteError) {
       setError(deleteError instanceof Error ? deleteError.message : "删除文档失败。");
     }
@@ -418,6 +489,109 @@ export default function RagPage() {
                   {isUploading ? "处理中" : "选择文件"}
                 </button>
               </div>
+
+              <section className="mt-5 overflow-hidden rounded-lg border border-white/10 bg-white/[0.035]">
+                <button
+                  className="flex w-full flex-col gap-3 px-4 py-3 text-left transition hover:bg-white/[0.04] sm:flex-row sm:items-center sm:justify-between"
+                  onClick={() => setIsPipelineOpen((value) => !value)}
+                  type="button"
+                >
+                  <span>
+                    <span className="block text-sm font-semibold text-white">
+                      知识流水线 Beta
+                    </span>
+                    <span className="mt-1 block text-xs leading-5 text-slate-400">
+                      FileAsset → Artifact → Chunk → CitationAnchor 只读元数据视图
+                    </span>
+                  </span>
+                  <span className="rounded-full border border-hire-300/25 bg-hire-300/10 px-3 py-1 text-xs font-semibold text-hire-100">
+                    {isPipelineOpen ? "收起" : "展开"}
+                  </span>
+                </button>
+
+                {isPipelineOpen ? (
+                  <div className="border-t border-white/10 px-4 py-4">
+                    {isLoadingPipeline ? (
+                      <p className="text-sm text-slate-400">正在读取知识流水线元数据...</p>
+                    ) : pipelineError ? (
+                      <p className="text-sm text-rose-100">{pipelineError}</p>
+                    ) : (
+                      <>
+                        <div className="grid gap-3 sm:grid-cols-3">
+                          <div className="rounded-lg border border-white/10 bg-ink-950/35 p-3">
+                            <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                              FileAssets
+                            </p>
+                            <p className="mt-2 text-2xl font-semibold text-white">
+                              {pipelineAssets.length}
+                            </p>
+                          </div>
+                          <div className="rounded-lg border border-white/10 bg-ink-950/35 p-3">
+                            <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                              Artifacts
+                            </p>
+                            <p className="mt-2 text-2xl font-semibold text-white">
+                              {pipelineArtifacts.length}
+                            </p>
+                          </div>
+                          <div className="rounded-lg border border-white/10 bg-ink-950/35 p-3">
+                            <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                              Chunks
+                            </p>
+                            <p className="mt-2 text-2xl font-semibold text-white">
+                              {pipelineChunkCount}
+                            </p>
+                          </div>
+                        </div>
+
+                        <div className="mt-4">
+                          <div className="flex items-center justify-between gap-3">
+                            <p className="text-xs font-semibold text-slate-300">
+                              最近 Artifacts
+                            </p>
+                            <button
+                              className="text-xs font-semibold text-hire-100 transition hover:text-hire-50"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                void loadPipeline(selectedKbId);
+                              }}
+                              type="button"
+                            >
+                              刷新
+                            </button>
+                          </div>
+                          {pipelineArtifacts.length === 0 ? (
+                            <p className="mt-3 rounded-lg border border-dashed border-white/10 p-3 text-sm text-slate-400">
+                              当前资料库还没有可观察的文档产物。
+                            </p>
+                          ) : (
+                            <div className="mt-3 divide-y divide-white/10 overflow-hidden rounded-lg border border-white/10">
+                              {pipelineArtifacts.slice(0, 5).map((artifact) => (
+                                <div
+                                  className="grid gap-2 bg-ink-950/30 p-3 text-sm sm:grid-cols-[minmax(0,1fr)_auto]"
+                                  key={artifact.artifact_id}
+                                >
+                                  <div className="min-w-0">
+                                    <p className="truncate font-semibold text-white">
+                                      {artifact.title}
+                                    </p>
+                                    <p className="mt-1 text-xs text-slate-400">
+                                      {artifact.artifact_id}
+                                    </p>
+                                  </div>
+                                  <p className="text-xs font-semibold text-hire-100">
+                                    {artifact.chunk_count} chunks
+                                  </p>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      </>
+                    )}
+                  </div>
+                ) : null}
+              </section>
 
               <div className="mt-6">
                 <div className="flex items-center justify-between">

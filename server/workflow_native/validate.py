@@ -33,6 +33,8 @@ NODE_KIND_ALIASES = {
     "parameter-extractor": "parameter_extractor",
     "knowledge_retrieval": "knowledge_retrieval",
     "knowledge-retrieval": "knowledge_retrieval",
+    "knowledge_citation": "knowledge_citation",
+    "knowledge-citation": "knowledge_citation",
     "document_extractor": "document_extractor",
     "document-extractor": "document_extractor",
     "human_intervention": "human_intervention",
@@ -79,6 +81,7 @@ SUPPORTED_NODE_KINDS = {
     "variable_aggregator",
     "parameter_extractor",
     "knowledge_retrieval",
+    "knowledge_citation",
     "document_extractor",
     "human_intervention",
     "question_classifier",
@@ -438,6 +441,55 @@ def validate_node_configuration(
                 ValidationIssue(
                     code="invalid_knowledge_retrieval_output_variable",
                     message="Knowledge retrieval outputVariable must be an identifier.",
+                    node_id=node.id,
+                )
+            )
+
+    if kind == "knowledge_citation":
+        query_variable = str(data.get("queryVariable") or "").strip()
+        if not query_variable:
+            issues.append(
+                ValidationIssue(
+                    code="missing_knowledge_citation_query_variable",
+                    message="Knowledge citation node needs data.queryVariable.",
+                    node_id=node.id,
+                )
+            )
+        elif not is_variable_name(query_variable):
+            issues.append(
+                ValidationIssue(
+                    code="invalid_knowledge_citation_query_variable",
+                    message="Knowledge citation queryVariable must be an identifier.",
+                    node_id=node.id,
+                )
+            )
+        top_k = str(data.get("top_k") or "4").strip()
+        try:
+            top_k_int = int(top_k)
+        except ValueError:
+            top_k_int = 0
+        if top_k_int < 1 or top_k_int > 10:
+            issues.append(
+                ValidationIssue(
+                    code="invalid_knowledge_citation_top_k",
+                    message="Knowledge citation top_k must be an integer between 1 and 10.",
+                    node_id=node.id,
+                )
+            )
+        output_variable = str(data.get("outputVariable") or "").strip()
+        if not output_variable:
+            issues.append(
+                ValidationIssue(
+                    code="missing_knowledge_citation_output_variable",
+                    message="Knowledge citation node needs data.outputVariable.",
+                    node_id=node.id,
+                )
+            )
+        elif not is_variable_name(output_variable):
+            issues.append(
+                ValidationIssue(
+                    code="invalid_knowledge_citation_output_variable",
+                    message="Knowledge citation outputVariable must be an identifier.",
                     node_id=node.id,
                 )
             )
@@ -1301,6 +1353,7 @@ def collect_declared_variables(
             "variable_aggregator",
             "parameter_extractor",
             "knowledge_retrieval",
+            "knowledge_citation",
             "document_extractor",
             "human_intervention",
             "question_classifier",
@@ -1457,6 +1510,17 @@ def validate_variable_references(
                 ValidationIssue(
                     code="missing_knowledge_retrieval_query_variable_reference",
                     message=f"Knowledge retrieval references undefined variable '{query_variable}'.",
+                    node_id=node.id,
+                )
+            )
+
+    if kind == "knowledge_citation":
+        query_variable = str(data.get("queryVariable") or "").strip()
+        if query_variable and query_variable not in available_variables:
+            issues.append(
+                ValidationIssue(
+                    code="missing_knowledge_citation_query_variable_reference",
+                    message=f"Knowledge citation references undefined variable '{query_variable}'.",
                     node_id=node.id,
                 )
             )

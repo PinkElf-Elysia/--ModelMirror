@@ -11,6 +11,7 @@ export type WorkflowNodeKind =
   | "variable_aggregator"
   | "parameter_extractor"
   | "knowledge_retrieval"
+  | "knowledge_citation"
   | "document_extractor"
   | "human_intervention"
   | "question_classifier"
@@ -58,6 +59,7 @@ export interface WorkflowNodeData extends Record<string, unknown> {
   outputTemplate?: string;
   schema?: string;
   queryVariable?: string;
+  knowledgeBaseId?: string;
   top_k?: string;
   sourcePathVariable?: string;
   categories?: string;

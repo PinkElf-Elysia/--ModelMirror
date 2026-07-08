@@ -49,17 +49,22 @@ async def test_run_registry_list_filters_and_limit() -> None:
     await registry.create_run("workflow_agent", "Agent", status="completed")
     await registry.create_run("agent_task", "B", status="pending")
     await registry.create_run("agent_task", "C", status="completed")
+    await registry.create_run("chat", "Chat", status="completed")
 
     agent_runs = await registry.list_runs(run_type="agent_task")
     assert len(agent_runs) == 2
     assert all(run.run_type == "agent_task" for run in agent_runs)
 
     completed_runs = await registry.list_runs(status="completed")
-    assert len(completed_runs) == 3
+    assert len(completed_runs) == 4
 
     workflow_agent_runs = await registry.list_runs(run_type="workflow_agent")
     assert len(workflow_agent_runs) == 1
     assert workflow_agent_runs[0].title == "Agent"
+
+    chat_runs = await registry.list_runs(run_type="chat")
+    assert len(chat_runs) == 1
+    assert chat_runs[0].title == "Chat"
 
     limited = await registry.list_runs(limit=1)
     assert len(limited) == 1

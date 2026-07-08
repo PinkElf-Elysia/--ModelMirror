@@ -2,7 +2,17 @@
 
 本文件说明模镜本地 RAG 模块的架构、API、扩展方式和测试方法。该模块位于 `server/rag/`，前端入口为 `/rag`，聊天页可选择知识库进行检索增强问答。
 
-最后更新日期：2026-06-16  
+最后更新日期：2026-07-08
+
+## 2026-07-08 增量：Workflow CitationAnchor 节点
+
+Classic workflow 已新增 `knowledge_citation` 节点，复用本地 RAG Knowledge Pipeline 的 citation 生成能力。节点读取 `queryVariable` 中的文本，使用可选 `knowledgeBaseId` 和 `top_k` 调用 `RagService.create_pipeline_citations(...)`，并把结果写入 `outputVariable`：
+
+```json
+{"citations":[...],"citation_count":1}
+```
+
+该节点只输出 CitationAnchor 摘要，包括 `chunk_id`、`document_name`、`score`、`snippet` 等字段；不会返回本地文件绝对路径、embedding、完整上传文件内容或密钥。它不改变上传、切分、检索、向量存储、`/api/rag/query` 或聊天 RAG 行为，只是让 workflow 和后续 Agent 能引用同一套只读知识元数据视图。
 维护人：模镜团队
 
 ## 1. 概述
@@ -291,3 +301,29 @@ python -m pytest server/tests/test_rag.py -q
 4. 验证 `answer` 和 `sources`。
 5. 清理文档和知识库。
 
+
+## 2026-07-08 增量：知识流水线 Beta
+
+本地 RAG 现在额外提供一层只读 Knowledge Pipeline 元数据视图，用于对齐 Xpert 的知识产物模型。该层不会改变上传、切分、embedding、向量存储、检索测试或 `/api/rag/query` 响应协议。
+
+新增模型映射：
+
+- `FileAsset`：由已上传 document 派生，包含文件名、大小、扩展名、mime、知识库 ID 与 document ID，不返回 `stored_path`。
+- `Artifact`：由 document 派生，表示可被检索和引用的文档产物，包含 `file_asset_id`、标题和 `chunk_count`。
+- `KnowledgeChunk`：由向量索引中的 chunk 派生，只返回 chunk ID、序号、文本摘要和字符长度，不返回 embedding。
+- `CitationAnchor`：由现有检索结果派生，包含 chunk ID、document 名称、score 和 snippet。
+
+新增只读 API：
+
+```bash
+curl 'http://localhost:8000/api/rag/pipeline/assets?kb_id=kb_xxx'
+curl 'http://localhost:8000/api/rag/pipeline/artifacts?kb_id=kb_xxx'
+curl 'http://localhost:8000/api/rag/pipeline/artifacts/artifact_doc_xxx/chunks'
+curl -X POST http://localhost:8000/api/rag/pipeline/citations \
+  -H 'Content-Type: application/json' \
+  -d '{"kb_id":"kb_xxx","question":"如何使用资料？","top_k":4}'
+```
+
+前端 `/rag` 新增“知识流水线 Beta”折叠区，展示当前知识库的 assets / artifacts / chunks 计数和最近 artifacts。后续知识类工作流节点、Agent 引用和 citation 面板会基于这层 schema 继续扩展。
+
+最后更新日期：2026-07-08

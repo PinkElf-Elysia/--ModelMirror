@@ -69,6 +69,12 @@ const paletteItems: PaletteItem[] = [
     description: "查询本地 RAG 资料库，把相关段落写入变量。",
   },
   {
+    kind: "knowledge_citation",
+    icon: "🔖",
+    title: "知识引用锚点",
+    description: "查询本地 RAG，输出 CitationAnchor JSON 供下游节点引用。",
+  },
+  {
     kind: "document_extractor",
     icon: "📄",
     title: "文档提取器",
