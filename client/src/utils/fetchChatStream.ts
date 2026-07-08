@@ -27,6 +27,10 @@ interface FetchChatStreamOptions {
   maxTokens?: number;
   seed?: number;
   stop?: string[];
+  toolMode?: "none" | "mcp_tools";
+  toolNames?: string;
+  maxToolIterations?: number;
+  promptSuffix?: string;
   signal?: AbortSignal;
   onDelta: (text: string) => void;
 }
@@ -197,6 +201,10 @@ export async function fetchChatStream({
   maxTokens = 2048,
   seed,
   stop,
+  toolMode = "none",
+  toolNames = "",
+  maxToolIterations = 5,
+  promptSuffix = "",
   signal,
   onDelta,
 }: FetchChatStreamOptions) {
@@ -211,6 +219,10 @@ export async function fetchChatStream({
       max_tokens: maxTokens,
       seed,
       stop,
+      tool_mode: toolMode,
+      tool_names: toolNames,
+      max_tool_iterations: maxToolIterations,
+      prompt_suffix: promptSuffix,
     }),
     signal,
   });

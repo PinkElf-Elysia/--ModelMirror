@@ -282,6 +282,10 @@ class ChatRequest(BaseModel):
     max_tokens: int = Field(default=2048, ge=1, le=128000)
     seed: int | None = None
     stop: list[str] | None = Field(default=None, max_length=8)
+    tool_mode: Literal["none", "mcp_tools"] = "none"
+    tool_names: str = Field(default="", max_length=2_000)
+    max_tool_iterations: int = Field(default=5, ge=1, le=20)
+    prompt_suffix: str = Field(default="", max_length=4_000)
 
 
 class AgentRecord(BaseModel):
@@ -900,6 +904,61 @@ def completion_text_from_payload(payload: dict[str, Any]) -> str:
     return ""
 
 
+def chat_sse_delta(text: str) -> bytes:
+    payload = json.dumps(
+        {"choices": [{"delta": {"content": text}}]},
+        ensure_ascii=False,
+    )
+    return f"data: {payload}\n\n".encode("utf-8")
+
+
+def chat_sse_error(message: str) -> bytes:
+    payload = json.dumps(
+        {"error": {"message": message}},
+        ensure_ascii=False,
+    )
+    return f"data: {payload}\n\n".encode("utf-8")
+
+
+def parse_chat_tool_names(value: str | None) -> set[str]:
+    return {
+        item.strip()
+        for item in re.split(r"[,\n]+", value or "")
+        if item.strip()
+    }
+
+
+def extract_json_decision(raw_response: str) -> dict[str, Any] | None:
+    json_text = raw_response.strip()
+    fenced = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", json_text, re.DOTALL)
+    if fenced:
+        json_text = fenced.group(1).strip()
+    try:
+        decision = json.loads(json_text)
+    except ValueError:
+        return None
+    return decision if isinstance(decision, dict) else None
+
+
+def runtime_tool_result_text(call_result: Any) -> str:
+    metadata = getattr(call_result, "metadata", {}) or {}
+    content_types = metadata.get("content_types", [])
+    non_text_types = [
+        str(content_type)
+        for content_type in content_types
+        if str(content_type) != "text"
+    ]
+    output_text = str(getattr(call_result, "output", "") or "").strip()
+    if non_text_types:
+        output_text = (
+            output_text
+            + "\n"
+            + "非文本工具结果已省略："
+            + ", ".join(non_text_types)
+        ).strip()
+    return output_text
+
+
 async def collect_chat_completion_text(
     model_id: str,
     messages: list[ChatMessage],
@@ -934,6 +993,143 @@ async def collect_chat_completion_text(
         if not text.strip():
             raise RuntimeError("模型没有返回可用内容。")
         return text
+
+
+async def stream_chat_toolset_text(
+    payload: ChatRequest,
+    *,
+    runtime_pipeline: MiddlewarePipeline,
+    runtime_context: MiddlewareContext,
+) -> AsyncIterator[str]:
+    requested_tools = parse_chat_tool_names(payload.tool_names)
+    all_tools = await workflow_mcp_provider.list_tools()
+    available_tools = [
+        tool
+        for tool in all_tools
+        if not requested_tools or tool.name in requested_tools
+    ]
+    if not available_tools:
+        if requested_tools:
+            raise ValueError(
+                "Runtime 工具模式未找到这些 MCP 工具，请先在 MCP 页面连接工具，或检查工具白名单："
+                + ", ".join(sorted(requested_tools))
+            )
+        raise ValueError("Runtime 工具模式当前没有可用 MCP 工具，请先连接 MCP Server。")
+
+    tool_by_name = {tool.name: tool for tool in available_tools if tool.name}
+    tool_descriptions = "\n".join(
+        (
+            f"- {name}: {tool.description or '无描述'} "
+            f"schema={json.dumps(tool.input_schema or {}, ensure_ascii=False)}"
+        )
+        for name, tool in tool_by_name.items()
+    )
+    suffix = str(payload.prompt_suffix or "").strip()
+    tool_system_prompt = (
+        "你是 ModelMirror 的 Runtime Toolset 聊天智能体。"
+        "你可以选择调用一个工具，或者给出最终答案。"
+        "每次回复必须是 JSON，且只能使用以下两种格式之一："
+        '{"tool":"工具名","arguments":{...}} 或 {"answer":"最终答案"}。'
+        "不要输出 JSON 以外的文字。\n\n"
+        f"可用工具：\n{tool_descriptions}"
+    )
+    if suffix:
+        tool_system_prompt = f"{tool_system_prompt}\n\n补充约束：\n{suffix}"
+
+    messages: list[ChatMessage] = [
+        ChatMessage(role="system", content=tool_system_prompt),
+        *payload.messages,
+    ]
+    for iteration_index in range(payload.max_tool_iterations):
+        raw_response = (
+            await collect_chat_completion_text(
+                payload.model_id,
+                messages,
+                temperature=payload.temperature,
+                max_tokens=payload.max_tokens,
+            )
+        ).strip()
+        decision = extract_json_decision(raw_response)
+        if decision is None:
+            yield raw_response
+            return
+
+        answer = decision.get("answer")
+        if isinstance(answer, str) and answer.strip():
+            yield answer.strip()
+            return
+
+        tool_name = str(decision.get("tool") or "").strip()
+        if not tool_name:
+            yield raw_response
+            return
+
+        if requested_tools and tool_name not in requested_tools:
+            raise ValueError(
+                f"工具 {tool_name} 不在本次聊天允许列表中，请检查 Runtime 工具白名单。"
+            )
+        matched_tool = tool_by_name.get(tool_name)
+        if matched_tool is None:
+            raise ValueError(
+                f"工具 {tool_name} 当前未注册或未连接，请先在 MCP 页面连接对应 Server。"
+            )
+
+        arguments = decision.get("arguments")
+        if not isinstance(arguments, dict):
+            arguments = {}
+
+        tool_context = MiddlewareContext(
+            task_id=runtime_context.task_id,
+            trace_id=runtime_context.trace_id,
+            capabilities=runtime_capabilities,
+            store=runtime_context.store,
+            metadata={
+                "chat": True,
+                "model_id": payload.model_id,
+                "iteration": iteration_index + 1,
+            },
+        )
+        call_result = await run_tool_with_runtime(
+            RuntimeToolCall(
+                tool_name=tool_name,
+                arguments=arguments,
+                metadata={
+                    "session_id": matched_tool.session_id,
+                    "server_id": matched_tool.server_id,
+                    "chat": True,
+                    "iteration": iteration_index + 1,
+                },
+            ),
+            runtime_capabilities,
+            runtime_pipeline,
+            tool_context,
+            policy=workflow_tool_policy,
+            audit_store=workflow_tool_audit_store,
+        )
+        tool_result_text = runtime_tool_result_text(call_result)
+        yield (
+            f"\n[Runtime 工具调用 {iteration_index + 1}/{payload.max_tool_iterations}] "
+            f"{tool_name} 完成，结果预览：{tool_result_text[:240]}\n"
+        )
+        messages.append(
+            ChatMessage(
+                role="assistant",
+                content=json.dumps(decision, ensure_ascii=False),
+            )
+        )
+        messages.append(
+            ChatMessage(
+                role="user",
+                content=(
+                    f"工具 {tool_name} 的执行结果：\n{tool_result_text}\n\n"
+                    "请继续用 JSON 决策下一步。"
+                ),
+            )
+        )
+
+    raise ValueError(
+        f"Runtime 工具模式已达到最大循环次数 {payload.max_tool_iterations}，但模型没有给出最终答案。"
+    )
 
 
 async def stream_chat_text(
@@ -5292,6 +5488,57 @@ async def chat(payload: ChatRequest, request: Request):
             )
         except Exception as exc:
             logger.warning("Xpert runtime chat finalize failed: %s", exc)
+
+    if payload.tool_mode == "mcp_tools":
+        if runtime_pipeline is None or runtime_context is None:
+            runtime_pipeline, runtime_context = create_default_runtime(
+                middlewares=[event_recorder]
+            )
+            runtime_context.task_id = runtime_task_id
+            runtime_context.trace_id = request.headers.get("x-trace-id") or runtime_task_id
+            runtime_context.metadata = {
+                "model_id": payload.model_id,
+                "message_count": len(payload.messages),
+                "tool_mode": payload.tool_mode,
+            }
+
+        async def stream_tool_response():
+            accumulated_chunks: list[str] = []
+            runtime_status = "completed"
+            runtime_error: str | None = None
+            try:
+                async for delta in stream_chat_toolset_text(
+                    payload,
+                    runtime_pipeline=runtime_pipeline,
+                    runtime_context=runtime_context,
+                ):
+                    accumulated_chunks.append(delta)
+                    yield chat_sse_delta(delta)
+                    await asyncio.sleep(0)
+            except Exception as exc:
+                runtime_status = "error"
+                runtime_error = str(exc)
+                logger.warning("Runtime chat toolset failed: %s", exc)
+                yield chat_sse_error(str(exc))
+            finally:
+                await client.aclose()
+                await finalize_runtime(
+                    runtime_status,
+                    payload.model_id,
+                    "".join(accumulated_chunks),
+                    runtime_error,
+                )
+
+        return StreamingResponse(
+            stream_tool_response(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-ModelMirror-Actual-Model": payload.model_id,
+                "X-ModelMirror-Tool-Mode": "mcp_tools",
+            },
+        )
 
     async def send_prepared_to_upstream(
         model_id: str,

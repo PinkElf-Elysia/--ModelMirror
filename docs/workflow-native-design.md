@@ -1,5 +1,6 @@
 # workflow-native 自研工作流设计
 
+> 2026-07-08 状态补充：`/api/chat` 已接入默认关闭的 Runtime Toolset 工具模式。前端聊天页可显式开启 MCP 工具循环，后端复用 `run_tool_with_runtime`、`tool_policy` 与 `tool_audit`，并继续使用现有 OpenAI SSE delta 结构输出最终答案。当前不是 OpenAI function calling，不自动创建 Handoff，也不改变 workflow、RAG、Skill 或 MCP 连接主路径。
 > 2026-07-07 状态补充：RunRegistry Trace / Checkpoint 进入最小闭环。Workflow run、`workflow_agent`、`agent_task`、`agent_handoff` 会写入内存态 checkpoint；前端“运行观测”会读取 `GET /api/runtime/runs/{run_id}/checkpoints` 展示当前 run 与子 run 的时间线摘要。当前不做持久化、自动重试、队列调度或 checkpoint resume。
 > 2026-07-07 状态补充：`workflow_agent` 已支持 Runtime Toolset 工具模式。`toolMode=none` 保持单步模型执行；`toolMode=mcp_tools` 使用轻量 JSON 决策协议调用 MCP 工具，并复用 `run_tool_with_runtime`、`tool_policy`、`tool_audit`。旧 `agent.tool_first` 也已收敛到同一条 runtime toolset 路径。当前不是 OpenAI function calling，不做自动 Handoff 或真实多 Agent 协作。
 
@@ -523,5 +524,13 @@ Classic workflow 新增 handoff_router 节点，作为 workflow_agent -> Handoff
 运行时会读取 sourceVariable 的完整文本作为 AgentTask input，渲染 taskTitle 与 reasonTemplate，调用 AgentTaskStore.create_task(...) 创建任务，再调用 create_handoff(...) 创建 pending Handoff，并将 handoff_id 写入 outputVariable。节点会同步登记 agent_task 与 agent_handoff 子 run，并写入 checkpoint，供运行观测和 MetaAgent Handoff Inbox 查看。
 
 当前边界：只创建 pending Handoff，不自动 accept、不执行目标 Agent、不接队列 worker、不做持久化或权限系统。
+
+## 2026-07-08 增量：Chat Runtime Toolset
+
+聊天入口新增默认关闭的 Runtime 工具模式。旧请求仍走普通 `/api/chat` 流式上游路径；只有请求显式传入 `tool_mode=mcp_tools` 时，后端才要求模型输出轻量 JSON 决策：`{"tool":"工具名","arguments":{...}}` 或 `{"answer":"最终答案"}`。
+
+工具调用统一经过 `MCPToolsetProvider`、`run_tool_with_runtime` 与 `MiddlewarePipeline.wrap_tool_call`，因此现有 `tool_policy`、`tool_audit` 和 `event_recorder` 可复用到聊天工具循环。`tool_names` 提供逗号或换行分隔的白名单，留空代表允许当前已注册 MCP 工具；`max_tool_iterations` 限制为 1-20，避免无限工具循环。
+
+当前边界：不是 OpenAI function calling，不自动创建 Handoff，不接真实多 Agent 调度，也不保存完整 prompt、工具输出、模型回答或 API key 到运行元数据中。
 
 最后更新日期：2026-07-08
