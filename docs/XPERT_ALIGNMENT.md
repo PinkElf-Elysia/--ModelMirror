@@ -1,5 +1,6 @@
 # Xpert 对齐总纲
 
+> 2026-07-08 状态补充：Chat Agent Toolset 已进入“部分实现”。`/api/chat` 新增默认关闭的 `tool_mode=mcp_tools`，显式开启后使用轻量 JSON 决策协议调用 MCP 工具，并复用 `MCPToolsetProvider`、`run_tool_with_runtime`、`tool_policy` 与 `tool_audit`。普通聊天请求保持 `tool_mode=none`，SSE wire format 不变；当前不是 OpenAI function calling，不做 Handoff 自动调度或真实多 Agent 协作。
 > 2026-07-08 状态补充：Handoff Router 已进入“部分实现”。Classic workflow 新增 `handoff_router` 节点，可读取 `workflow_agent` 等上游节点输出，创建 AgentTask，并向目标 Agent 创建 pending Handoff，让结果进入 MetaAgent Handoff Inbox。当前不自动 accept、不执行目标 Agent、不接队列 worker 或持久化。
 > 2026-07-07 状态补充：RunRegistry Trace 已进入“部分实现”。`RuntimeRun` 现在可挂载内存态 checkpoint，记录 workflow、workflow_agent、agent_task、agent_handoff 的关键执行时间线；新增 `GET /api/runtime/runs/{run_id}/checkpoints` 供前端运行观测读取。当前仍不做持久化、自动重试、队列调度或 checkpoint resume。
 > 2026-07-07 状态补充：Workflow Agent Toolset 已进入“部分实现”。`workflow_agent` 现在支持 `toolMode=none/mcp_tools`，启用 MCP 工具时复用 Runtime Toolset、`tool_policy` 与 `tool_audit`；旧 `agent.tool_first` 也收敛到同一条 `run_tool_with_runtime` 路径。当前仍是轻量 JSON 决策协议，不做 OpenAI function calling、自动 Handoff 或真实多 Agent 调度。
@@ -43,7 +44,7 @@ EvoAgentX 只保留为历史参考：此前元智能体曾借鉴其 `goal -> sub
 | Runtime / Execution | 中间件生命周期、任务注册、事件记录、运行观测 | 部分实现 | 建立 Handoff / RunRegistry 闭环 |
 | Agent / Handoff | AgentTask、任务移交、子 Agent、主管-专家协作 | 部分实现 | 将 workflow_agent 输出与 Handoff 编排连接 |
 | Workflow | Xpert 节点类型、Agent 节点、工具节点、知识流水线节点 | 部分实现 | 扩展 subflow、知识类节点与 Agent trace |
-| Toolset / MCP | 统一 Toolset Provider、权限、审计、偏好 | 部分实现 | 将聊天 Agent 继续收敛到 toolset capability |
+| Toolset / MCP | 统一 Toolset Provider、权限、审计、偏好 | 部分实现 | 扩展 Chat 工具偏好、观测与安全边界 |
 | Knowledge Pipeline | FileAsset、Artifact、Chunk、CitationAnchor、Embedding | 待实现 | 从本地 RAG 元数据模型开始拆分 |
 | Claw / Skill | 用户偏好、工作区 Skill、会话临时选择 | 待实现 | 在 Xpert workspace / skill 抽象稳定后接入 |
 | Environment / Sandbox | 工作区文件、受限执行、浏览器/终端能力 | 待实现 | 先做受限文件 API 和 workspace volume |
@@ -52,7 +53,7 @@ EvoAgentX 只保留为历史参考：此前元智能体曾借鉴其 `goal -> sub
 ## 当前已落地能力
 
 - Runtime Middleware：已具备 `before_agent`、`before_model`、`wrap_model_call`、`after_model`、`after_agent`、`wrap_tool_call` 生命周期。
-- Chat Runtime：`/api/chat` 已接入默认 runtime pipeline，支持 system prompt 注入和模型调用事件记录。
+- Chat Runtime：`/api/chat` 已接入默认 runtime pipeline，支持 system prompt 注入和模型调用事件记录；显式设置 `tool_mode=mcp_tools` 时可进入 Runtime Toolset 工具循环，默认仍保持普通聊天路径。
 - Toolset / MCP：`mcp_tool` 已通过 `MCPToolsetProvider`、`CapabilityRegistry`、`run_tool_with_runtime` 调用工具。
 - Tool Policy / Audit：`tool_policy` 可影响 workflow 内 MCP 工具调用，`InMemoryToolAuditStore` 提供最小审计记录。
 - Runtime Middleware Node：前端可拖入 `runtime_middleware` 节点，`system_prompt_injector`、`tool_policy`、`event_recorder`、`tool_audit` 已逐步进入真实执行或可见状态。
@@ -66,7 +67,7 @@ EvoAgentX 只保留为历史参考：此前元智能体曾借鉴其 `goal -> sub
 
 1. **RunRegistry Trace 增强**：补齐 workflow_agent / handoff 的 trace、checkpoint、失败摘要与重试入口。
 2. **Handoff 自动编排雏形**：将 workflow_agent 输出与 handoff queue 连接，但仍保持人工可控。
-3. **Chat Agent Toolset 收敛**：将聊天 Agent 的工具调用继续迁入 Runtime Toolset capability。
+3. **Chat Agent Toolset 观测增强**：补齐聊天工具模式的任务级 trace、工具偏好和更细粒度安全提示。
 4. **知识流水线底座**：拆分本地 RAG 的文件元数据，建立 FileAsset -> Artifact -> Chunk -> CitationAnchor 的最小模型。
 
 ## 2026-07-07 增量：RunRegistry Trace / Checkpoint

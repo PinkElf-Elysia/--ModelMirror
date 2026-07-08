@@ -487,6 +487,10 @@ export default function ChatPage() {
   const [advancedParams, setAdvancedParams] = useState<ChatAdvancedParams>(() =>
     defaultAdvancedParams(),
   );
+  const [runtimeToolsEnabled, setRuntimeToolsEnabled] = useState(false);
+  const [runtimeToolNames, setRuntimeToolNames] = useState("");
+  const [runtimeMaxToolIterations, setRuntimeMaxToolIterations] = useState("5");
+  const [runtimePromptSuffix, setRuntimePromptSuffix] = useState("");
   const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBase[]>([]);
   const [selectedKnowledgeBaseId, setSelectedKnowledgeBaseId] = useState("");
   const [isLoadingKnowledgeBases, setIsLoadingKnowledgeBases] = useState(false);
@@ -830,6 +834,13 @@ export default function ChatPage() {
           ? Number(advancedParams.seed)
           : undefined,
         stop: parseStopSequences(advancedParams.stopSequences),
+        toolMode: runtimeToolsEnabled ? "mcp_tools" : "none",
+        toolNames: runtimeToolNames,
+        maxToolIterations: Math.min(
+          20,
+          Math.max(1, Number(runtimeMaxToolIterations) || 5),
+        ),
+        promptSuffix: runtimePromptSuffix,
         onDelta: (delta) => {
           setMessages((current) =>
             current.map((message) =>
@@ -1252,6 +1263,70 @@ export default function ChatPage() {
                       {isLoadingKnowledgeBases ? "刷新中" : "刷新"}
                     </button>
                   </div>
+                </div>
+                <div className="mb-3 rounded-lg border border-white/10 bg-white/[0.045] px-3 py-3">
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                    <div>
+                      <p className="text-xs font-semibold text-cyan-100">
+                        Runtime 工具模式 Beta
+                      </p>
+                      <p className="mt-1 text-xs leading-5 text-slate-400">
+                        开启后，聊天会按 JSON 决策调用已注册 MCP 工具；默认关闭。
+                      </p>
+                    </div>
+                    <label className="flex items-center gap-2 text-xs font-semibold text-slate-200">
+                      <input
+                        checked={runtimeToolsEnabled}
+                        className="h-4 w-4 rounded border-white/20 bg-ink-950 text-cyan-300 focus:ring-cyan-300/30"
+                        disabled={isSending}
+                        onChange={(event) =>
+                          setRuntimeToolsEnabled(event.target.checked)
+                        }
+                        type="checkbox"
+                      />
+                      启用 MCP 工具
+                    </label>
+                  </div>
+                  {runtimeToolsEnabled ? (
+                    <div className="mt-3 grid gap-3 lg:grid-cols-[1fr_140px]">
+                      <label className="flex flex-col gap-1 text-xs font-semibold text-slate-300">
+                        工具白名单
+                        <input
+                          className="rounded-lg border border-white/10 bg-ink-950/80 px-3 py-2 text-xs text-white outline-none transition placeholder:text-slate-500 focus:border-cyan-300/50 focus:ring-4 focus:ring-cyan-300/10"
+                          disabled={isSending}
+                          onChange={(event) => setRuntimeToolNames(event.target.value)}
+                          placeholder="fetch, search；留空代表全部已注册工具"
+                          value={runtimeToolNames}
+                        />
+                      </label>
+                      <label className="flex flex-col gap-1 text-xs font-semibold text-slate-300">
+                        最大循环
+                        <input
+                          className="rounded-lg border border-white/10 bg-ink-950/80 px-3 py-2 text-xs text-white outline-none transition focus:border-cyan-300/50 focus:ring-4 focus:ring-cyan-300/10"
+                          disabled={isSending}
+                          max={20}
+                          min={1}
+                          onChange={(event) =>
+                            setRuntimeMaxToolIterations(event.target.value)
+                          }
+                          type="number"
+                          value={runtimeMaxToolIterations}
+                        />
+                      </label>
+                      <label className="flex flex-col gap-1 text-xs font-semibold text-slate-300 lg:col-span-2">
+                        补充约束
+                        <textarea
+                          className="min-h-20 resize-none rounded-lg border border-white/10 bg-ink-950/80 px-3 py-2 text-xs leading-5 text-white outline-none transition placeholder:text-slate-500 focus:border-cyan-300/50 focus:ring-4 focus:ring-cyan-300/10"
+                          disabled={isSending}
+                          onChange={(event) =>
+                            setRuntimePromptSuffix(event.target.value)
+                          }
+                          placeholder="例如：工具结果不足时直接说明，不要猜测。"
+                          value={runtimePromptSuffix}
+                        />
+                      </label>
+                    </div>
+                  ) : null}
                 </div>
                 <div
                   className={`rounded-lg border p-2 transition ${

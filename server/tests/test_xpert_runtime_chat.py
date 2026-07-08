@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import pytest
+import httpx
+import pytest_asyncio
 
+import server.main as main_module
 from server.main import (
     ChatMessage,
+    app,
     parse_upstream_error,
     sse_delta_text,
     stream_chat_text,
@@ -12,10 +16,22 @@ from server.xpert_runtime import (
     MiddlewareContext,
     ModelCallRequest,
     ModelCallResponse,
+    RuntimeTool,
+    RuntimeToolResult,
     RuntimeEventStore,
     create_default_runtime,
     event_recorder,
 )
+
+
+@pytest_asyncio.fixture
+async def client():
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://testserver",
+    ) as async_client:
+        yield async_client
 
 
 @pytest.mark.asyncio
@@ -174,3 +190,209 @@ def test_newapi_user_error_can_fallback_to_openrouter(
         )
         is False
     )
+
+
+@pytest.mark.asyncio
+async def test_chat_tool_mode_answer_streams_final_text(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider, restore_provider = _install_fake_chat_tool_provider()
+
+    async def fake_collect_chat_completion_text(*args, **kwargs):
+        return '{"answer":"final"}'
+
+    monkeypatch.setattr(main_module, "get_llm_gateway_config", lambda: ("http://mock", "key"))
+    monkeypatch.setattr(
+        main_module,
+        "collect_chat_completion_text",
+        fake_collect_chat_completion_text,
+    )
+    monkeypatch.setattr(main_module, "workflow_mcp_provider", provider)
+    try:
+        response = await client.post(
+            "/api/chat",
+            json={
+                "model_id": "mock-model",
+                "messages": [{"role": "user", "content": "hi"}],
+                "tool_mode": "mcp_tools",
+                "tool_names": "fetch",
+            },
+        )
+    finally:
+        restore_provider()
+
+    assert response.status_code == 200, response.text
+    assert _read_sse_text(response.text) == "final"
+    assert provider.calls == []
+
+
+@pytest.mark.asyncio
+async def test_chat_tool_mode_calls_runtime_toolset(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider, restore_provider = _install_fake_chat_tool_provider()
+    responses = iter(
+        [
+            '{"tool":"fetch","arguments":{"query":"hello"}}',
+            '{"answer":"final from tool"}',
+        ]
+    )
+
+    async def fake_collect_chat_completion_text(*args, **kwargs):
+        return next(responses)
+
+    monkeypatch.setattr(main_module, "get_llm_gateway_config", lambda: ("http://mock", "key"))
+    monkeypatch.setattr(
+        main_module,
+        "collect_chat_completion_text",
+        fake_collect_chat_completion_text,
+    )
+    monkeypatch.setattr(main_module, "workflow_mcp_provider", provider)
+    try:
+        response = await client.post(
+            "/api/chat",
+            json={
+                "model_id": "mock-model",
+                "messages": [{"role": "user", "content": "hi"}],
+                "tool_mode": "mcp_tools",
+                "tool_names": "fetch",
+                "max_tool_iterations": 3,
+            },
+        )
+    finally:
+        restore_provider()
+
+    assert response.status_code == 200, response.text
+    text = _read_sse_text(response.text)
+    assert "Runtime 工具调用" in text
+    assert "final from tool" in text
+    assert len(provider.calls) == 1
+    assert provider.calls[0].tool_name == "fetch"
+    assert provider.calls[0].arguments == {"query": "hello"}
+
+
+@pytest.mark.asyncio
+async def test_chat_tool_mode_rejects_tool_outside_allowlist(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider, restore_provider = _install_fake_chat_tool_provider()
+
+    async def fake_collect_chat_completion_text(*args, **kwargs):
+        return '{"tool":"search","arguments":{"query":"blocked"}}'
+
+    monkeypatch.setattr(main_module, "get_llm_gateway_config", lambda: ("http://mock", "key"))
+    monkeypatch.setattr(
+        main_module,
+        "collect_chat_completion_text",
+        fake_collect_chat_completion_text,
+    )
+    monkeypatch.setattr(main_module, "workflow_mcp_provider", provider)
+    try:
+        response = await client.post(
+            "/api/chat",
+            json={
+                "model_id": "mock-model",
+                "messages": [{"role": "user", "content": "hi"}],
+                "tool_mode": "mcp_tools",
+                "tool_names": "fetch",
+            },
+        )
+    finally:
+        restore_provider()
+
+    assert response.status_code == 200, response.text
+    assert "不在本次聊天允许列表" in _read_sse_error(response.text)
+    assert provider.calls == []
+
+
+@pytest.mark.asyncio
+async def test_chat_tool_mode_invalid_payload_returns_validation_error(
+    client: httpx.AsyncClient,
+) -> None:
+    response = await client.post(
+        "/api/chat",
+        json={
+            "model_id": "mock-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tool_mode": "bad-mode",
+            "max_tool_iterations": 99,
+        },
+    )
+
+    assert response.status_code == 422
+
+
+class FakeChatToolProvider:
+    def __init__(self) -> None:
+        self.calls = []
+
+    async def list_tools(self):
+        return [
+            RuntimeTool(
+                name="fetch",
+                description="Fetch content",
+                input_schema={"type": "object"},
+                session_id="session-1",
+                server_id="server-1",
+            )
+        ]
+
+    async def find_tool(self, tool_name: str):
+        for tool in await self.list_tools():
+            if tool.name == tool_name:
+                return tool
+        return None
+
+    async def call_tool(self, call):
+        self.calls.append(call)
+        return RuntimeToolResult(
+            output="tool result",
+            content=[{"type": "text", "text": "tool result"}],
+            metadata={"content_types": ["text"]},
+            is_error=False,
+        )
+
+
+def _install_fake_chat_tool_provider():
+    provider = FakeChatToolProvider()
+    original = main_module.runtime_capabilities.require("mcp_tools").implementation
+    main_module.runtime_capabilities.register("mcp_tools", provider)
+
+    def restore_provider() -> None:
+        main_module.runtime_capabilities.register("mcp_tools", original)
+
+    return provider, restore_provider
+
+
+def _read_sse_text(text: str) -> str:
+    chunks: list[str] = []
+    for line in text.splitlines():
+        if not line.startswith("data:"):
+            continue
+        payload = line[5:].strip()
+        if not payload or payload == "[DONE]":
+            continue
+        data = __import__("json").loads(payload)
+        if "error" in data:
+            continue
+        choices = data.get("choices") or []
+        if choices:
+            chunks.append(str(choices[0].get("delta", {}).get("content") or ""))
+    return "".join(chunks)
+
+
+def _read_sse_error(text: str) -> str:
+    for line in text.splitlines():
+        if not line.startswith("data:"):
+            continue
+        payload = line[5:].strip()
+        if not payload or payload == "[DONE]":
+            continue
+        data = __import__("json").loads(payload)
+        error = data.get("error")
+        if isinstance(error, dict):
+            return str(error.get("message") or "")
+    return ""
