@@ -1,5 +1,6 @@
 # Xpert 对齐总纲
 
+> 2026-07-08 状态补充：Handoff Router 已进入“部分实现”。Classic workflow 新增 `handoff_router` 节点，可读取 `workflow_agent` 等上游节点输出，创建 AgentTask，并向目标 Agent 创建 pending Handoff，让结果进入 MetaAgent Handoff Inbox。当前不自动 accept、不执行目标 Agent、不接队列 worker 或持久化。
 > 2026-07-07 状态补充：RunRegistry Trace 已进入“部分实现”。`RuntimeRun` 现在可挂载内存态 checkpoint，记录 workflow、workflow_agent、agent_task、agent_handoff 的关键执行时间线；新增 `GET /api/runtime/runs/{run_id}/checkpoints` 供前端运行观测读取。当前仍不做持久化、自动重试、队列调度或 checkpoint resume。
 > 2026-07-07 状态补充：Workflow Agent Toolset 已进入“部分实现”。`workflow_agent` 现在支持 `toolMode=none/mcp_tools`，启用 MCP 工具时复用 Runtime Toolset、`tool_policy` 与 `tool_audit`；旧 `agent.tool_first` 也收敛到同一条 `run_tool_with_runtime` 路径。当前仍是轻量 JSON 决策协议，不做 OpenAI function calling、自动 Handoff 或真实多 Agent 调度。
 
@@ -26,7 +27,7 @@ Classic workflow 运行时会创建 workflow run，并在 `workflow_meta` / `wor
 
 当前边界：RunRegistry 仅为内存态可观测索引，不是持久化调度器；取消 run 只更新 registry 状态，不中断真实 workflow、AgentTask 或 Handoff 执行。Checkpoint 只保存摘要与元信息，不保存完整 prompt、工具输出、模型输出或密钥。下一步可在此基础上继续补齐 Handoff 自动编排、RunRegistry 页面、死信与持久化存储。
 
-最后更新日期：2026-07-06
+最后更新日期：2026-07-08
 维护人：模镜团队
 
 ## 对齐原则
@@ -58,6 +59,7 @@ EvoAgentX 只保留为历史参考：此前元智能体曾借鉴其 `goal -> sub
 - Workflow Agent Node：classic workflow 可拖入 `workflow_agent` 节点，使用 `rolePrompt` 作为该节点 system prompt、`taskInput` 作为用户输入调用模型，结果写入 `outputVariable`，并登记 `workflow_agent` 子 run；启用 `toolMode=mcp_tools` 时可通过 Runtime Toolset 调用 MCP 工具。
 - Agent Task Runtime：已提供 `AgentTaskStore`、最小 AgentTask API、MetaAgent 任务工作台，以及 classic workflow `agent_task` 节点；该节点当前负责创建任务并输出 `task_id`，暂不做真实多 Agent 调度。
 - Handoff API：已提供 handoff 创建、按任务查询、接受、拒绝、完成的内存态 API，状态转移限定为 `pending -> accepted/rejected`、`accepted -> completed`，并写入 `agent.handoff.created/accepted/rejected/completed` runtime events。
+- Handoff Router Node：classic workflow 可拖入 `handoff_router` 节点，读取上游变量作为 AgentTask input，创建 AgentTask 后立即创建 pending Handoff，并登记 `agent_task` / `agent_handoff` 子 run 与 checkpoint；当前仍由 Handoff Inbox 人工处理，不做自动调度。
 - 运行观测：classic workflow 可查询 per-task runtime events 和 tool audit records，前端 `WorkflowRun` 已提供“运行观测”折叠区。
 
 ## 近期交付顺序

@@ -114,6 +114,13 @@ const nodeMeta = {
     bg: "bg-fuchsia-300/10",
     text: "text-fuchsia-100",
   },
+  handoff_router: {
+    icon: "↪",
+    label: "Handoff Router",
+    border: "border-pink-300/40",
+    bg: "bg-pink-300/10",
+    text: "text-pink-100",
+  },
   mcp_tool: {
     icon: "🔧",
     label: "MCP Tool",
@@ -206,6 +213,9 @@ function outputName(data: WorkflowNode["data"]) {
   }
   if (data.kind === "agent_handoff") {
     return `${data.taskIdVariable ?? "agent_task_id"} -> ${data.targetAgent ?? "review-agent"} -> ${data.outputVariable ?? "agent_handoff_id"}`;
+  }
+  if (data.kind === "handoff_router") {
+    return `${data.sourceVariable ?? "agent_output"} -> ${data.targetAgent ?? "review-agent"} -> ${data.outputVariable ?? "agent_handoff_id"}`;
   }
   if (data.kind === "mcp_tool") {
     return `🔧 ${data.toolName ?? "未选择"} → ${data.outputVariable ?? "mcp_output"}`;

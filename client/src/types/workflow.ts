@@ -18,6 +18,7 @@ export type WorkflowNodeKind =
   | "workflow_agent"
   | "agent_task"
   | "agent_handoff"
+  | "handoff_router"
   | "mcp_tool"
   | "time_tool"
   | "http_request"
@@ -73,9 +74,11 @@ export interface WorkflowNodeData extends Record<string, unknown> {
   taskInput?: string;
   assignedAgent?: string;
   taskIdVariable?: string;
+  sourceVariable?: string;
   sourceAgent?: string;
   targetAgent?: string;
   reason?: string;
+  reasonTemplate?: string;
   instruction?: string;
   toolNames?: string;
   maxIterations?: string;

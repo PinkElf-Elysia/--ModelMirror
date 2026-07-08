@@ -421,6 +421,7 @@ WorkflowNodeType = Literal[
     "workflow_agent",
     "agent_task",
     "agent_handoff",
+    "handoff_router",
     "mcp_tool",
     "time_tool",
     "http_request",
@@ -1231,6 +1232,7 @@ def workflow_node_kind(node: WorkflowNodePayload) -> WorkflowNodeType:
         "workflow_agent",
         "agent_task",
         "agent_handoff",
+        "handoff_router",
         "mcp_tool",
         "time_tool",
         "http_request",
@@ -3496,6 +3498,186 @@ async def run_workflow(payload: WorkflowRunRequest, request: Request):
                         )
                     except Exception as exc:
                         logger.warning("Workflow agent_handoff node failed: %s", exc)
+                        output = ""
+                        variables[output_variable] = output
+                        yield sse_payload(
+                            {
+                                "event": "error",
+                                "node_id": node.id,
+                                "message": str(exc),
+                            }
+                        )
+
+                elif kind == "handoff_router":
+                    output_variable = str(
+                        node.data.get("outputVariable") or "agent_handoff_id"
+                    ).strip() or "agent_handoff_id"
+                    try:
+                        source_variable = str(
+                            node.data.get("sourceVariable") or "agent_output"
+                        ).strip()
+                        source_agent = str(
+                            node.data.get("sourceAgent") or "workflow-agent"
+                        ).strip() or "workflow-agent"
+                        target_agent = str(node.data.get("targetAgent") or "").strip()
+                        task_title_template = str(
+                            node.data.get("taskTitle") or "Workflow handoff task"
+                        )
+                        reason_template = str(
+                            node.data.get("reasonTemplate") or ""
+                        )
+
+                        if not source_variable:
+                            raise ValueError("handoff_router needs sourceVariable.")
+                        if not target_agent:
+                            raise ValueError("handoff_router needs targetAgent.")
+                        if not reason_template.strip():
+                            raise ValueError("handoff_router needs reasonTemplate.")
+
+                        source_value = str(variables.get(source_variable) or "")
+                        if not source_value.strip():
+                            raise ValueError(
+                                f"handoff_router could not read source variable: {source_variable}"
+                            )
+
+                        task_title = render_workflow_template(
+                            task_title_template,
+                            variables,
+                        ).strip()
+                        if not task_title:
+                            raise ValueError("handoff_router rendered taskTitle is empty.")
+
+                        reason = render_workflow_template(
+                            reason_template,
+                            variables,
+                        ).strip()
+                        if not reason:
+                            raise ValueError("handoff_router rendered reason is empty.")
+
+                        task = await agent_task_store.create_task(
+                            title=task_title,
+                            input_text=source_value,
+                            source_agent=source_agent,
+                            assigned_agent=target_agent,
+                            metadata={
+                                "workflow_id": payload.workflow.id,
+                                "workflow_title": payload.workflow.title,
+                                "workflow_task_id": task_id,
+                                "workflow_node_id": node.id,
+                                "workflow_node_title": title,
+                                "source_variable": source_variable,
+                                "source_length": len(source_value),
+                                "output_variable": output_variable,
+                                "router": "handoff_router",
+                            },
+                        )
+                        agent_task_run = await run_registry.create_run(
+                            "agent_task",
+                            task.title,
+                            status="pending",
+                            source_id=task.task_id,
+                            parent_run_id=workflow_run.run_id,
+                            metadata={
+                                "workflow_id": payload.workflow.id,
+                                "workflow_title": payload.workflow.title,
+                                "workflow_task_id": task_id,
+                                "node_id": node.id,
+                                "node_title": title,
+                                "agent_task_id": task.task_id,
+                                "source_agent": source_agent,
+                                "assigned_agent": target_agent,
+                                "source_variable": source_variable,
+                                "source_length": len(source_value),
+                                "output_variable": output_variable,
+                                "router": "handoff_router",
+                            },
+                        )
+                        await run_registry.record_checkpoint(
+                            agent_task_run.run_id,
+                            event_type="agent_task.created",
+                            title="Agent task created by handoff router",
+                            summary=task.title,
+                            metadata={
+                                "node_id": node.id,
+                                "agent_task_id": task.task_id,
+                                "assigned_agent": target_agent,
+                                "source_variable": source_variable,
+                                "source_length": len(source_value),
+                            },
+                        )
+
+                        handoff = await agent_task_store.create_handoff(
+                            task.task_id,
+                            source_agent=source_agent,
+                            target_agent=target_agent,
+                            reason=reason,
+                            metadata={
+                                "workflow_id": payload.workflow.id,
+                                "workflow_title": payload.workflow.title,
+                                "workflow_task_id": task_id,
+                                "workflow_node_id": node.id,
+                                "workflow_node_title": title,
+                                "agent_task_id": task.task_id,
+                                "source_variable": source_variable,
+                                "output_variable": output_variable,
+                                "router": "handoff_router",
+                            },
+                        )
+                        handoff_run = await run_registry.create_run(
+                            "agent_handoff",
+                            f"{source_agent} -> {target_agent}",
+                            status="pending",
+                            source_id=handoff.handoff_id,
+                            parent_run_id=workflow_run.run_id,
+                            metadata={
+                                "workflow_id": payload.workflow.id,
+                                "workflow_title": payload.workflow.title,
+                                "workflow_task_id": task_id,
+                                "node_id": node.id,
+                                "node_title": title,
+                                "agent_task_id": task.task_id,
+                                "handoff_id": handoff.handoff_id,
+                                "source_agent": source_agent,
+                                "target_agent": target_agent,
+                                "source_variable": source_variable,
+                                "output_variable": output_variable,
+                                "router": "handoff_router",
+                            },
+                        )
+                        await run_registry.record_checkpoint(
+                            handoff_run.run_id,
+                            event_type="agent_handoff.created",
+                            title="Agent handoff created by router",
+                            summary=f"{source_agent} -> {target_agent}",
+                            metadata={
+                                "node_id": node.id,
+                                "agent_task_id": task.task_id,
+                                "handoff_id": handoff.handoff_id,
+                                "source_agent": source_agent,
+                                "target_agent": target_agent,
+                            },
+                        )
+
+                        output = handoff.handoff_id
+                        variables[output_variable] = output
+                        yield sse_payload(
+                            {
+                                "event": "node_delta",
+                                "node_id": node.id,
+                                "node_title": title,
+                                "node_type": kind,
+                                "output": (
+                                    f"Created routed Handoff: task {task.task_id} -> "
+                                    f"{target_agent} ({handoff.handoff_id})"
+                                ),
+                                "variable": output_variable,
+                                "agent_task_id": task.task_id,
+                                "agent_handoff_id": handoff.handoff_id,
+                                "run_id": handoff_run.run_id,
+                            }
+                        )
+                    except Exception as exc:
+                        logger.warning("Workflow handoff_router node failed: %s", exc)
                         output = ""
                         variables[output_variable] = output
                         yield sse_payload(

@@ -515,3 +515,13 @@ classic workflow 已新增 `workflow_agent` 节点，作为 Xpert Workflow Agent
 2. 从 `client/src/data/studio.ts` 移除实验卡片。
 3. 后端可以保留 `/api/workflow-native/validate`，因为它不会影响稳定路径。
 4. `/workflow`、`/workflow/classic`、`/rag` 不需要变更。
+
+## 2026-07-08 增量：Handoff Router 工作流节点
+
+Classic workflow 新增 handoff_router 节点，作为 workflow_agent -> Handoff Inbox 的人工可控自动编排雏形。节点字段包括 sourceVariable、taskTitle、targetAgent、sourceAgent、reasonTemplate 与 outputVariable。
+
+运行时会读取 sourceVariable 的完整文本作为 AgentTask input，渲染 taskTitle 与 reasonTemplate，调用 AgentTaskStore.create_task(...) 创建任务，再调用 create_handoff(...) 创建 pending Handoff，并将 handoff_id 写入 outputVariable。节点会同步登记 agent_task 与 agent_handoff 子 run，并写入 checkpoint，供运行观测和 MetaAgent Handoff Inbox 查看。
+
+当前边界：只创建 pending Handoff，不自动 accept、不执行目标 Agent、不接队列 worker、不做持久化或权限系统。
+
+最后更新日期：2026-07-08

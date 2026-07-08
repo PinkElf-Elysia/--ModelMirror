@@ -47,6 +47,8 @@ NODE_KIND_ALIASES = {
     "agent-task": "agent_task",
     "agent_handoff": "agent_handoff",
     "agent-handoff": "agent_handoff",
+    "handoff_router": "handoff_router",
+    "handoff-router": "handoff_router",
     "mcp_tool": "mcp_tool",
     "mcp-tool": "mcp_tool",
     "tool": "mcp_tool",
@@ -84,6 +86,7 @@ SUPPORTED_NODE_KINDS = {
     "workflow_agent",
     "agent_task",
     "agent_handoff",
+    "handoff_router",
     "mcp_tool",
     "time_tool",
     "http_request",
@@ -877,6 +880,73 @@ def validate_node_configuration(
                 )
             )
 
+    if kind == "handoff_router":
+        source_variable = str(data.get("sourceVariable") or "").strip()
+        if not source_variable:
+            issues.append(
+                ValidationIssue(
+                    code="missing_handoff_router_source_variable",
+                    message="Handoff router node needs data.sourceVariable.",
+                    node_id=node.id,
+                )
+            )
+        elif not is_variable_name(source_variable):
+            issues.append(
+                ValidationIssue(
+                    code="invalid_handoff_router_source_variable",
+                    message="Handoff router sourceVariable must be an identifier.",
+                    node_id=node.id,
+                )
+            )
+
+        task_title = str(data.get("taskTitle") or "").strip()
+        if not task_title:
+            issues.append(
+                ValidationIssue(
+                    code="missing_handoff_router_task_title",
+                    message="Handoff router node needs data.taskTitle.",
+                    node_id=node.id,
+                )
+            )
+
+        target_agent = str(data.get("targetAgent") or "").strip()
+        if not target_agent:
+            issues.append(
+                ValidationIssue(
+                    code="missing_handoff_router_target_agent",
+                    message="Handoff router node needs data.targetAgent.",
+                    node_id=node.id,
+                )
+            )
+
+        reason_template = str(data.get("reasonTemplate") or "").strip()
+        if not reason_template:
+            issues.append(
+                ValidationIssue(
+                    code="missing_handoff_router_reason_template",
+                    message="Handoff router node needs data.reasonTemplate.",
+                    node_id=node.id,
+                )
+            )
+
+        output_variable = str(data.get("outputVariable") or "").strip()
+        if not output_variable:
+            issues.append(
+                ValidationIssue(
+                    code="missing_handoff_router_output_variable",
+                    message="Handoff router node needs data.outputVariable.",
+                    node_id=node.id,
+                )
+            )
+        elif not is_variable_name(output_variable):
+            issues.append(
+                ValidationIssue(
+                    code="invalid_handoff_router_output_variable",
+                    message="Handoff router outputVariable must be an identifier.",
+                    node_id=node.id,
+                )
+            )
+
     if kind == "mcp_tool":
         tool_name = str(data.get("toolName") or "").strip()
         if not tool_name:
@@ -1238,6 +1308,7 @@ def collect_declared_variables(
             "workflow_agent",
             "agent_task",
             "agent_handoff",
+            "handoff_router",
             "mcp_tool",
             "time_tool",
             "http_request",
@@ -1521,6 +1592,35 @@ def validate_variable_references(
                         node_id=node.id,
                     )
                 )
+
+    if kind == "handoff_router":
+        source_variable = str(data.get("sourceVariable") or "").strip()
+        if source_variable and source_variable not in available_variables:
+            issues.append(
+                ValidationIssue(
+                    code="missing_handoff_router_source_variable_reference",
+                    message=(
+                        "Handoff router sourceVariable references undefined "
+                        f"variable '{source_variable}'."
+                    ),
+                    node_id=node.id,
+                )
+            )
+
+        for field_name in ("taskTitle", "reasonTemplate"):
+            template = str(data.get(field_name) or "")
+            for variable in sorted(extract_template_variables(template)):
+                if variable not in available_variables:
+                    issues.append(
+                        ValidationIssue(
+                            code="missing_handoff_router_template_variable",
+                            message=(
+                                f"Handoff router {field_name} references undefined "
+                                f"variable '{variable}'."
+                            ),
+                            node_id=node.id,
+                        )
+                    )
 
     if kind == "mcp_tool":
         arguments_json = str(data.get("argumentsJson") or "")
