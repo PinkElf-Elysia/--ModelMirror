@@ -9,12 +9,22 @@ export type WorkflowPaletteCategoryId =
   | "memory"
   | "other";
 
+export type WorkflowRegistryTabId = "workflow" | "knowledge";
+
+export interface WorkflowRegistryTab {
+  id: WorkflowRegistryTabId;
+  label: string;
+}
+
 export interface WorkflowPaletteItem {
   kind: WorkflowPaletteNodeKind;
   icon: string;
   title: string;
   description: string;
+  category?: WorkflowPaletteCategoryId;
   tags?: string[];
+  enabled?: boolean;
+  metadata?: Record<string, unknown>;
 }
 
 export interface WorkflowPalettePlaceholder {
@@ -23,15 +33,31 @@ export interface WorkflowPalettePlaceholder {
   title: string;
   description: string;
   statusLabel: string;
+  category?: WorkflowPaletteCategoryId;
   tags?: string[];
+  enabled?: false;
+  metadata?: Record<string, unknown>;
 }
 
 export interface WorkflowPaletteSection {
   id: WorkflowPaletteCategoryId;
+  tab?: WorkflowRegistryTabId;
   label: string;
   description: string;
   items: WorkflowPaletteItem[];
   placeholders?: WorkflowPalettePlaceholder[];
+}
+
+export interface WorkflowKnowledgePipelinePalette {
+  items: WorkflowPaletteItem[];
+  placeholders: WorkflowPalettePlaceholder[];
+}
+
+export interface WorkflowNodeRegistryResponse {
+  version: string;
+  tabs: WorkflowRegistryTab[];
+  sections: WorkflowPaletteSection[];
+  knowledge_pipeline: WorkflowKnowledgePipelinePalette;
 }
 
 export const workflowPaletteSections: WorkflowPaletteSection[] = [
@@ -331,4 +357,25 @@ export function matchesWorkflowPaletteQuery(
     .join(" ")
     .toLowerCase();
   return haystack.includes(query);
+}
+
+export const workflowNodeRegistryFallback: WorkflowNodeRegistryResponse = {
+  version: "local-workflow-node-registry-fallback",
+  tabs: [
+    { id: "workflow", label: "工作流" },
+    { id: "knowledge", label: "知识流水线" },
+  ],
+  sections: workflowPaletteSections,
+  knowledge_pipeline: {
+    items: knowledgePipelineItems,
+    placeholders: knowledgePipelinePlaceholders,
+  },
+};
+
+export async function fetchWorkflowNodeRegistry(): Promise<WorkflowNodeRegistryResponse> {
+  const response = await fetch("/api/workflow/node-registry");
+  if (!response.ok) {
+    throw new Error(`Failed to fetch workflow node registry: ${response.status}`);
+  }
+  return response.json();
 }

@@ -17,6 +17,16 @@ from .middleware_registry import (
     register_builtin_middleware_nodes,
     runtime_middleware_registry,
 )
+from .workflow_node_registry import (
+    KnowledgePipelinePalette,
+    WorkflowNodeRegistry,
+    WorkflowPaletteItem,
+    WorkflowPalettePlaceholder,
+    WorkflowPaletteSection,
+    WorkflowPaletteTab,
+    register_builtin_workflow_nodes,
+    workflow_node_registry,
+)
 from .models import (
     MiddlewareContext,
     ModelCallRequest,
@@ -70,6 +80,12 @@ __all__ = [
     "RuntimeMiddlewareField",
     "RuntimeMiddlewareNode",
     "RuntimeMiddlewareRegistry",
+    "WorkflowNodeRegistry",
+    "WorkflowPaletteItem",
+    "WorkflowPalettePlaceholder",
+    "WorkflowPaletteSection",
+    "WorkflowPaletteTab",
+    "KnowledgePipelinePalette",
     "RuntimeRun",
     "RuntimeRunCheckpoint",
     "RuntimeRunStatus",
@@ -82,6 +98,7 @@ __all__ = [
     "run_tool_with_runtime",
     "RunRegistry",
     "runtime_middleware_registry",
+    "workflow_node_registry",
     "system_prompt_injector",
     "ToolCallRequest",
     "ToolCallResponse",
@@ -90,5 +107,6 @@ __all__ = [
     "ToolsetProvider",
     "ToolPermissionPolicy",
     "register_builtin_middleware_nodes",
+    "register_builtin_workflow_nodes",
     "register_mcp_toolset_capability",
 ]

@@ -111,6 +111,7 @@ try:
         event_recorder,
         run_tool_with_runtime,
         runtime_middleware_registry,
+        workflow_node_registry,
     )
 except ModuleNotFoundError:
     from xpert_runtime import (
@@ -130,6 +131,7 @@ except ModuleNotFoundError:
         event_recorder,
         run_tool_with_runtime,
         runtime_middleware_registry,
+        workflow_node_registry,
     )
 
 load_dotenv()
@@ -2183,6 +2185,16 @@ async def run_workflow(payload: WorkflowRunRequest, request: Request):
                 else workflow_tool_audit_store
             )
 
+        def workflow_truthy(value: Any) -> bool:
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, str):
+                return value.strip().lower() in {"1", "true", "yes", "on"}
+            return bool(value)
+
+        def workflow_error_summary(exc: Exception) -> str:
+            return str(exc or "")[:300]
+
         async def call_workflow_runtime_tool(
             *,
             tool_name: str,
@@ -3613,6 +3625,16 @@ async def run_workflow(payload: WorkflowRunRequest, request: Request):
                         if prompt_suffix:
                             task_input = f"{task_input}\n\n{prompt_suffix}".strip()
                         tool_mode = str(node.data.get("toolMode") or "none").strip()
+                        retry_on_failure = workflow_truthy(
+                            node.data.get("retryOnFailure")
+                        )
+                        disable_output = workflow_truthy(node.data.get("disableOutput"))
+                        fallback_model_id = str(
+                            node.data.get("fallbackModelId") or ""
+                        ).strip()
+                        exception_handling = str(
+                            node.data.get("exceptionHandling") or "none"
+                        ).strip() or "none"
                         try:
                             max_iterations = int(
                                 str(
@@ -3629,6 +3651,10 @@ async def run_workflow(payload: WorkflowRunRequest, request: Request):
                             raise ValueError("workflow_agent 缺少任务输入。")
                         if tool_mode not in {"none", "mcp_tools"}:
                             raise ValueError(f"workflow_agent 工具模式不支持：{tool_mode}")
+                        if exception_handling not in {"none", "fail", "empty_output"}:
+                            raise ValueError(
+                                "workflow_agent exceptionHandling must be none, fail, or empty_output."
+                            )
 
                         workflow_agent_run = await run_registry.create_run(
                             "workflow_agent",
@@ -3646,6 +3672,10 @@ async def run_workflow(payload: WorkflowRunRequest, request: Request):
                                 "model_id": model_id,
                                 "tool_mode": tool_mode,
                                 "output_variable": output_variable,
+                                "retry_on_failure": retry_on_failure,
+                                "fallback_model_id": fallback_model_id or None,
+                                "exception_handling": exception_handling,
+                                "disable_output": disable_output,
                             },
                         )
                         await run_registry.record_checkpoint(
@@ -3659,71 +3689,223 @@ async def run_workflow(payload: WorkflowRunRequest, request: Request):
                                 "model_id": model_id,
                                 "tool_mode": tool_mode,
                                 "output_variable": output_variable,
+                                "retry_on_failure": retry_on_failure,
+                                "fallback_model_id": fallback_model_id or None,
+                                "exception_handling": exception_handling,
+                                "disable_output": disable_output,
                             },
                         )
 
-                        if tool_mode == "none":
-                            await run_registry.record_checkpoint(
-                                workflow_agent_run.run_id,
-                                event_type="workflow_agent.model_call",
-                                title="Model call started",
-                                summary=f"model={model_id}",
-                                metadata={
-                                    "node_id": node.id,
-                                    "model_id": model_id,
-                                },
-                            )
-                            async for delta in stream_workflow_llm_text(
-                                model_id,
-                                task_input,
-                                system_prompt=role_prompt,
-                            ):
-                                output += delta
+                        attempt_models: list[tuple[str, bool]] = [(model_id, False)]
+                        if retry_on_failure:
+                            attempt_models.append((model_id, False))
+                        if fallback_model_id and fallback_model_id != model_id:
+                            attempt_models.append((fallback_model_id, True))
+                            if retry_on_failure:
+                                attempt_models.append((fallback_model_id, True))
+
+                        last_error: Exception | None = None
+                        success = False
+                        fallback_checkpoint_recorded = False
+                        for attempt_index, (attempt_model_id, fallback_used) in enumerate(
+                            attempt_models,
+                            start=1,
+                        ):
+                            output = ""
+                            try:
+                                if attempt_index > 1 and not fallback_used:
+                                    await run_registry.record_checkpoint(
+                                        workflow_agent_run.run_id,
+                                        event_type="workflow_agent.retry",
+                                        title="Workflow agent retry",
+                                        summary=f"attempt={attempt_index}",
+                                        severity="warning",
+                                        metadata={
+                                            "node_id": node.id,
+                                            "attempt": attempt_index,
+                                            "model_id": attempt_model_id,
+                                            "fallback_used": False,
+                                        },
+                                    )
+                                if fallback_used and not fallback_checkpoint_recorded:
+                                    fallback_checkpoint_recorded = True
+                                    await run_registry.record_checkpoint(
+                                        workflow_agent_run.run_id,
+                                        event_type="workflow_agent.fallback_model",
+                                        title="Fallback model selected",
+                                        summary=f"fallback_model={attempt_model_id}",
+                                        severity="warning",
+                                        metadata={
+                                            "node_id": node.id,
+                                            "attempt": attempt_index,
+                                            "model_id": attempt_model_id,
+                                            "primary_model_id": model_id,
+                                            "fallback_used": True,
+                                        },
+                                    )
+                                await run_registry.record_checkpoint(
+                                    workflow_agent_run.run_id,
+                                    event_type="workflow_agent.model_call",
+                                    title="Model call started",
+                                    summary=(
+                                        f"model={attempt_model_id}, attempt={attempt_index}"
+                                    ),
+                                    metadata={
+                                        "node_id": node.id,
+                                        "model_id": attempt_model_id,
+                                        "attempt": attempt_index,
+                                        "fallback_used": fallback_used,
+                                    },
+                                )
+                                if tool_mode == "none":
+                                    async for delta in stream_workflow_llm_text(
+                                        attempt_model_id,
+                                        task_input,
+                                        system_prompt=role_prompt,
+                                    ):
+                                        output += delta
+                                        yield sse_payload(
+                                            {
+                                                "event": "node_delta",
+                                                "node_id": node.id,
+                                                "node_title": title,
+                                                "node_type": kind,
+                                                "output": delta,
+                                                "variable": output_variable,
+                                                "run_id": workflow_agent_run.run_id,
+                                            }
+                                        )
+                                else:
+                                    output, agent_events = await run_react_lite_agent(
+                                        node=node,
+                                        title=title,
+                                        kind=kind,
+                                        model_id=attempt_model_id,
+                                        system_prompt=role_prompt,
+                                        user_prompt=task_input,
+                                        tool_names_raw=node.data.get("toolNames"),
+                                        max_iterations=max_iterations,
+                                        temperature=0.7,
+                                        output_variable=output_variable,
+                                        run_id=workflow_agent_run.run_id,
+                                    )
+                                    for agent_event in agent_events:
+                                        yield sse_payload(agent_event)
+                                    yield sse_payload(
+                                        {
+                                            "event": "node_delta",
+                                            "node_id": node.id,
+                                            "node_title": title,
+                                            "node_type": kind,
+                                            "output": output[:500],
+                                            "variable": output_variable,
+                                            "run_id": workflow_agent_run.run_id,
+                                        }
+                                    )
+                                success = True
+                                model_id = attempt_model_id
+                                break
+                            except Exception as attempt_exc:
+                                last_error = attempt_exc
+                                await run_registry.record_checkpoint(
+                                    workflow_agent_run.run_id,
+                                    event_type="workflow_agent.failed_attempt",
+                                    title="Workflow agent attempt failed",
+                                    summary=workflow_error_summary(attempt_exc),
+                                    severity="warning",
+                                    metadata={
+                                        "node_id": node.id,
+                                        "attempt": attempt_index,
+                                        "model_id": attempt_model_id,
+                                        "fallback_used": fallback_used,
+                                        "error": workflow_error_summary(attempt_exc),
+                                    },
+                                )
+
+                        if not success:
+                            if exception_handling == "empty_output":
+                                output = ""
+                                if not disable_output:
+                                    variables[output_variable] = output
+                                await run_registry.update_run(
+                                    workflow_agent_run.run_id,
+                                    status="completed",
+                                    error=workflow_error_summary(
+                                        last_error or RuntimeError("unknown")
+                                    ),
+                                    metadata={
+                                        "exception_handled": True,
+                                        "exception_handling": exception_handling,
+                                        "output_length": 0,
+                                        "output_disabled": disable_output,
+                                    },
+                                )
+                                await run_registry.record_checkpoint(
+                                    workflow_agent_run.run_id,
+                                    event_type="workflow_agent.empty_output",
+                                    title="Exception handled with empty output",
+                                    summary=workflow_error_summary(
+                                        last_error or RuntimeError("unknown")
+                                    ),
+                                    severity="warning",
+                                    metadata={
+                                        "node_id": node.id,
+                                        "output_variable": output_variable,
+                                        "output_disabled": disable_output,
+                                    },
+                                )
                                 yield sse_payload(
                                     {
-                                        "event": "node_delta",
+                                        "event": "error",
                                         "node_id": node.id,
-                                        "node_title": title,
-                                        "node_type": kind,
-                                        "output": delta,
-                                        "variable": output_variable,
-                                        "run_id": workflow_agent_run.run_id,
+                                        "message": workflow_error_summary(
+                                            last_error or RuntimeError("unknown")
+                                        ),
                                     }
                                 )
-                        else:
-                            output, agent_events = await run_react_lite_agent(
-                                node=node,
-                                title=title,
-                                kind=kind,
-                                model_id=model_id,
-                                system_prompt=role_prompt,
-                                user_prompt=task_input,
-                                tool_names_raw=node.data.get("toolNames"),
-                                max_iterations=max_iterations,
-                                temperature=0.7,
-                                output_variable=output_variable,
-                                run_id=workflow_agent_run.run_id,
+                            else:
+                                raise last_error or RuntimeError(
+                                    "workflow_agent failed without a captured error"
+                                )
+                        elif disable_output:
+                            await run_registry.record_checkpoint(
+                                workflow_agent_run.run_id,
+                                event_type="workflow_agent.output_disabled",
+                                title="Workflow agent output disabled",
+                                summary=(
+                                    "The node executed but did not write its output variable."
+                                ),
+                                metadata={
+                                    "node_id": node.id,
+                                    "output_variable": output_variable,
+                                    "output_length": len(output or ""),
+                                },
                             )
-                            for agent_event in agent_events:
-                                yield sse_payload(agent_event)
                             yield sse_payload(
                                 {
                                     "event": "node_delta",
                                     "node_id": node.id,
                                     "node_title": title,
                                     "node_type": kind,
-                                    "output": output[:500],
+                                    "output": (
+                                        "Workflow agent output disabled; variable was not written."
+                                    ),
                                     "variable": output_variable,
                                     "run_id": workflow_agent_run.run_id,
                                 }
                             )
-                        variables[output_variable] = output
+                            output = ""
+                        else:
+                            variables[output_variable] = output
                         await run_registry.update_run(
                             workflow_agent_run.run_id,
                             status="completed",
                             metadata={
                                 "output_length": len(output or ""),
                                 "variables_count": len(variables),
+                                "model_id": model_id,
+                                "output_disabled": disable_output,
+                                "exception_handling": exception_handling,
                             },
                         )
                         await run_registry.record_checkpoint(
@@ -3734,6 +3916,7 @@ async def run_workflow(payload: WorkflowRunRequest, request: Request):
                             metadata={
                                 "node_id": node.id,
                                 "output_variable": output_variable,
+                                "output_disabled": disable_output,
                             },
                         )
                     except Exception as exc:
@@ -5279,6 +5462,13 @@ async def list_registered_tools():
             for tool in await tool_registry.list_tools()
         ]
     )
+
+
+@app.get("/api/workflow/node-registry", response_model=dict[str, Any])
+async def list_workflow_node_registry():
+    """Return Xpert-style workflow node palette metadata."""
+
+    return workflow_node_registry.to_payload()
 
 
 @app.post("/api/runtime/agent-tasks")

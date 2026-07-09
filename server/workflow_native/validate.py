@@ -803,6 +803,19 @@ def validate_node_configuration(
                 )
             )
 
+        exception_handling = str(data.get("exceptionHandling") or "none").strip()
+        if exception_handling not in {"none", "fail", "empty_output"}:
+            issues.append(
+                ValidationIssue(
+                    code="invalid_workflow_agent_exception_handling",
+                    message=(
+                        "Workflow agent exceptionHandling must be none, fail, "
+                        "or empty_output."
+                    ),
+                    node_id=node.id,
+                )
+            )
+
         max_iterations = str(data.get("maxIterations") or "").strip()
         if max_iterations:
             try:
