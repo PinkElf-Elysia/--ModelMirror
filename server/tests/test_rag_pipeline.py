@@ -90,6 +90,54 @@ async def test_rag_pipeline_assets_artifacts_and_chunks(client: httpx.AsyncClien
 
 
 @pytest.mark.asyncio
+async def test_rag_pipeline_draft_empty_knowledge_base(client: httpx.AsyncClient) -> None:
+    kb_id = await create_kb(client, "empty pipeline draft")
+
+    response = await client.get(f"/api/rag/pipeline/draft?kb_id={kb_id}")
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["kb_id"] == kb_id
+    assert data["stage_count"] == 4
+
+    stages = {stage["kind"]: stage for stage in data["stages"]}
+    assert set(stages) == {
+        "data_source",
+        "processor",
+        "chunker",
+        "image_understanding",
+    }
+    assert stages["data_source"]["item_count"] == 0
+    assert stages["processor"]["item_count"] == 0
+    assert stages["chunker"]["item_count"] == 0
+    assert stages["image_understanding"]["status"] == "planned"
+    assert stages["image_understanding"]["metadata"]["enabled"] is False
+
+
+@pytest.mark.asyncio
+async def test_rag_pipeline_draft_counts_and_safe_fields(client: httpx.AsyncClient) -> None:
+    kb_id = await create_kb(client, "pipeline draft")
+    document = await upload_pipeline_document(client, kb_id)
+
+    response = await client.get(f"/api/rag/pipeline/draft?kb_id={kb_id}")
+    assert response.status_code == 200, response.text
+    data = response.json()
+    stages = {stage["kind"]: stage for stage in data["stages"]}
+
+    assert stages["data_source"]["item_count"] == 1
+    assert stages["data_source"]["metadata"]["asset_count"] == 1
+    assert stages["data_source"]["metadata"]["document_count"] == 1
+    assert stages["processor"]["item_count"] == 1
+    assert stages["processor"]["metadata"]["artifact_count"] == 1
+    assert stages["chunker"]["item_count"] == document["chunk_count"]
+    assert stages["chunker"]["metadata"]["chunk_count"] == document["chunk_count"]
+
+    serialized = str(data).lower()
+    assert "stored_path" not in serialized
+    assert "embedding" not in serialized
+    assert "modelmirror knowledge pipeline maps uploaded files" not in serialized
+
+
+@pytest.mark.asyncio
 async def test_rag_pipeline_citations(client: httpx.AsyncClient) -> None:
     kb_id = await create_kb(client, "pipeline citations")
     document = await upload_pipeline_document(client, kb_id)
@@ -124,3 +172,6 @@ async def test_rag_pipeline_missing_resources_return_404(client: httpx.AsyncClie
 
     chunks_response = await client.get("/api/rag/pipeline/artifacts/artifact_missing/chunks")
     assert chunks_response.status_code == 404
+
+    draft_response = await client.get("/api/rag/pipeline/draft?kb_id=missing")
+    assert draft_response.status_code == 404

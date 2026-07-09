@@ -57,6 +57,22 @@ interface PipelineArtifactListResponse {
   artifact_count: number;
 }
 
+interface PipelineDraftStage {
+  id: string;
+  kind: string;
+  title: string;
+  status: string;
+  item_count: number;
+  summary: string;
+  metadata?: Record<string, unknown>;
+}
+
+interface PipelineDraftResponse {
+  kb_id: string;
+  stages: PipelineDraftStage[];
+  stage_count: number;
+}
+
 const MAX_FILE_BYTES = 10 * 1024 * 1024;
 const SUPPORTED_EXTENSIONS = [".txt", ".md", ".markdown", ".pdf"];
 
@@ -73,6 +89,19 @@ function formatFileSize(bytes: number) {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function stageStatusLabel(status: string) {
+  if (status === "ready") return "可观测";
+  if (status === "empty") return "暂无数据";
+  if (status === "planned") return "待接入";
+  return status || "未知";
+}
+
+function stageStatusClass(status: string) {
+  if (status === "ready") return "border-emerald-300/25 bg-emerald-300/10 text-emerald-100";
+  if (status === "planned") return "border-amber-300/25 bg-amber-300/10 text-amber-100";
+  return "border-white/10 bg-white/[0.06] text-slate-300";
 }
 
 async function readError(response: Response) {
@@ -116,6 +145,7 @@ export default function RagPage() {
   const [pipelineError, setPipelineError] = useState("");
   const [pipelineAssets, setPipelineAssets] = useState<PipelineAsset[]>([]);
   const [pipelineArtifacts, setPipelineArtifacts] = useState<PipelineArtifact[]>([]);
+  const [pipelineDraft, setPipelineDraft] = useState<PipelineDraftResponse | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const selectedKnowledgeBase = useMemo(
@@ -138,6 +168,7 @@ export default function RagPage() {
       setDocuments([]);
       setPipelineAssets([]);
       setPipelineArtifacts([]);
+      setPipelineDraft(null);
       setPipelineError("");
       return;
     }
@@ -190,16 +221,20 @@ export default function RagPage() {
     setPipelineError("");
     try {
       const query = new URLSearchParams({ kb_id: kbId }).toString();
-      const [assetsResponse, artifactsResponse] = await Promise.all([
+      const [assetsResponse, artifactsResponse, draftResponse] = await Promise.all([
         fetch(`/api/rag/pipeline/assets?${query}`),
         fetch(`/api/rag/pipeline/artifacts?${query}`),
+        fetch(`/api/rag/pipeline/draft?${query}`),
       ]);
       if (!assetsResponse.ok) throw new Error(await readError(assetsResponse));
       if (!artifactsResponse.ok) throw new Error(await readError(artifactsResponse));
+      if (!draftResponse.ok) throw new Error(await readError(draftResponse));
       const assetsData = (await assetsResponse.json()) as PipelineAssetListResponse;
       const artifactsData = (await artifactsResponse.json()) as PipelineArtifactListResponse;
+      const draftData = (await draftResponse.json()) as PipelineDraftResponse;
       setPipelineAssets(assetsData.assets);
       setPipelineArtifacts(artifactsData.artifacts);
+      setPipelineDraft(draftData);
     } catch (loadError) {
       setPipelineError(
         loadError instanceof Error ? loadError.message : "知识流水线加载失败。",
@@ -517,28 +552,66 @@ export default function RagPage() {
                       <p className="text-sm text-rose-100">{pipelineError}</p>
                     ) : (
                       <>
-                        <div className="grid gap-3 sm:grid-cols-3">
-                          <div className="rounded-lg border border-white/10 bg-ink-950/35 p-3">
+                        <div className="rounded-lg border border-hire-300/20 bg-hire-300/10 p-3 text-xs leading-5 text-hire-50">
+                          当前为只读流水线草稿：展示数据源、处理器、分块器与图像理解 stage，
+                          不改变上传、切分、向量化或检索行为。
+                        </div>
+
+                        <div className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                          {(pipelineDraft?.stages ?? []).map((stage, index) => (
+                            <div
+                              className="rounded-lg border border-white/10 bg-ink-950/35 p-3"
+                              key={stage.id}
+                            >
+                              <div className="flex items-start justify-between gap-3">
+                                <div>
+                                  <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                                    Stage {index + 1}
+                                  </p>
+                                  <p className="mt-1 text-sm font-semibold text-white">
+                                    {stage.title}
+                                  </p>
+                                </div>
+                                <span
+                                  className={`rounded-full border px-2 py-0.5 text-[11px] font-semibold ${stageStatusClass(
+                                    stage.status,
+                                  )}`}
+                                >
+                                  {stageStatusLabel(stage.status)}
+                                </span>
+                              </div>
+                              <p className="mt-3 text-2xl font-semibold text-white">
+                                {stage.item_count}
+                              </p>
+                              <p className="mt-2 min-h-10 text-xs leading-5 text-slate-400">
+                                {stage.summary}
+                              </p>
+                            </div>
+                          ))}
+                        </div>
+
+                        <div className="mt-3 grid gap-3 sm:grid-cols-3">
+                          <div className="rounded-lg border border-white/10 bg-white/[0.025] p-3">
                             <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
                               FileAssets
                             </p>
-                            <p className="mt-2 text-2xl font-semibold text-white">
+                            <p className="mt-2 text-lg font-semibold text-white">
                               {pipelineAssets.length}
                             </p>
                           </div>
-                          <div className="rounded-lg border border-white/10 bg-ink-950/35 p-3">
+                          <div className="rounded-lg border border-white/10 bg-white/[0.025] p-3">
                             <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
                               Artifacts
                             </p>
-                            <p className="mt-2 text-2xl font-semibold text-white">
+                            <p className="mt-2 text-lg font-semibold text-white">
                               {pipelineArtifacts.length}
                             </p>
                           </div>
-                          <div className="rounded-lg border border-white/10 bg-ink-950/35 p-3">
+                          <div className="rounded-lg border border-white/10 bg-white/[0.025] p-3">
                             <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
                               Chunks
                             </p>
-                            <p className="mt-2 text-2xl font-semibold text-white">
+                            <p className="mt-2 text-lg font-semibold text-white">
                               {pipelineChunkCount}
                             </p>
                           </div>
