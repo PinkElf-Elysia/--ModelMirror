@@ -7,6 +7,10 @@
 > 2026-07-09 Runtime Ops：新增 `/runtime` 只读运维页，复用现有 MCP sessions、Tool Registry、RunRegistry checkpoints 与 Skill installed API。该页只做运行观测入口，不改变 workflow runner、SSE、MCP/Skill 管理协议或节点语义。
 > 2026-07-09 Workspace Hub：`/studio` 已补齐快速创建 / 连接入口、资源标签过滤、API 工具与数据库待接入卡片，以及基于 RunRegistry 的轻量运行摘要。本轮只增强工作空间入口，不改变 `/workflow` 节点协议、SSE、validate 或 runner。
 
+> 2026-07-09 Workflow Node Registry：新增 `GET /api/workflow/node-registry`，把工作流与知识流水线节点菜单元数据后端化。该 registry 只负责 palette 分类、可拖拽 item 与禁用 placeholder，不替代 `SUPPORTED_NODE_KINDS`、validate 或 classic runner；前端 API 失败时回退本地 registry。
+
+> 2026-07-09 Workflow Agent 运行策略：`workflow_agent` 开始接入 Xpert 式侧栏的第一批真实运行语义：失败重试、备用模型、禁用输出、异常转空输出。该变更不改变节点协议或 SSE wire format，不影响普通 `agent`，也不接文件理解、并行工具调用、记忆写入或输出 schema 强校验。
+
 ## Xpert 工作流节点规划
 
 真实 Xpert 画布把节点入口分成工作流、中间件、知识流水线、工具集等菜单。ModelMirror 后续仍基于现有 React/FastAPI classic workflow 迭代，但节点规划按 Xpert 分类收敛。

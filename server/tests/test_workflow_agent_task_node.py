@@ -392,6 +392,245 @@ async def test_workflow_agent_node_streams_output_and_registers_run(
 
 
 @pytest.mark.asyncio
+async def test_workflow_agent_retry_on_failure_then_succeeds(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    async def fake_stream_workflow_llm_text(
+        model_id: str,
+        prompt: str,
+        *,
+        system_prompt: str | None = None,
+    ):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("temporary model failure")
+        yield "retry ok"
+
+    monkeypatch.setattr(
+        "server.main.get_llm_gateway_config",
+        lambda: ("http://test-gateway.local/v1/chat/completions", "test-key"),
+    )
+    monkeypatch.setattr(
+        "server.main.stream_workflow_llm_text",
+        fake_stream_workflow_llm_text,
+    )
+
+    workflow = _workflow_agent_strategy_workflow(
+        {
+            "retryOnFailure": "true",
+        }
+    )
+
+    response = await client.post(
+        "/api/workflow/run",
+        json={"workflow": workflow, "inputs": {"user_input": "retry this"}},
+    )
+    assert response.status_code == 200, response.text
+
+    events = _parse_sse_events(response.text)
+    assert calls == 2
+    agent_end = next(
+        event
+        for event in events
+        if event.get("event") == "node_end" and event.get("node_id") == "workflow_agent"
+    )
+    assert agent_end["output"] == "retry ok"
+    assert agent_end["variables"]["agent_output"] == "retry ok"
+
+    workflow_run_id = next(
+        event for event in events if event.get("event") == "workflow_meta"
+    )["run_id"]
+    agent_run = await _workflow_agent_run(client, workflow_run_id)
+    checkpoints = await _checkpoint_types(client, agent_run["run_id"])
+    assert "workflow_agent.failed_attempt" in checkpoints
+    assert "workflow_agent.retry" in checkpoints
+    assert "workflow_agent.completed" in checkpoints
+
+
+@pytest.mark.asyncio
+async def test_workflow_agent_fallback_model_succeeds(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model_calls: list[str] = []
+
+    async def fake_stream_workflow_llm_text(
+        model_id: str,
+        prompt: str,
+        *,
+        system_prompt: str | None = None,
+    ):
+        model_calls.append(model_id)
+        if model_id == "primary-model":
+            raise RuntimeError("primary model failed")
+        yield "fallback ok"
+
+    monkeypatch.setattr(
+        "server.main.get_llm_gateway_config",
+        lambda: ("http://test-gateway.local/v1/chat/completions", "test-key"),
+    )
+    monkeypatch.setattr(
+        "server.main.stream_workflow_llm_text",
+        fake_stream_workflow_llm_text,
+    )
+
+    workflow = _workflow_agent_strategy_workflow(
+        {
+            "modelId": "primary-model",
+            "fallbackModelId": "fallback-model",
+        }
+    )
+
+    response = await client.post(
+        "/api/workflow/run",
+        json={"workflow": workflow, "inputs": {"user_input": "fallback this"}},
+    )
+    assert response.status_code == 200, response.text
+
+    events = _parse_sse_events(response.text)
+    assert model_calls == ["primary-model", "fallback-model"]
+    agent_end = next(
+        event
+        for event in events
+        if event.get("event") == "node_end" and event.get("node_id") == "workflow_agent"
+    )
+    assert agent_end["output"] == "fallback ok"
+    assert agent_end["variables"]["agent_output"] == "fallback ok"
+
+    workflow_run_id = next(
+        event for event in events if event.get("event") == "workflow_meta"
+    )["run_id"]
+    agent_run = await _workflow_agent_run(client, workflow_run_id)
+    assert agent_run["metadata"]["model_id"] == "fallback-model"
+    checkpoints = await _checkpoint_types(client, agent_run["run_id"])
+    assert "workflow_agent.fallback_model" in checkpoints
+    assert "workflow_agent.completed" in checkpoints
+
+
+@pytest.mark.asyncio
+async def test_workflow_agent_empty_output_exception_handling(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_stream_workflow_llm_text(
+        model_id: str,
+        prompt: str,
+        *,
+        system_prompt: str | None = None,
+    ):
+        raise RuntimeError("model failed permanently")
+        yield "unreachable"
+
+    monkeypatch.setattr(
+        "server.main.get_llm_gateway_config",
+        lambda: ("http://test-gateway.local/v1/chat/completions", "test-key"),
+    )
+    monkeypatch.setattr(
+        "server.main.stream_workflow_llm_text",
+        fake_stream_workflow_llm_text,
+    )
+
+    workflow = _workflow_agent_strategy_workflow(
+        {
+            "exceptionHandling": "empty_output",
+        }
+    )
+
+    response = await client.post(
+        "/api/workflow/run",
+        json={"workflow": workflow, "inputs": {"user_input": "empty output"}},
+    )
+    assert response.status_code == 200, response.text
+
+    events = _parse_sse_events(response.text)
+    assert any(event.get("event") == "workflow_end" for event in events)
+    assert any(
+        event.get("event") == "error" and event.get("node_id") == "workflow_agent"
+        for event in events
+    )
+    agent_end = next(
+        event
+        for event in events
+        if event.get("event") == "node_end" and event.get("node_id") == "workflow_agent"
+    )
+    assert agent_end["output"] == ""
+    assert agent_end["variables"]["agent_output"] == ""
+
+    workflow_run_id = next(
+        event for event in events if event.get("event") == "workflow_meta"
+    )["run_id"]
+    agent_run = await _workflow_agent_run(client, workflow_run_id)
+    assert agent_run["status"] == "completed"
+    assert agent_run["metadata"]["exception_handled"] is True
+    checkpoints = await _checkpoint_types(client, agent_run["run_id"])
+    assert "workflow_agent.empty_output" in checkpoints
+
+
+@pytest.mark.asyncio
+async def test_workflow_agent_disable_output_does_not_write_variable(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_stream_workflow_llm_text(
+        model_id: str,
+        prompt: str,
+        *,
+        system_prompt: str | None = None,
+    ):
+        yield "hidden result"
+
+    monkeypatch.setattr(
+        "server.main.get_llm_gateway_config",
+        lambda: ("http://test-gateway.local/v1/chat/completions", "test-key"),
+    )
+    monkeypatch.setattr(
+        "server.main.stream_workflow_llm_text",
+        fake_stream_workflow_llm_text,
+    )
+
+    workflow = _workflow_agent_strategy_workflow(
+        {
+            "disableOutput": "true",
+        }
+    )
+
+    response = await client.post(
+        "/api/workflow/run",
+        json={"workflow": workflow, "inputs": {"user_input": "disable output"}},
+    )
+    assert response.status_code == 200, response.text
+
+    events = _parse_sse_events(response.text)
+    disabled_delta = [
+        event
+        for event in events
+        if event.get("event") == "node_delta"
+        and event.get("node_id") == "workflow_agent"
+        and "output disabled" in str(event.get("output"))
+    ]
+    assert disabled_delta
+    agent_end = next(
+        event
+        for event in events
+        if event.get("event") == "node_end" and event.get("node_id") == "workflow_agent"
+    )
+    assert agent_end["output"] == ""
+    assert "agent_output" not in agent_end["variables"]
+
+    workflow_run_id = next(
+        event for event in events if event.get("event") == "workflow_meta"
+    )["run_id"]
+    agent_run = await _workflow_agent_run(client, workflow_run_id)
+    assert agent_run["metadata"]["output_disabled"] is True
+    checkpoints = await _checkpoint_types(client, agent_run["run_id"])
+    assert "workflow_agent.output_disabled" in checkpoints
+
+
+@pytest.mark.asyncio
 async def test_workflow_handoff_router_creates_task_handoff_and_runs(
     client: httpx.AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -861,6 +1100,72 @@ def _parse_sse_events(sse_text: str) -> list[dict]:
         if isinstance(payload, dict):
             events.append(payload)
     return events
+
+
+def _workflow_agent_strategy_workflow(
+    overrides: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    workflow_agent_data: dict[str, Any] = {
+        "kind": "workflow_agent",
+        "agentName": "strategy-agent",
+        "modelId": "deepseek/deepseek-chat",
+        "rolePrompt": "You are a workflow agent.",
+        "taskInput": "{{user_input}}",
+        "outputVariable": "agent_output",
+    }
+    workflow_agent_data.update(overrides or {})
+    return {
+        "id": "workflow-agent-strategy-workflow",
+        "title": "workflow agent strategy workflow",
+        "nodes": [
+            {
+                "id": "input",
+                "type": "input",
+                "data": {"kind": "input", "variableName": "user_input"},
+            },
+            {
+                "id": "workflow_agent",
+                "type": "workflow_agent",
+                "data": workflow_agent_data,
+            },
+            {
+                "id": "output",
+                "type": "output",
+                "data": {"kind": "output", "outputVariable": "agent_output"},
+            },
+        ],
+        "edges": [
+            {"id": "e1", "source": "input", "target": "workflow_agent"},
+            {"id": "e2", "source": "workflow_agent", "target": "output"},
+        ],
+    }
+
+
+async def _workflow_agent_run(
+    client: httpx.AsyncClient,
+    workflow_run_id: str,
+) -> dict[str, Any]:
+    child_runs_response = await client.get(
+        f"/api/runtime/runs?parent_run_id={workflow_run_id}&limit=50",
+    )
+    assert child_runs_response.status_code == 200, child_runs_response.text
+    return next(
+        item
+        for item in child_runs_response.json()
+        if item["run_type"] == "workflow_agent"
+        and item["source_id"].endswith(":workflow_agent")
+    )
+
+
+async def _checkpoint_types(
+    client: httpx.AsyncClient,
+    run_id: str,
+) -> list[str]:
+    checkpoints_response = await client.get(
+        f"/api/runtime/runs/{run_id}/checkpoints",
+    )
+    assert checkpoints_response.status_code == 200, checkpoints_response.text
+    return [item["event_type"] for item in checkpoints_response.json()]
 
 
 class FakeWorkflowToolProvider:

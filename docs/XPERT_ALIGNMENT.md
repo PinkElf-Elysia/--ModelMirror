@@ -3,6 +3,23 @@
 最后更新日期：2026-07-09
 维护人：模镜团队
 
+## 2026-07-09 增量：XPERT-STUDIO-PANEL-02
+
+`workflow_agent` 已开始消化 Xpert 式智能体配置侧栏里的第一批运行策略字段。当前真实生效范围只包括失败重试、备用模型、禁用输出和异常处理：
+
+- `retryOnFailure=true`：模型调用或工具循环失败后最多额外尝试一次。
+- `fallbackModelId`：主模型失败后切换到备用模型再尝试。
+- `exceptionHandling=empty_output`：节点失败时输出空字符串并让 workflow 继续完成；`none/fail` 保持既有失败路径。
+- `disableOutput=true`：节点仍执行并写入 checkpoint，但不写入 `outputVariable`。
+
+本轮只影响 `workflow_agent` runner，不改变普通 `agent` 节点语义，不接文件理解、并行工具调用、记忆写入或结构化输出强校验。RunRegistry checkpoint 只记录 attempt、model_id、fallback_used、error 摘要和 output_disabled 等元信息，不保存完整 prompt、模型输出或工具结果。
+
+## 2026-07-09 增量：XPERT-WORKFLOW-REGISTRY-API-01
+
+classic `/workflow` 节点库元数据已从纯前端 registry 推进为后端只读 Workflow Node Registry API：`GET /api/workflow/node-registry`。该接口返回 Xpert 式 `workflow / knowledge` tab、工作流分类 section、可拖拽 item 与禁用 placeholder，用于降低后续新增节点时的前后端元数据漂移风险。
+
+当前边界保持不变：registry 只负责菜单元数据，不决定执行能力；真正可运行节点仍以 `SUPPORTED_NODE_KINDS`、validate 与 classic runner 为准。前端 `NodePalette` 优先消费该 API，接口失败时回退本地 registry；中间件 tab 继续使用 `/api/runtime/middleware-nodes`，拖拽 payload、SSE 与 runner 协议不变。
+
 ## 2026-07-09 增量：XPERT-WORKSPACE-HUB-02
 
 `/studio` 已从只读资源总览推进到 Xpert 式工作空间资源 Hub 第二版：顶部新增“快速创建 / 连接”入口，覆盖创建工作流、生成工作流草稿、管理知识库、连接 MCP、安装 Skill 和查看 Runtime 运维；资源卡片补充主操作、次操作、标签与计划状态；搜索、分类和标签过滤可以同时生效；`API 工具` 与 `数据库` 作为待接入资源卡片展示，不会跳转到不存在页面。运行摘要基于现有 `/api/runtime/runs?limit=8` 做轻量统计，并继续指向 `/runtime` 查看详情。

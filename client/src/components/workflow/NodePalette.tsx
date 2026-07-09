@@ -5,12 +5,12 @@ import {
   type RuntimeMiddlewareNode,
 } from "../../types/runtimeMiddleware";
 import {
-  knowledgePipelineItems,
-  knowledgePipelinePlaceholders,
+  fetchWorkflowNodeRegistry,
   matchesWorkflowPaletteQuery,
   type WorkflowPaletteItem,
   type WorkflowPalettePlaceholder,
-  workflowPaletteSections,
+  type WorkflowNodeRegistryResponse,
+  workflowNodeRegistryFallback,
 } from "./workflowNodeRegistry";
 
 type PaletteTab = "workflow" | "middleware" | "knowledge";
@@ -102,6 +102,17 @@ function EmptyState({ children }: { children: string }) {
   );
 }
 
+function RegistryFallbackNotice({ message }: { message: string | null }) {
+  if (!message) {
+    return null;
+  }
+  return (
+    <p className="rounded-lg border border-amber-300/20 bg-amber-300/10 px-3 py-2 text-xs leading-5 text-amber-100">
+      {message}
+    </p>
+  );
+}
+
 function matchesMiddlewareNode(node: RuntimeMiddlewareNode, query: string) {
   if (!query) {
     return true;
@@ -123,11 +134,48 @@ function matchesMiddlewareNode(node: RuntimeMiddlewareNode, query: string) {
 export default function NodePalette() {
   const [activeTab, setActiveTab] = useState<PaletteTab>("workflow");
   const [searchQuery, setSearchQuery] = useState("");
-  const [middlewareNodes, setMiddlewareNodes] = useState<RuntimeMiddlewareNode[]>([]);
+  const [nodeRegistry, setNodeRegistry] = useState<WorkflowNodeRegistryResponse>(
+    workflowNodeRegistryFallback,
+  );
+  const [registryLoading, setRegistryLoading] = useState(false);
+  const [registryError, setRegistryError] = useState<string | null>(null);
+  const [middlewareNodes, setMiddlewareNodes] = useState<RuntimeMiddlewareNode[]>(
+    [],
+  );
   const [middlewareLoading, setMiddlewareLoading] = useState(false);
   const [middlewareError, setMiddlewareError] = useState<string | null>(null);
 
   const normalizedSearch = searchQuery.trim().toLowerCase();
+
+  useEffect(() => {
+    let isMounted = true;
+    setRegistryLoading(true);
+    fetchWorkflowNodeRegistry()
+      .then((registry) => {
+        if (!isMounted) {
+          return;
+        }
+        setNodeRegistry(registry);
+        setRegistryError(null);
+      })
+      .catch((error) => {
+        console.error("Failed to load workflow node registry:", error);
+        if (!isMounted) {
+          return;
+        }
+        setNodeRegistry(workflowNodeRegistryFallback);
+        setRegistryError("节点注册表加载失败，已使用本地节点库。");
+      })
+      .finally(() => {
+        if (isMounted) {
+          setRegistryLoading(false);
+        }
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
 
   useEffect(() => {
     let isMounted = true;
@@ -160,12 +208,13 @@ export default function NodePalette() {
 
   const filteredWorkflowSections = useMemo(
     () =>
-      workflowPaletteSections
+      nodeRegistry.sections
+        .filter((section) => !section.tab || section.tab === "workflow")
         .map((section) => ({
           ...section,
-          items: section.items.filter((item) =>
-            matchesWorkflowPaletteQuery(item, normalizedSearch),
-          ),
+          items: section.items
+            .filter((item) => item.enabled !== false)
+            .filter((item) => matchesWorkflowPaletteQuery(item, normalizedSearch)),
           placeholders: (section.placeholders ?? []).filter((item) =>
             matchesWorkflowPaletteQuery(item, normalizedSearch),
           ),
@@ -174,7 +223,7 @@ export default function NodePalette() {
           (section) =>
             section.items.length > 0 || (section.placeholders ?? []).length > 0,
         ),
-    [normalizedSearch],
+    [nodeRegistry.sections, normalizedSearch],
   );
 
   const filteredMiddlewareNodes = useMemo(
@@ -187,18 +236,18 @@ export default function NodePalette() {
 
   const filteredKnowledgeItems = useMemo(
     () =>
-      knowledgePipelineItems.filter((item) =>
-        matchesWorkflowPaletteQuery(item, normalizedSearch),
-      ),
-    [normalizedSearch],
+      nodeRegistry.knowledge_pipeline.items
+        .filter((item) => item.enabled !== false)
+        .filter((item) => matchesWorkflowPaletteQuery(item, normalizedSearch)),
+    [nodeRegistry.knowledge_pipeline.items, normalizedSearch],
   );
 
   const filteredKnowledgePlaceholders = useMemo(
     () =>
-      knowledgePipelinePlaceholders.filter((item) =>
+      nodeRegistry.knowledge_pipeline.placeholders.filter((item) =>
         matchesWorkflowPaletteQuery(item, normalizedSearch),
       ),
-    [normalizedSearch],
+    [nodeRegistry.knowledge_pipeline.placeholders, normalizedSearch],
   );
 
   return (
@@ -234,6 +283,10 @@ export default function NodePalette() {
 
       {activeTab === "workflow" ? (
         <div className="space-y-4">
+          {registryLoading ? (
+            <p className="text-[11px] text-slate-500">正在同步节点注册表...</p>
+          ) : null}
+          <RegistryFallbackNotice message={registryError} />
           {filteredWorkflowSections.length === 0 ? (
             <EmptyState>没有匹配的工作流节点。</EmptyState>
           ) : (
@@ -280,7 +333,9 @@ export default function NodePalette() {
 
           {!middlewareError && filteredMiddlewareNodes.length === 0 ? (
             <EmptyState>
-              {middlewareLoading ? "正在加载中间件节点。" : "没有匹配的中间件节点。"}
+              {middlewareLoading
+                ? "正在加载中间件节点。"
+                : "没有匹配的中间件节点。"}
             </EmptyState>
           ) : null}
 
@@ -336,6 +391,7 @@ export default function NodePalette() {
 
       {activeTab === "knowledge" ? (
         <div className="space-y-4">
+          <RegistryFallbackNotice message={registryError} />
           <section className="space-y-2">
             <div>
               <h3 className="text-sm font-semibold text-slate-200">
@@ -345,11 +401,15 @@ export default function NodePalette() {
                 当前先暴露可运行的 CitationAnchor 节点。
               </p>
             </div>
-            <div className="space-y-2">
-              {filteredKnowledgeItems.map((item) => (
-                <NormalNodeButton item={item} key={item.kind} />
-              ))}
-            </div>
+            {filteredKnowledgeItems.length === 0 ? (
+              <EmptyState>没有匹配的知识引用节点。</EmptyState>
+            ) : (
+              <div className="space-y-2">
+                {filteredKnowledgeItems.map((item) => (
+                  <NormalNodeButton item={item} key={item.kind} />
+                ))}
+              </div>
+            )}
           </section>
 
           <section className="space-y-2">
