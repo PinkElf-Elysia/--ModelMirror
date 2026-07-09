@@ -1,6 +1,6 @@
 # Xpert 对齐总纲
 
-最后更新日期：2026-07-08
+最后更新日期：2026-07-09
 维护人：模镜团队
 
 ## 对齐原则
@@ -25,16 +25,16 @@ EvoAgentX 只保留为历史参考：此前元智能体曾借鉴其 `goal -> sub
 | 能力域 | 当前状态 | 已完成 | 当前边界 | 下一步 |
 | --- | --- | --- | --- | --- |
 | 工作空间资源 | 部分实现 | `/studio` 已作为 Xpert 式资源总览，聚合智能体、工作流、知识库、MCP、Skill、提示词、环境、运行记录 | 当前是只读聚合视图，不做 workspace 权限、持久化资源表或资源创建编排 | `XPERT-WORKSPACE-HUB-02` |
-| Xpert Studio 画布 | 部分实现 | classic `/workflow`、节点库浮层、配置/运行 tabs、前端节点 registry、Xpert 分类节点菜单、多个 Xpert 对齐节点 | 仍是 classic workflow 画布，不是完整 Xpert Studio；节点 registry 先放前端本地 | `XPERT-STUDIO-PANEL-01` |
+| Xpert Studio 画布 | 部分实现 | classic `/workflow`、节点库浮层、配置/运行 tabs、前端节点 registry、Xpert 分类节点菜单、智能体配置侧栏分区、多个 Xpert 对齐节点 | 仍是 classic workflow 画布，不是完整 Xpert Studio；高级配置先保存为草稿，不改变执行语义 | 后续逐步接入配置真实语义 |
 | Runtime Middleware | 部分实现 | middleware lifecycle、`event_recorder`、`system_prompt_injector`、`tool_policy`、`tool_audit` | 仍以内存态为主，部分 middleware 仅最小执行 | 继续挂到 Agent/Workflow 节点运行链 |
 | Agent Task | 部分实现 | AgentTask API、MetaAgent 任务工作台、workflow `agent_task` 节点 | 不做真实多 Agent 调度或持久化队列 | 与 Handoff/RunRegistry 继续闭环 |
 | Handoff | 部分实现 | Handoff API、workflow `agent_handoff`、`handoff_router`、MetaAgent Inbox 手动处理 | pending/accepted/completed 仍是人工内存态流程 | 后续做队列、死信、目标 Agent 执行 |
 | RunRegistry / Trace | 部分实现 | workflow/chat/agent_task/agent_handoff run，checkpoint，运行观测 | 内存态，可观测索引，不是调度器 | 增强 UI 汇总、失败摘要、重试入口 |
-| Workflow Agent | 部分实现 | `workflow_agent` 节点，模型执行，Runtime Toolset 工具模式 | 轻量 JSON 决策，不是 function calling，不自动 handoff | 对齐 Xpert Agent 配置侧栏 |
+| Workflow Agent | 部分实现 | `workflow_agent` 节点，模型执行，Runtime Toolset 工具模式，Xpert 式配置侧栏分区 | 轻量 JSON 决策，不是 function calling；重试、备用模型、记忆写入等配置暂只保存草稿 | 后续逐项接入真实运行语义 |
 | Chat Toolset | 部分实现 | `/api/chat` 可选 MCP 工具模式，chat run 与 checkpoint | 默认关闭，不改变普通聊天；无自动 handoff | 补工具偏好、安全提示和观测 UI |
 | Toolset / MCP | 部分实现 | `MCPToolsetProvider`、`run_tool_with_runtime`、tool policy/audit、MCP 管理基础 | 缺 Xpert 式 Toolset 资源模型与 MCP Runtime 运维页闭环 | `XPERT-RUNTIME-OPS-01` |
 | Plugin / Skill | 部分实现 | `/skills` 与 Skill 安装基础，Docker 已补 git/npm/npx 依赖 | 尚未形成 Xpert 插件市场/Skill 工作区统一模型 | 先建资源总览，再补市场与安装状态 |
-| Knowledge Pipeline | 部分实现 | RAG pipeline 只读元数据 API，`knowledge_citation` 工作流节点 | 不改上传、切分、向量库和聊天 RAG 主路径 | `XPERT-KNOWLEDGE-PIPELINE-02` |
+| Knowledge Pipeline | 部分实现 | RAG pipeline 只读元数据 API、Xpert 式四段 stage 草稿视图、`knowledge_citation` 工作流节点 | 不改上传、切分、向量库和聊天 RAG 主路径；图像理解 stage 仅为规划占位 | `XPERT-RUNTIME-OPS-01` |
 | Prompt / Slash Command | 下一步 | 仅有提示词资源页雏形和聊天 prompt 使用 | 尚无 Xpert 式工作区提示词/命令配置 | 放在工作空间资源后推进 |
 | Environment / Sandbox | 暂缓 | Docker/MCP/Skill 运行依赖逐步补齐 | 尚无 Xpert 环境变量、沙箱实例、文件工作区语义 | 等 Workspace Hub 和 Runtime Ops 稳定后推进 |
 | Memory / Logs / Monitor | 暂缓 | RunRegistry events/checkpoints/audit 摘要 | 尚无完整记忆写入、日志和监测页面 | 等 Agent 配置侧栏与运行观测稳定后推进 |
@@ -44,11 +44,12 @@ EvoAgentX 只保留为历史参考：此前元智能体曾借鉴其 `goal -> sub
 - `/api/chat` 默认保持普通 SSE 聊天；显式启用 `tool_mode=mcp_tools` 时进入 Runtime Toolset 工具循环，登记 chat run、checkpoint、tool events 与审计摘要。
 - Classic workflow 已支持 `workflow_agent`、`agent_task`、`agent_handoff`、`handoff_router`、`knowledge_citation`、`mcp_tool`、`runtime_middleware` 等 Xpert 对齐节点。
 - `/workflow` 节点库已从平铺数组收敛为前端 `workflowNodeRegistry`，按工作流、中间件、知识流水线 tab 和逻辑、转换、工具、记忆、其他等 Xpert 分类渲染；拖拽协议和运行语义不变。
+- `/workflow` 中 `agent` 与 `workflow_agent` 的右侧配置已对齐为 Xpert 式分区侧栏，包含节点、参数、提示词/模型、中间件、知识库、工具、运行策略、输出结构和记忆写入；其中高级区块当前只保存配置草稿。
 - `MCPToolsetProvider`、`CapabilityRegistry`、`run_tool_with_runtime` 已成为 MCP 工具调用主路径。
 - `ToolPermissionPolicy` 与 `InMemoryToolAuditStore` 已对 workflow/chat 工具调用提供最小权限与审计。
 - AgentTask/Handoff API 已支持创建、查询、accept、reject、complete；MetaAgent 页面可查看任务和 Handoff Inbox。
 - RunRegistry 已支持 workflow、workflow_agent、agent_task、agent_handoff、chat 等 run 类型，并提供 checkpoint 查询。
-- 本地 RAG 之上已有 Knowledge Pipeline 只读元数据视图：FileAsset、Artifact、KnowledgeChunk、CitationAnchor。
+- 本地 RAG 之上已有 Knowledge Pipeline 只读元数据视图：FileAsset、Artifact、KnowledgeChunk、CitationAnchor，并已派生数据源、处理器、分块器、图像理解四段 stage 草稿。
 - `/studio` 已成为 Xpert 对齐工作空间入口，前端以软降级方式读取现有 RAG、MCP、Skill 与 RunRegistry API，展示资源卡片、分类筛选、搜索和最近运行摘要。
 
 ## Xpert UI 证据摘要
@@ -81,15 +82,15 @@ EvoAgentX 只保留为历史参考：此前元智能体曾借鉴其 `goal -> sub
 
 目标：把当前节点配置表单升级为 Xpert 式智能体配置侧栏，但不一次性实现全部高级语义。
 
-- `XPERT-STUDIO-PANEL-01`：补齐参数、中间件、知识库、工具、失败重试、备用模型、异常处理、输出结构、记忆写入等 UI 分区。
-- 验收重点：先做可见与配置存储，执行语义按后续小步接入。
+- `XPERT-STUDIO-PANEL-01`：已完成第一版 `agent` / `workflow_agent` 配置侧栏分区，补齐参数、中间件、知识库、工具、失败重试、备用模型、异常处理、输出结构、记忆写入等 UI 区块。
+- 当前边界：除已有模型调用与工具模式外，新区块只保存配置草稿；执行语义按后续小步接入。
 
 ### 阶段 4：知识流水线从只读到草稿
 
 目标：从当前 RAG 元数据视图推进到可视化知识流水线草稿。
 
-- `XPERT-KNOWLEDGE-PIPELINE-02`：引入数据源、处理器、分块器、图像理解四类 stage 的草稿 schema 与 UI。
-- 验收重点：不迁移向量库，不改变 `/api/rag/query`，只新增可观测草稿层。
+- `XPERT-KNOWLEDGE-PIPELINE-02`：已引入数据源、处理器、分块器、图像理解四类 stage 的只读草稿 API 与 `/rag` UI。
+- 当前边界：不迁移向量库，不改变 `/api/rag/query`，不执行真实图像理解；只新增可观测草稿层。
 
 ### 阶段 5：运行与工具运维收口
 
@@ -100,11 +101,11 @@ EvoAgentX 只保留为历史参考：此前元智能体曾借鉴其 `goal -> sub
 
 ## 近期 5 步工程顺序
 
-1. `XPERT-STUDIO-PANEL-01`：智能体配置侧栏对齐，补齐参数、中间件、知识库、工具、重试、输出结构、记忆等分区。
-2. `XPERT-KNOWLEDGE-PIPELINE-02`：从只读 Citation/Artifact 视图推进到可视化知识流水线草稿。
-3. `XPERT-RUNTIME-OPS-01`：MCP Runtime 运维、插件/Skill 市场、环境与运行观测统一收口。
-4. `XPERT-WORKSPACE-HUB-02`：在工作空间 Hub 上接入资源创建入口、标签过滤和更完整的运行摘要。
-5. `XPERT-WORKFLOW-REGISTRY-API-01`：评估是否把前端节点 registry 升级为后端统一 registry API，避免未来前后端元数据漂移。
+1. `XPERT-RUNTIME-OPS-01`：MCP Runtime 运维、插件/Skill 市场、环境与运行观测统一收口。
+2. `XPERT-WORKSPACE-HUB-02`：在工作空间 Hub 上接入资源创建入口、标签过滤和更完整的运行摘要。
+3. `XPERT-WORKFLOW-REGISTRY-API-01`：评估是否把前端节点 registry 升级为后端统一 registry API，避免未来前后端元数据漂移。
+4. `XPERT-STUDIO-PANEL-02`：逐项接入重试、备用模型、输出结构、记忆写入等真实执行语义。
+5. `XPERT-KNOWLEDGE-PIPELINE-03`：在 stage 草稿稳定后评估可编辑流水线草稿和执行观测，不迁移现有 RAG 主路径。
 
 ## 验收护栏
 

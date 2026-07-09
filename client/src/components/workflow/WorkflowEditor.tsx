@@ -285,6 +285,17 @@ function createNodeData(
       maxIterations: "5",
       temperature: "0.7",
       promptSuffix: "",
+      disableOutput: "false",
+      enableFileUnderstanding: "false",
+      parallelToolCalls: "false",
+      retryOnFailure: "false",
+      fallbackModelId: "",
+      exceptionHandling: "none",
+      outputSchemaMode: "default",
+      outputSchemaJson: "",
+      memoryWriteEnabled: "false",
+      memoryWriteTarget: "",
+      nodeParametersJson: "[]",
     };
   }
 
@@ -302,6 +313,17 @@ function createNodeData(
       maxIterations: "5",
       promptSuffix: "",
       outputVariable: "agent_output",
+      disableOutput: "false",
+      enableFileUnderstanding: "false",
+      parallelToolCalls: "false",
+      retryOnFailure: "false",
+      fallbackModelId: "",
+      exceptionHandling: "none",
+      outputSchemaMode: "default",
+      outputSchemaJson: "",
+      memoryWriteEnabled: "false",
+      memoryWriteTarget: "",
+      nodeParametersJson: "[]",
     };
   }
 
@@ -558,6 +580,428 @@ function isRegistryToolOption(value: unknown): value is RegistryToolOption {
     value !== null &&
     "name" in value &&
     typeof (value as { name?: unknown }).name === "string"
+  );
+}
+
+function workflowBooleanValue(value: unknown): boolean {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "string") {
+    return value.toLowerCase() === "true";
+  }
+  return false;
+}
+
+function ConfigSection({
+  title,
+  description,
+  children,
+}: {
+  title: string;
+  description?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <section className="rounded-lg border border-white/10 bg-white/[0.035] p-3">
+      <div className="mb-3">
+        <h4 className="text-sm font-semibold text-slate-100">{title}</h4>
+        {description ? (
+          <p className="mt-1 text-xs leading-5 text-slate-500">{description}</p>
+        ) : null}
+      </div>
+      <div className="space-y-3">{children}</div>
+    </section>
+  );
+}
+
+function ConfigSwitch({
+  label,
+  description,
+  checked,
+  onChange,
+}: {
+  label: string;
+  description?: string;
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+}) {
+  return (
+    <label className="flex items-start justify-between gap-3 rounded-lg border border-white/10 bg-white/[0.045] px-3 py-2">
+      <span>
+        <span className="block text-sm font-medium text-slate-100">{label}</span>
+        {description ? (
+          <span className="mt-1 block text-xs leading-5 text-slate-500">
+            {description}
+          </span>
+        ) : null}
+      </span>
+      <input
+        checked={checked}
+        className="mt-1 h-4 w-4 shrink-0 rounded border-white/20 bg-slate-950 text-brand-300"
+        onChange={(event) => onChange(event.target.checked)}
+        type="checkbox"
+      />
+    </label>
+  );
+}
+
+function AgentStudioPanel({
+  data,
+  update,
+  registryTools,
+  registryToolsError,
+}: {
+  data: WorkflowNodeData;
+  update: (patch: Partial<WorkflowNodeData>) => void;
+  registryTools: RegistryToolOption[];
+  registryToolsError: string;
+}) {
+  const isWorkflowAgent = data.kind === "workflow_agent";
+  const setStringBoolean = (
+    key:
+      | "disableOutput"
+      | "enableFileUnderstanding"
+      | "parallelToolCalls"
+      | "retryOnFailure"
+      | "memoryWriteEnabled",
+    checked: boolean,
+  ) => update({ [key]: checked ? "true" : "false" });
+  const toolNamesPlaceholder = registryTools.length
+    ? registryTools.map((tool) => tool.name).slice(0, 3).join(", ")
+    : "先在 MCP 页面连接工具 Server";
+
+  return (
+    <div className="space-y-3">
+      <div className="rounded-lg border border-brand-300/25 bg-brand-300/10 px-3 py-2 text-xs leading-5 text-brand-50">
+        Xpert 对齐配置侧栏第一版：本轮只保存配置草稿，真实执行仍沿用当前节点语义。
+      </div>
+
+      <ConfigSection
+        description="控制节点身份和基础运行开关。"
+        title="节点"
+      >
+        {isWorkflowAgent ? (
+          <Field label="智能体名称">
+            <input
+              className={textInputClass()}
+              onChange={(event) => update({ agentName: event.target.value })}
+              value={data.agentName ?? ""}
+            />
+          </Field>
+        ) : (
+          <Field label="执行模式">
+            <select
+              className={textInputClass()}
+              onChange={(event) => update({ agentMode: event.target.value })}
+              value={data.agentMode ?? "tool_first"}
+            >
+              <option className="bg-slate-950" value="tool_first">
+                tool_first：优先规划工具调用
+              </option>
+              <option className="bg-slate-950" value="direct">
+                direct：直接回答
+              </option>
+            </select>
+          </Field>
+        )}
+
+        <div className="grid gap-2">
+          <ConfigSwitch
+            checked={workflowBooleanValue(data.disableOutput)}
+            description="仅保存配置，当前 runner 不改变输出行为。"
+            label="禁用输出"
+            onChange={(checked) => setStringBoolean("disableOutput", checked)}
+          />
+          <ConfigSwitch
+            checked={workflowBooleanValue(data.enableFileUnderstanding)}
+            description="为后续文件变量和附件理解预留。"
+            label="文件理解"
+            onChange={(checked) =>
+              setStringBoolean("enableFileUnderstanding", checked)
+            }
+          />
+          <ConfigSwitch
+            checked={workflowBooleanValue(data.parallelToolCalls)}
+            description="为后续并行工具调度预留。"
+            label="并行工具调用"
+            onChange={(checked) =>
+              setStringBoolean("parallelToolCalls", checked)
+            }
+          />
+        </div>
+      </ConfigSection>
+
+      <ConfigSection
+        description="定义传入智能体的可选参数，当前仅作为配置草稿保存。"
+        title="参数"
+      >
+        <Field label="参数 JSON">
+          <textarea
+            className={`${textInputClass()} min-h-24 resize-none font-mono text-xs leading-5`}
+            onChange={(event) =>
+              update({ nodeParametersJson: event.target.value })
+            }
+            placeholder='[{"name":"topic","optional":false}]'
+            value={data.nodeParametersJson ?? "[]"}
+          />
+        </Field>
+      </ConfigSection>
+
+      <ConfigSection title="提示词 / 模型">
+        <Field label="调用模型">
+          <select
+            className={textInputClass()}
+            onChange={(event) => update({ modelId: event.target.value })}
+            value={data.modelId ?? ""}
+          >
+            <option className="bg-slate-950" value="">
+              请选择模型
+            </option>
+            {models.map((model) => (
+              <option
+                className="bg-slate-950 text-white"
+                key={model.id}
+                value={model.id}
+              >
+                {model.name}
+              </option>
+            ))}
+          </select>
+        </Field>
+
+        {isWorkflowAgent ? (
+          <>
+            <Field label="角色提示词（支持 {{变量}}）">
+              <textarea
+                className={`${textInputClass()} min-h-32 resize-none leading-6`}
+                onChange={(event) => update({ rolePrompt: event.target.value })}
+                value={data.rolePrompt ?? ""}
+              />
+            </Field>
+            <Field label="任务输入（支持 {{变量}}）">
+              <textarea
+                className={`${textInputClass()} min-h-32 resize-none leading-6`}
+                onChange={(event) => update({ taskInput: event.target.value })}
+                value={data.taskInput ?? ""}
+              />
+            </Field>
+          </>
+        ) : (
+          <>
+            <Field label="任务指令（支持 {{变量}}）">
+              <textarea
+                className={`${textInputClass()} min-h-36 resize-none leading-6`}
+                onChange={(event) => update({ instruction: event.target.value })}
+                placeholder="例如：请基于 {{user_input}} 制定处理计划。"
+                value={data.instruction ?? ""}
+              />
+            </Field>
+            <Field label="Temperature">
+              <input
+                className={textInputClass()}
+                max={2}
+                min={0}
+                onChange={(event) => update({ temperature: event.target.value })}
+                step={0.1}
+                type="number"
+                value={data.temperature ?? "0.7"}
+              />
+            </Field>
+          </>
+        )}
+      </ConfigSection>
+
+      <ConfigSection
+        description="画布上的 runtime_middleware 节点已经可用，节点内嵌中间件后续接入。"
+        title="中间件"
+      >
+        <p className="rounded-lg border border-dashed border-white/15 bg-white/[0.035] px-3 py-3 text-xs leading-5 text-slate-400">
+          暂未在智能体节点内嵌中间件。需要工具策略、审计或 system prompt 时，请继续使用画布上的中间件节点。
+        </p>
+      </ConfigSection>
+
+      <ConfigSection
+        description="当前知识引用仍通过知识检索和知识引用锚点节点完成。"
+        title="知识库"
+      >
+        <p className="rounded-lg border border-dashed border-white/15 bg-white/[0.035] px-3 py-3 text-xs leading-5 text-slate-400">
+          知识库召回设置将在后续版本接入。当前可在画布中连接 knowledge_retrieval 或 knowledge_citation 节点。
+        </p>
+      </ConfigSection>
+
+      <ConfigSection title="工具">
+        {isWorkflowAgent ? (
+          <Field label="工具模式">
+            <select
+              className={textInputClass()}
+              onChange={(event) => update({ toolMode: event.target.value })}
+              value={data.toolMode ?? "none"}
+            >
+              <option className="bg-slate-950" value="none">
+                none：直接调用模型
+              </option>
+              <option className="bg-slate-950" value="mcp_tools">
+                mcp_tools：允许调用 MCP 工具
+              </option>
+            </select>
+          </Field>
+        ) : null}
+
+        {!isWorkflowAgent || data.toolMode === "mcp_tools" ? (
+          <>
+            <Field label="允许工具名（逗号分隔，留空代表全部已注册工具）">
+              <input
+                className={textInputClass()}
+                onChange={(event) => update({ toolNames: event.target.value })}
+                placeholder={toolNamesPlaceholder}
+                value={data.toolNames ?? ""}
+              />
+              {registryToolsError ? (
+                <p className="mt-2 text-xs text-rose-200">
+                  {registryToolsError}
+                </p>
+              ) : null}
+            </Field>
+            <Field label="最大工具循环次数">
+              <input
+                className={textInputClass()}
+                inputMode="numeric"
+                max={20}
+                min={1}
+                onChange={(event) =>
+                  update({ maxIterations: event.target.value })
+                }
+                type="number"
+                value={data.maxIterations ?? "5"}
+              />
+            </Field>
+          </>
+        ) : (
+          <p className="rounded-lg border border-dashed border-white/15 bg-white/[0.035] px-3 py-3 text-xs leading-5 text-slate-400">
+            当前为 none 模式，不会进入 MCP 工具循环。
+          </p>
+        )}
+
+        <Field label="补充提示词（可选，支持 {{变量}}）">
+          <textarea
+            className={`${textInputClass()} min-h-24 resize-none leading-6`}
+            onChange={(event) => update({ promptSuffix: event.target.value })}
+            placeholder="可加入输出格式、语气或额外约束。"
+            value={data.promptSuffix ?? ""}
+          />
+        </Field>
+      </ConfigSection>
+
+      <ConfigSection
+        description="当前仅保存配置，后续再接入真实重试和 fallback 执行。"
+        title="运行策略"
+      >
+        <ConfigSwitch
+          checked={workflowBooleanValue(data.retryOnFailure)}
+          label="失败时重试"
+          onChange={(checked) => setStringBoolean("retryOnFailure", checked)}
+        />
+        <Field label="备用模型">
+          <select
+            className={textInputClass()}
+            onChange={(event) => update({ fallbackModelId: event.target.value })}
+            value={data.fallbackModelId ?? ""}
+          >
+            <option className="bg-slate-950" value="">
+              不使用备用模型
+            </option>
+            {models.map((model) => (
+              <option
+                className="bg-slate-950 text-white"
+                key={model.id}
+                value={model.id}
+              >
+                {model.name}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field label="异常处理">
+          <select
+            className={textInputClass()}
+            onChange={(event) =>
+              update({ exceptionHandling: event.target.value })
+            }
+            value={data.exceptionHandling ?? "none"}
+          >
+            <option className="bg-slate-950" value="none">
+              无
+            </option>
+            <option className="bg-slate-950" value="continue">
+              继续后续节点
+            </option>
+            <option className="bg-slate-950" value="fail">
+              标记失败
+            </option>
+          </select>
+        </Field>
+      </ConfigSection>
+
+      <ConfigSection title="输出结构">
+        <Field label="输出变量">
+          <input
+            className={textInputClass()}
+            onChange={(event) => update({ outputVariable: event.target.value })}
+            value={data.outputVariable ?? ""}
+          />
+        </Field>
+        <Field label="输出结构模式">
+          <select
+            className={textInputClass()}
+            onChange={(event) => update({ outputSchemaMode: event.target.value })}
+            value={data.outputSchemaMode ?? "default"}
+          >
+            <option className="bg-slate-950" value="default">
+              默认
+            </option>
+            <option className="bg-slate-950" value="text">
+              文本
+            </option>
+            <option className="bg-slate-950" value="json">
+              JSON
+            </option>
+          </select>
+        </Field>
+        <Field label="输出结构 JSON（可选）">
+          <textarea
+            className={`${textInputClass()} min-h-24 resize-none font-mono text-xs leading-5`}
+            onChange={(event) => update({ outputSchemaJson: event.target.value })}
+            placeholder='{"content":"string"}'
+            value={data.outputSchemaJson ?? ""}
+          />
+        </Field>
+      </ConfigSection>
+
+      <ConfigSection
+        description="当前仅保存配置草稿，不会写入长期记忆。"
+        title="记忆写入"
+      >
+        <ConfigSwitch
+          checked={workflowBooleanValue(data.memoryWriteEnabled)}
+          label="写入记忆"
+          onChange={(checked) =>
+            setStringBoolean("memoryWriteEnabled", checked)
+          }
+        />
+        <Field label="记忆目标">
+          <input
+            className={textInputClass()}
+            disabled={!workflowBooleanValue(data.memoryWriteEnabled)}
+            onChange={(event) =>
+              update({ memoryWriteTarget: event.target.value })
+            }
+            placeholder="例如：agent_memory"
+            value={data.memoryWriteTarget ?? ""}
+          />
+        </Field>
+      </ConfigSection>
+    </div>
   );
 }
 
@@ -1154,216 +1598,13 @@ function NodeConfig({ node, onChange }: NodeConfigProps) {
         </>
       ) : null}
 
-      {data.kind === "agent" ? (
-        <>
-          <div className="rounded-lg border border-violet-300/25 bg-violet-300/10 px-3 py-2 text-xs leading-5 text-violet-50">
-            Agent 节点是实验能力：工具模式会尝试调用已注册 MCP 工具，直接模式只调用模型生成回答。
-          </div>
-          <Field label="执行模式">
-            <select
-              className={textInputClass()}
-              onChange={(event) => update({ agentMode: event.target.value })}
-              value={data.agentMode ?? "tool_first"}
-            >
-              <option className="bg-slate-950" value="tool_first">
-                tool_first：优先规划工具调用
-              </option>
-              <option className="bg-slate-950" value="direct">
-                direct：直接回答
-              </option>
-            </select>
-          </Field>
-          <Field label="任务指令（支持 {{变量}}）">
-            <textarea
-              className={`${textInputClass()} min-h-36 resize-none leading-6`}
-              onChange={(event) => update({ instruction: event.target.value })}
-              placeholder="例如：请基于 {{user_input}} 制定处理计划。"
-              value={data.instruction ?? ""}
-            />
-          </Field>
-          <Field label="调用模型">
-            <select
-              className={textInputClass()}
-              onChange={(event) => update({ modelId: event.target.value })}
-              value={data.modelId ?? ""}
-            >
-              <option className="bg-slate-950" value="">
-                请选择模型
-              </option>
-              {models.map((model) => (
-                <option
-                  className="bg-slate-950 text-white"
-                  key={model.id}
-                  value={model.id}
-                >
-                  {model.name}
-                </option>
-              ))}
-            </select>
-          </Field>
-          {data.agentMode !== "direct" ? (
-            <>
-              <Field label="允许工具名（逗号分隔，留空代表全部已注册工具）">
-                <input
-                  className={textInputClass()}
-                  onChange={(event) => update({ toolNames: event.target.value })}
-                  placeholder={
-                    registryTools.length
-                      ? registryTools.map((tool) => tool.name).slice(0, 3).join(", ")
-                      : "先在 MCP 页面连接工具 Server"
-                  }
-                  value={data.toolNames ?? ""}
-                />
-              </Field>
-              <Field label="最大工具循环次数">
-                <input
-                  className={textInputClass()}
-                  inputMode="numeric"
-                  max={20}
-                  min={1}
-                  onChange={(event) =>
-                    update({ maxIterations: event.target.value })
-                  }
-                  type="number"
-                  value={data.maxIterations ?? "5"}
-                />
-              </Field>
-            </>
-          ) : null}
-          <Field label="Temperature">
-            <input
-              className={textInputClass()}
-              max={2}
-              min={0}
-              onChange={(event) => update({ temperature: event.target.value })}
-              step={0.1}
-              type="number"
-              value={data.temperature ?? "0.7"}
-            />
-          </Field>
-          <Field label="补充提示词（可选，支持 {{变量}}）">
-            <textarea
-              className={`${textInputClass()} min-h-24 resize-none leading-6`}
-              onChange={(event) => update({ promptSuffix: event.target.value })}
-              placeholder="可加入输出格式、语气或额外约束。"
-              value={data.promptSuffix ?? ""}
-            />
-          </Field>
-          <Field label="输出变量">
-            <input
-              className={textInputClass()}
-              onChange={(event) => update({ outputVariable: event.target.value })}
-              value={data.outputVariable ?? ""}
-            />
-          </Field>
-        </>
-      ) : null}
-
-      {data.kind === "workflow_agent" ? (
-        <>
-          <div className="rounded-lg border border-cyan-300/25 bg-cyan-300/10 px-3 py-2 text-xs leading-5 text-cyan-50">
-            该节点会以角色提示词调用模型执行一个工作流步骤；启用 MCP 工具时会复用 runtime toolset、权限策略和审计。
-          </div>
-          <Field label="智能体名称">
-            <input
-              className={textInputClass()}
-              onChange={(event) => update({ agentName: event.target.value })}
-              value={data.agentName ?? ""}
-            />
-          </Field>
-          <Field label="调用模型">
-            <select
-              className={textInputClass()}
-              onChange={(event) => update({ modelId: event.target.value })}
-              value={data.modelId ?? ""}
-            >
-              <option className="bg-slate-950" value="">
-                请选择模型
-              </option>
-              {models.map((model) => (
-                <option
-                  className="bg-slate-950 text-white"
-                  key={model.id}
-                  value={model.id}
-                >
-                  {model.name}
-                </option>
-              ))}
-            </select>
-          </Field>
-          <Field label="角色提示词（支持 {{变量}}）">
-            <textarea
-              className={`${textInputClass()} min-h-32 resize-none leading-6`}
-              onChange={(event) => update({ rolePrompt: event.target.value })}
-              value={data.rolePrompt ?? ""}
-            />
-          </Field>
-          <Field label="任务输入（支持 {{变量}}）">
-            <textarea
-              className={`${textInputClass()} min-h-32 resize-none leading-6`}
-              onChange={(event) => update({ taskInput: event.target.value })}
-              value={data.taskInput ?? ""}
-            />
-          </Field>
-          <Field label="工具模式">
-            <select
-              className={textInputClass()}
-              onChange={(event) => update({ toolMode: event.target.value })}
-              value={data.toolMode ?? "none"}
-            >
-              <option className="bg-slate-950" value="none">
-                none：直接调用模型
-              </option>
-              <option className="bg-slate-950" value="mcp_tools">
-                mcp_tools：允许调用 MCP 工具
-              </option>
-            </select>
-          </Field>
-          {data.toolMode === "mcp_tools" ? (
-            <>
-              <Field label="允许工具名（逗号分隔，留空代表全部已注册工具）">
-                <input
-                  className={textInputClass()}
-                  onChange={(event) => update({ toolNames: event.target.value })}
-                  placeholder={
-                    registryTools.length
-                      ? registryTools.map((tool) => tool.name).slice(0, 3).join(", ")
-                      : "先在 MCP 页面连接工具 Server"
-                  }
-                  value={data.toolNames ?? ""}
-                />
-              </Field>
-              <Field label="最大工具循环次数">
-                <input
-                  className={textInputClass()}
-                  inputMode="numeric"
-                  max={20}
-                  min={1}
-                  onChange={(event) =>
-                    update({ maxIterations: event.target.value })
-                  }
-                  type="number"
-                  value={data.maxIterations ?? "5"}
-                />
-              </Field>
-            </>
-          ) : null}
-          <Field label="补充提示词（可选，支持 {{变量}}）">
-            <textarea
-              className={`${textInputClass()} min-h-24 resize-none leading-6`}
-              onChange={(event) => update({ promptSuffix: event.target.value })}
-              placeholder="可加入输出格式、语气或额外约束。"
-              value={data.promptSuffix ?? ""}
-            />
-          </Field>
-          <Field label="输出变量">
-            <input
-              className={textInputClass()}
-              onChange={(event) => update({ outputVariable: event.target.value })}
-              value={data.outputVariable ?? ""}
-            />
-          </Field>
-        </>
+      {data.kind === "agent" || data.kind === "workflow_agent" ? (
+        <AgentStudioPanel
+          data={data}
+          registryTools={registryTools}
+          registryToolsError={registryToolsError}
+          update={update}
+        />
       ) : null}
 
       {data.kind === "agent_task" ? (

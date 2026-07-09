@@ -114,6 +114,22 @@ class KnowledgeChunkListResponse(BaseModel):
     chunk_count: int
 
 
+class PipelineDraftStagePayload(BaseModel):
+    id: str
+    kind: str
+    title: str
+    status: str
+    item_count: int
+    summary: str
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class PipelineDraftResponse(BaseModel):
+    kb_id: str
+    stages: list[PipelineDraftStagePayload]
+    stage_count: int
+
+
 class CitationAnchorPayload(BaseModel):
     citation_id: str
     chunk_id: str
@@ -250,6 +266,23 @@ async def list_pipeline_artifact_chunks(artifact_id: str) -> KnowledgeChunkListR
             chunk_count=len(chunks),
         )
     except DocumentNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/pipeline/draft", response_model=PipelineDraftResponse)
+async def get_pipeline_draft(kb_id: str) -> PipelineDraftResponse:
+    try:
+        draft = get_rag_service().get_pipeline_draft(kb_id)
+        stages = [
+            PipelineDraftStagePayload.model_validate(item)
+            for item in draft.get("stages", [])
+        ]
+        return PipelineDraftResponse(
+            kb_id=str(draft["kb_id"]),
+            stages=stages,
+            stage_count=len(stages),
+        )
+    except KnowledgeBaseNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 

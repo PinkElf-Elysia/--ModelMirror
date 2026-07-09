@@ -2,7 +2,37 @@
 
 本文件说明模镜本地 RAG 模块的架构、API、扩展方式和测试方法。该模块位于 `server/rag/`，前端入口为 `/rag`，聊天页可选择知识库进行检索增强问答。
 
-最后更新日期：2026-07-08
+最后更新日期：2026-07-09
+
+## 2026-07-09 增量：Knowledge Pipeline Stage 草稿
+
+本地 RAG 的 Knowledge Pipeline 只读视图已从单纯的 FileAsset / Artifact / Chunk / CitationAnchor 摘要，扩展为 Xpert 式四段 stage 草稿。新增 API：
+
+```bash
+curl "http://localhost:8000/api/rag/pipeline/draft?kb_id=kb_xxx"
+```
+
+响应只包含摘要元信息：
+
+```json
+{
+  "kb_id": "kb_xxx",
+  "stage_count": 4,
+  "stages": [
+    {
+      "id": "stage_data_source",
+      "kind": "data_source",
+      "title": "数据源",
+      "status": "ready",
+      "item_count": 1,
+      "summary": "上传文件已映射为 FileAsset 元数据。",
+      "metadata": { "asset_count": 1, "document_count": 1 }
+    }
+  ]
+}
+```
+
+四个 stage 固定为 `data_source`、`processor`、`chunker`、`image_understanding`。前三者实时从现有 RAG metadata 派生；`image_understanding` 当前为 `planned` / disabled 占位，不调用视觉模型。该 API 不返回本地文件绝对路径、完整 chunk 文本、embedding、prompt 或密钥，也不会改变上传、切分、向量化、检索和 `/api/rag/query` 行为。
 
 ## 2026-07-08 增量：Workflow CitationAnchor 节点
 
@@ -324,6 +354,6 @@ curl -X POST http://localhost:8000/api/rag/pipeline/citations \
   -d '{"kb_id":"kb_xxx","question":"如何使用资料？","top_k":4}'
 ```
 
-前端 `/rag` 新增“知识流水线 Beta”折叠区，展示当前知识库的 assets / artifacts / chunks 计数和最近 artifacts。后续知识类工作流节点、Agent 引用和 citation 面板会基于这层 schema 继续扩展。
+前端 `/rag` 的“知识流水线 Beta”折叠区已展示当前知识库的数据源、处理器、分块器、图像理解 stage 草稿，并保留 assets / artifacts / chunks 计数和最近 artifacts。后续知识类工作流节点、Agent 引用和 citation 面板会基于这层 schema 继续扩展。
 
-最后更新日期：2026-07-08
+最后更新日期：2026-07-09

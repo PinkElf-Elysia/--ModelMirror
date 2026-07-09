@@ -206,6 +206,73 @@ class RagService:
         ]
         return sorted(artifacts, key=lambda item: item["created_at"], reverse=True)
 
+    def get_pipeline_draft(self, kb_id: str) -> dict[str, Any]:
+        """Return a read-only Xpert-style pipeline draft for one knowledge base."""
+
+        metadata = self._read_metadata()
+        self._ensure_kb_exists(metadata, kb_id)
+        documents = [
+            document
+            for document in metadata["documents"].values()
+            if document["kb_id"] == kb_id
+        ]
+        assets = [self._file_asset_payload(document) for document in documents]
+        artifacts = [self._artifact_payload(document) for document in documents]
+        chunk_count = sum(int(document.get("chunk_count", 0)) for document in documents)
+
+        return {
+            "kb_id": kb_id,
+            "stages": [
+                {
+                    "id": "stage_data_source",
+                    "kind": "data_source",
+                    "title": "数据源",
+                    "status": "ready" if assets else "empty",
+                    "item_count": len(assets),
+                    "summary": "上传文件已映射为 FileAsset 元数据。",
+                    "metadata": {
+                        "asset_count": len(assets),
+                        "document_count": len(documents),
+                    },
+                },
+                {
+                    "id": "stage_processor",
+                    "kind": "processor",
+                    "title": "处理器",
+                    "status": "ready" if artifacts else "empty",
+                    "item_count": len(artifacts),
+                    "summary": "本地解析器已将文档映射为 Artifact。",
+                    "metadata": {
+                        "artifact_count": len(artifacts),
+                        "parser": "local_document_parser",
+                    },
+                },
+                {
+                    "id": "stage_chunker",
+                    "kind": "chunker",
+                    "title": "分块器",
+                    "status": "ready" if chunk_count else "empty",
+                    "item_count": chunk_count,
+                    "summary": "当前使用本地文本分块结果作为 KnowledgeChunk。",
+                    "metadata": {
+                        "chunk_count": chunk_count,
+                        "strategy": "local_recursive_character_chunks",
+                    },
+                },
+                {
+                    "id": "stage_image_understanding",
+                    "kind": "image_understanding",
+                    "title": "图像理解",
+                    "status": "planned",
+                    "item_count": 0,
+                    "summary": "视觉语言模型处理尚未接入，本阶段仅展示规划占位。",
+                    "metadata": {
+                        "enabled": False,
+                    },
+                },
+            ],
+        }
+
     def list_pipeline_artifact_chunks(self, artifact_id: str) -> list[dict[str, Any]]:
         """Return chunk metadata for one artifact without exposing embeddings."""
 
