@@ -1,0 +1,829 @@
+import { type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
+import { Link } from "react-router-dom";
+import PageContainer from "../components/PageContainer";
+
+type Loadable<T> = {
+  data: T;
+  error: string;
+  loading: boolean;
+};
+
+interface McpSessionPayload {
+  session_id: string;
+  server_command?: string[];
+  status?: string;
+  created_at?: number;
+  uptime_seconds?: number;
+  idle_seconds?: number;
+  tools_count?: number;
+}
+
+interface RegistryToolPayload {
+  name: string;
+  description?: string | null;
+  input_schema?: Record<string, unknown>;
+  inputSchema?: Record<string, unknown>;
+  server_id?: string;
+  session_id?: string;
+  registered_at?: number;
+}
+
+interface RuntimeRunPayload {
+  run_id: string;
+  run_type: string;
+  status: string;
+  title: string;
+  source_id?: string | null;
+  parent_run_id?: string | null;
+  metadata?: Record<string, unknown>;
+  created_at: number;
+  updated_at: number;
+  error?: string | null;
+}
+
+interface RuntimeCheckpointPayload {
+  checkpoint_id: string;
+  run_id: string;
+  event_type: string;
+  title: string;
+  summary?: string | null;
+  severity: string;
+  metadata?: Record<string, unknown>;
+  created_at: number;
+}
+
+interface InstalledSkillPayload {
+  skill_id: string;
+  name: string;
+  description?: string;
+  repo_url?: string;
+  sub_path?: string;
+  installed_at?: number;
+}
+
+type RuntimeFilter = "all" | "workflow" | "workflow_agent" | "agent_task" | "agent_handoff" | "chat";
+type StatusFilter = "all" | "pending" | "running" | "completed" | "failed" | "cancelled";
+
+const dateFormatter = new Intl.DateTimeFormat("zh-CN", {
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+});
+
+const runTypeFilters: Array<{ label: string; value: RuntimeFilter }> = [
+  { label: "全部类型", value: "all" },
+  { label: "workflow", value: "workflow" },
+  { label: "workflow_agent", value: "workflow_agent" },
+  { label: "agent_task", value: "agent_task" },
+  { label: "agent_handoff", value: "agent_handoff" },
+  { label: "chat", value: "chat" },
+];
+
+const statusFilters: Array<{ label: string; value: StatusFilter }> = [
+  { label: "全部状态", value: "all" },
+  { label: "pending", value: "pending" },
+  { label: "running", value: "running" },
+  { label: "completed", value: "completed" },
+  { label: "failed", value: "failed" },
+  { label: "cancelled", value: "cancelled" },
+];
+
+function createLoadable<T>(data: T, loading = false): Loadable<T> {
+  return { data, error: "", loading };
+}
+
+async function readJson<T>(url: string): Promise<T> {
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`请求失败：${response.status}`);
+  }
+  return response.json() as Promise<T>;
+}
+
+function formatTime(value: number | null | undefined) {
+  if (!value || !Number.isFinite(value)) return "暂无";
+  const timestamp = value > 10_000_000_000 ? value : value * 1000;
+  return dateFormatter.format(new Date(timestamp));
+}
+
+function shortId(value: string | null | undefined) {
+  if (!value) return "无";
+  return value.length > 12 ? `${value.slice(0, 8)}…${value.slice(-4)}` : value;
+}
+
+function normalizeStatus(value: string | null | undefined) {
+  return (value || "active").toLowerCase();
+}
+
+function statusClass(status: string) {
+  const normalized = normalizeStatus(status);
+  if (["active", "connected", "running", "completed", "succeeded"].includes(normalized)) {
+    return "border-emerald-300/25 bg-emerald-300/10 text-emerald-100";
+  }
+  if (["failed", "error"].includes(normalized)) {
+    return "border-rose-300/25 bg-rose-300/10 text-rose-100";
+  }
+  if (["cancelled", "closed", "stopped"].includes(normalized)) {
+    return "border-slate-300/20 bg-white/[0.055] text-slate-300";
+  }
+  return "border-hire-300/25 bg-hire-300/10 text-hire-100";
+}
+
+function metadataPreview(metadata: Record<string, unknown> | undefined) {
+  if (!metadata) return "无 metadata";
+  const entries = Object.entries(metadata)
+    .filter(([, value]) => typeof value !== "object")
+    .slice(0, 3)
+    .map(([key, value]) => `${key}: ${String(value)}`);
+  return entries.length ? entries.join(" · ") : "metadata 已记录";
+}
+
+function schemaFieldCount(tool: RegistryToolPayload) {
+  const schema = tool.input_schema ?? tool.inputSchema ?? {};
+  const properties = schema.properties;
+  if (properties && typeof properties === "object" && !Array.isArray(properties)) {
+    return Object.keys(properties as Record<string, unknown>).length;
+  }
+  return 0;
+}
+
+function Sidebar() {
+  return (
+    <div>
+      <p className="text-sm font-semibold text-white">Runtime Ops</p>
+      <p className="mt-2 text-sm leading-6 text-slate-400">
+        这里先做只读运维总览：MCP Runtime、全局工具、RunRegistry 与 Skill 安装状态。
+      </p>
+      <div className="mt-4 space-y-2">
+        <Link
+          className="block rounded-lg border border-white/10 bg-white/[0.045] px-3 py-2 text-sm font-semibold text-slate-200 transition hover:border-hire-300/35 hover:bg-hire-300/10 hover:text-hire-100"
+          to="/mcps"
+        >
+          管理 MCP 工具
+        </Link>
+        <Link
+          className="block rounded-lg border border-white/10 bg-white/[0.045] px-3 py-2 text-sm font-semibold text-slate-200 transition hover:border-hire-300/35 hover:bg-hire-300/10 hover:text-hire-100"
+          to="/skills"
+        >
+          管理 Skill
+        </Link>
+        <Link
+          className="block rounded-lg border border-white/10 bg-white/[0.045] px-3 py-2 text-sm font-semibold text-slate-200 transition hover:border-hire-300/35 hover:bg-hire-300/10 hover:text-hire-100"
+          to="/studio"
+        >
+          返回工作空间
+        </Link>
+      </div>
+    </div>
+  );
+}
+
+function MetricCard({
+  hint,
+  label,
+  tone = "neutral",
+  value,
+}: {
+  hint: string;
+  label: string;
+  tone?: "neutral" | "brand" | "success" | "warning" | "error";
+  value: string | number;
+}) {
+  const toneMap = {
+    brand: "text-brand-100",
+    error: "text-rose-100",
+    neutral: "text-white",
+    success: "text-emerald-100",
+    warning: "text-hire-100",
+  } as const;
+
+  return (
+    <div className="rounded-lg border border-white/10 bg-ink-950/72 p-4 shadow-prism">
+      <p className="text-xs text-slate-400">{label}</p>
+      <p className={`mt-2 text-3xl font-semibold ${toneMap[tone]}`}>{value}</p>
+      <p className="mt-2 text-xs leading-5 text-slate-500">{hint}</p>
+    </div>
+  );
+}
+
+function SectionShell({
+  action,
+  children,
+  description,
+  error,
+  title,
+}: {
+  action?: ReactNode;
+  children: React.ReactNode;
+  description: string;
+  error?: string;
+  title: string;
+}) {
+  return (
+    <section className="rounded-lg border border-white/10 bg-ink-950/72 shadow-prism">
+      <div className="flex flex-col gap-3 border-b border-white/10 p-4 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <h2 className="text-base font-semibold text-white">{title}</h2>
+          <p className="mt-1 text-sm leading-6 text-slate-400">{description}</p>
+        </div>
+        {action}
+      </div>
+      {error ? (
+        <div className="m-4 rounded-lg border border-rose-300/20 bg-rose-300/10 px-3 py-2 text-sm text-rose-100">
+          {error}
+        </div>
+      ) : (
+        children
+      )}
+    </section>
+  );
+}
+
+export default function RuntimeOpsPage() {
+  const [mcpSessions, setMcpSessions] = useState(createLoadable<McpSessionPayload[]>([], true));
+  const [registryTools, setRegistryTools] = useState(createLoadable<RegistryToolPayload[]>([], true));
+  const [runs, setRuns] = useState(createLoadable<RuntimeRunPayload[]>([], true));
+  const [skills, setSkills] = useState(createLoadable<InstalledSkillPayload[]>([], true));
+  const [runType, setRunType] = useState<RuntimeFilter>("all");
+  const [status, setStatus] = useState<StatusFilter>("all");
+  const [keyword, setKeyword] = useState("");
+  const [selectedRunId, setSelectedRunId] = useState("");
+  const [checkpoints, setCheckpoints] = useState(
+    createLoadable<RuntimeCheckpointPayload[]>([]),
+  );
+
+  useEffect(() => {
+    document.title = "模镜 - Runtime Ops 运维";
+  }, []);
+
+  const loadMcp = useCallback(async () => {
+    setMcpSessions((current) => ({ ...current, loading: true, error: "" }));
+    try {
+      const data = await readJson<{ sessions: McpSessionPayload[] }>("/api/mcp/sessions");
+      setMcpSessions(createLoadable(data.sessions ?? []));
+    } catch (error) {
+      setMcpSessions({
+        data: [],
+        error: error instanceof Error ? error.message : "MCP Runtime 加载失败",
+        loading: false,
+      });
+    }
+  }, []);
+
+  const loadTools = useCallback(async () => {
+    setRegistryTools((current) => ({ ...current, loading: true, error: "" }));
+    try {
+      const data = await readJson<{ tools: RegistryToolPayload[] }>("/api/registry/tools");
+      setRegistryTools(createLoadable(data.tools ?? []));
+    } catch (error) {
+      setRegistryTools({
+        data: [],
+        error: error instanceof Error ? error.message : "工具注册表加载失败",
+        loading: false,
+      });
+    }
+  }, []);
+
+  const loadRuns = useCallback(async () => {
+    setRuns((current) => ({ ...current, loading: true, error: "" }));
+    try {
+      const params = new URLSearchParams({ limit: "20" });
+      if (runType !== "all") params.set("run_type", runType);
+      if (status !== "all") params.set("status", status);
+      const data = await readJson<RuntimeRunPayload[]>(`/api/runtime/runs?${params.toString()}`);
+      setRuns(createLoadable(data ?? []));
+    } catch (error) {
+      setRuns({
+        data: [],
+        error: error instanceof Error ? error.message : "运行记录加载失败",
+        loading: false,
+      });
+    }
+  }, [runType, status]);
+
+  const loadSkills = useCallback(async () => {
+    setSkills((current) => ({ ...current, loading: true, error: "" }));
+    try {
+      const data = await readJson<{ skills: InstalledSkillPayload[] }>("/api/skills/installed");
+      setSkills(createLoadable(data.skills ?? []));
+    } catch (error) {
+      setSkills({
+        data: [],
+        error: error instanceof Error ? error.message : "Skill 状态加载失败",
+        loading: false,
+      });
+    }
+  }, []);
+
+  const refreshAll = useCallback(() => {
+    void loadMcp();
+    void loadTools();
+    void loadRuns();
+    void loadSkills();
+  }, [loadMcp, loadRuns, loadSkills, loadTools]);
+
+  useEffect(() => {
+    refreshAll();
+  }, [refreshAll]);
+
+  useEffect(() => {
+    if (!selectedRunId) {
+      setCheckpoints(createLoadable([]));
+      return;
+    }
+
+    let cancelled = false;
+    async function loadCheckpoints() {
+      setCheckpoints({ data: [], error: "", loading: true });
+      try {
+        const data = await readJson<RuntimeCheckpointPayload[]>(
+          `/api/runtime/runs/${selectedRunId}/checkpoints?limit=30`,
+        );
+        if (!cancelled) setCheckpoints(createLoadable(data ?? []));
+      } catch (error) {
+        if (!cancelled) {
+          setCheckpoints({
+            data: [],
+            error: error instanceof Error ? error.message : "Checkpoint 加载失败",
+            loading: false,
+          });
+        }
+      }
+    }
+
+    void loadCheckpoints();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedRunId]);
+
+  const normalizedKeyword = keyword.trim().toLowerCase();
+
+  const visibleSessions = useMemo(() => {
+    if (!normalizedKeyword) return mcpSessions.data;
+    return mcpSessions.data.filter((session) =>
+      [
+        session.session_id,
+        session.status,
+        ...(session.server_command ?? []),
+      ]
+        .join(" ")
+        .toLowerCase()
+        .includes(normalizedKeyword),
+    );
+  }, [mcpSessions.data, normalizedKeyword]);
+
+  const visibleTools = useMemo(() => {
+    if (!normalizedKeyword) return registryTools.data;
+    return registryTools.data.filter((tool) =>
+      [tool.name, tool.server_id, tool.session_id, tool.description]
+        .join(" ")
+        .toLowerCase()
+        .includes(normalizedKeyword),
+    );
+  }, [normalizedKeyword, registryTools.data]);
+
+  const visibleRuns = useMemo(() => {
+    if (!normalizedKeyword) return runs.data;
+    return runs.data.filter((run) =>
+      [
+        run.run_id,
+        run.run_type,
+        run.status,
+        run.title,
+        run.source_id,
+        run.parent_run_id,
+        metadataPreview(run.metadata),
+      ]
+        .join(" ")
+        .toLowerCase()
+        .includes(normalizedKeyword),
+    );
+  }, [normalizedKeyword, runs.data]);
+
+  const visibleSkills = useMemo(() => {
+    if (!normalizedKeyword) return skills.data;
+    return skills.data.filter((skill) =>
+      [skill.name, skill.description, skill.repo_url, skill.sub_path]
+        .join(" ")
+        .toLowerCase()
+        .includes(normalizedKeyword),
+    );
+  }, [normalizedKeyword, skills.data]);
+
+  const mcpStatus = useMemo(() => {
+    const active = mcpSessions.data.filter((session) =>
+      ["active", "connected", "running"].includes(normalizeStatus(session.status)),
+    ).length;
+    const failed = mcpSessions.data.filter((session) =>
+      ["failed", "error"].includes(normalizeStatus(session.status)),
+    ).length;
+    const closed = mcpSessions.data.filter((session) =>
+      ["closed", "stopped", "cancelled"].includes(normalizeStatus(session.status)),
+    ).length;
+    return {
+      active: active || mcpSessions.data.length,
+      closed,
+      failed,
+      total: mcpSessions.data.length,
+    };
+  }, [mcpSessions.data]);
+
+  return (
+    <PageContainer
+      activeResource="runtime"
+      maxWidthClassName="max-w-[1760px]"
+      sidebar={<Sidebar />}
+    >
+      <header className="mb-6 border-y border-hire-300/20 py-5">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+          <div>
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="rounded-full border border-hire-300/30 bg-hire-300/10 px-3 py-1 text-xs font-semibold text-hire-100">
+                Xpert Runtime Ops Beta
+              </span>
+              <span className="rounded-full border border-white/10 bg-white/[0.055] px-3 py-1 text-xs text-slate-300">
+                只读观测，不改变运行协议
+              </span>
+            </div>
+            <h1 className="mt-3 text-2xl font-semibold text-white sm:text-3xl">
+              Runtime 运维
+            </h1>
+            <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-400">
+              汇总 MCP Runtime、工具注册表、RunRegistry 与 Skill 安装状态。这里先做观测与跳转，管理操作继续保留在各自页面。
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <button
+              className="rounded-full bg-hire-300 px-4 py-2 text-sm font-semibold text-ink-950 transition hover:bg-hire-200"
+              onClick={refreshAll}
+              type="button"
+            >
+              刷新运行态
+            </button>
+            <Link
+              className="rounded-full border border-white/10 bg-white/[0.055] px-4 py-2 text-sm font-semibold text-slate-200 transition hover:border-hire-300/35 hover:bg-hire-300/10 hover:text-hire-100"
+              to="/mcps"
+            >
+              连接 MCP
+            </Link>
+          </div>
+        </div>
+      </header>
+
+      <section className="mb-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+        <MetricCard
+          hint={`${mcpStatus.active} 活跃 · ${mcpStatus.failed} 异常 · ${mcpStatus.closed} 已关闭`}
+          label="MCP 实例"
+          tone="brand"
+          value={mcpSessions.loading ? "..." : mcpStatus.total}
+        />
+        <MetricCard
+          hint="来自全局 ToolRegistry"
+          label="注册工具"
+          tone="success"
+          value={registryTools.loading ? "..." : registryTools.data.length}
+        />
+        <MetricCard
+          hint="最近 20 条，可按类型和状态过滤"
+          label="Runtime Runs"
+          tone="warning"
+          value={runs.loading ? "..." : runs.data.length}
+        />
+        <MetricCard
+          hint="来自本地 Skill runtime"
+          label="已安装 Skill"
+          tone="success"
+          value={skills.loading ? "..." : skills.data.length}
+        />
+        <MetricCard
+          hint="MCP/工具/Run/Skill 分区独立降级"
+          label="观测面板"
+          value="只读"
+        />
+      </section>
+
+      <section className="mb-5 grid gap-3 rounded-lg border border-white/10 bg-white/[0.045] p-4 lg:grid-cols-[minmax(0,1fr)_180px_180px_auto] lg:items-end">
+        <label className="block">
+          <span className="text-xs font-semibold text-slate-300">搜索运行资源</span>
+          <input
+            className="mt-2 h-11 w-full rounded-lg border border-white/10 bg-ink-950/72 px-3 text-sm text-white outline-none transition placeholder:text-slate-500 hover:border-white/20 focus:border-hire-300/70 focus:ring-4 focus:ring-hire-300/10"
+            onChange={(event) => setKeyword(event.target.value)}
+            placeholder="MCP session、工具名、run id、Skill"
+            type="search"
+            value={keyword}
+          />
+        </label>
+        <label className="block">
+          <span className="text-xs font-semibold text-slate-300">Run 类型</span>
+          <select
+            className="mt-2 h-11 w-full rounded-lg border border-white/10 bg-ink-950/72 px-3 text-sm text-white outline-none transition focus:border-hire-300/70"
+            onChange={(event) => setRunType(event.target.value as RuntimeFilter)}
+            value={runType}
+          >
+            {runTypeFilters.map((filter) => (
+              <option className="bg-ink-950" key={filter.value} value={filter.value}>
+                {filter.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="block">
+          <span className="text-xs font-semibold text-slate-300">Run 状态</span>
+          <select
+            className="mt-2 h-11 w-full rounded-lg border border-white/10 bg-ink-950/72 px-3 text-sm text-white outline-none transition focus:border-hire-300/70"
+            onChange={(event) => setStatus(event.target.value as StatusFilter)}
+            value={status}
+          >
+            {statusFilters.map((filter) => (
+              <option className="bg-ink-950" key={filter.value} value={filter.value}>
+                {filter.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <button
+          className="h-11 rounded-lg border border-hire-300/25 bg-hire-300/10 px-4 text-sm font-semibold text-hire-100 transition hover:bg-hire-300/20"
+          onClick={refreshAll}
+          type="button"
+        >
+          应用并刷新
+        </button>
+      </section>
+
+      <div className="grid gap-5 2xl:grid-cols-[minmax(0,1fr)_minmax(360px,0.58fr)]">
+        <div className="space-y-5">
+          <SectionShell
+            action={
+              <Link
+                className="rounded-full border border-white/10 bg-white/[0.055] px-3 py-1.5 text-xs font-semibold text-slate-200 transition hover:border-hire-300/35 hover:bg-hire-300/10 hover:text-hire-100"
+                to="/mcps"
+              >
+                管理 MCP
+              </Link>
+            }
+            description="查看由 MCP 管理器启动的 stdio runtime 实例。"
+            error={mcpSessions.error}
+            title="MCP Runtime"
+          >
+            {mcpSessions.loading ? (
+              <div className="p-4 text-sm text-slate-400">MCP runtime 加载中...</div>
+            ) : visibleSessions.length === 0 ? (
+              <div className="p-8 text-center">
+                <p className="text-base font-semibold text-white">未找到 MCP runtime</p>
+                <p className="mt-2 text-sm text-slate-400">
+                  在 `/mcps` 连接 MCP Server 后，runtime 实例会显示在这里。
+                </p>
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="min-w-full divide-y divide-white/10 text-sm">
+                  <thead className="bg-white/[0.04] text-left text-xs text-slate-400">
+                    <tr>
+                      <th className="px-4 py-3">Session</th>
+                      <th className="px-4 py-3">状态</th>
+                      <th className="px-4 py-3">工具</th>
+                      <th className="px-4 py-3">运行时间</th>
+                      <th className="px-4 py-3">命令</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-white/10">
+                    {visibleSessions.map((session) => (
+                      <tr className="align-top text-slate-300" key={session.session_id}>
+                        <td className="px-4 py-3 font-mono text-xs text-brand-100">
+                          {shortId(session.session_id)}
+                        </td>
+                        <td className="px-4 py-3">
+                          <span className={`rounded-full border px-2 py-0.5 text-[11px] font-semibold ${statusClass(session.status ?? "active")}`}>
+                            {session.status ?? "active"}
+                          </span>
+                        </td>
+                        <td className="px-4 py-3 text-white">{session.tools_count ?? 0}</td>
+                        <td className="px-4 py-3 text-slate-400">
+                          {Math.max(0, Math.floor(session.uptime_seconds ?? 0))}s
+                        </td>
+                        <td className="max-w-xl px-4 py-3 font-mono text-xs text-slate-500">
+                          {(session.server_command ?? []).join(" ") || "未记录"}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </SectionShell>
+
+          <SectionShell
+            action={
+              <span className="rounded-full border border-brand-300/25 bg-brand-300/10 px-3 py-1.5 text-xs font-semibold text-brand-100">
+                {visibleTools.length} 个工具
+              </span>
+            }
+            description="聚合已连接 MCP Server 暴露的工具，供 workflow/chat/runtime toolset 复用。"
+            error={registryTools.error}
+            title="Tool Registry"
+          >
+            {registryTools.loading ? (
+              <div className="p-4 text-sm text-slate-400">工具注册表加载中...</div>
+            ) : visibleTools.length === 0 ? (
+              <div className="p-8 text-center">
+                <p className="text-base font-semibold text-white">当前没有注册工具</p>
+                <p className="mt-2 text-sm text-slate-400">
+                  连接 MCP Server 后，工具会进入全局 ToolRegistry。
+                </p>
+              </div>
+            ) : (
+              <div className="grid gap-3 p-4 lg:grid-cols-2">
+                {visibleTools.slice(0, 12).map((tool) => (
+                  <article
+                    className="rounded-lg border border-white/10 bg-white/[0.045] p-3"
+                    key={`${tool.session_id ?? tool.server_id ?? "tool"}-${tool.name}`}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="truncate text-sm font-semibold text-white">{tool.name}</p>
+                        <p className="mt-1 text-xs text-brand-100">
+                          {tool.server_id ?? "unknown server"}
+                        </p>
+                      </div>
+                      <span className="shrink-0 rounded-full border border-white/10 bg-white/[0.055] px-2 py-0.5 text-[11px] text-slate-300">
+                        {schemaFieldCount(tool)} 参数
+                      </span>
+                    </div>
+                    <p className="mt-2 line-clamp-2 text-xs leading-5 text-slate-400">
+                      {tool.description || "暂无工具描述"}
+                    </p>
+                  </article>
+                ))}
+              </div>
+            )}
+          </SectionShell>
+        </div>
+
+        <div className="space-y-5">
+          <SectionShell
+            action={
+              <span className="rounded-full border border-hire-300/25 bg-hire-300/10 px-3 py-1.5 text-xs font-semibold text-hire-100">
+                {visibleRuns.length} 条
+              </span>
+            }
+            description="查看最近 workflow、chat、agent_task、agent_handoff 等运行记录。"
+            error={runs.error}
+            title="RunRegistry"
+          >
+            {runs.loading ? (
+              <div className="p-4 text-sm text-slate-400">运行记录加载中...</div>
+            ) : visibleRuns.length === 0 ? (
+              <div className="p-8 text-center">
+                <p className="text-base font-semibold text-white">暂无匹配运行记录</p>
+                <p className="mt-2 text-sm text-slate-400">
+                  运行工作流或开启 Chat Runtime Toolset 后会产生 run。
+                </p>
+              </div>
+            ) : (
+              <div className="divide-y divide-white/10">
+                {visibleRuns.map((run) => (
+                  <button
+                    className={`block w-full px-4 py-3 text-left transition hover:bg-white/[0.045] ${
+                      selectedRunId === run.run_id ? "bg-hire-300/10" : ""
+                    }`}
+                    key={run.run_id}
+                    onClick={() => setSelectedRunId((current) => (current === run.run_id ? "" : run.run_id))}
+                    type="button"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="truncate text-sm font-semibold text-white">
+                          {run.title || run.run_type}
+                        </p>
+                        <p className="mt-1 text-xs text-slate-500">
+                          {run.run_type} · {shortId(run.run_id)}
+                        </p>
+                      </div>
+                      <span className={`shrink-0 rounded-full border px-2 py-0.5 text-[11px] font-semibold ${statusClass(run.status)}`}>
+                        {run.status}
+                      </span>
+                    </div>
+                    <p className="mt-2 line-clamp-1 text-xs text-slate-400">
+                      {metadataPreview(run.metadata)}
+                    </p>
+                    <p className="mt-2 text-xs text-slate-500">
+                      更新于 {formatTime(run.updated_at ?? run.created_at)}
+                    </p>
+                  </button>
+                ))}
+              </div>
+            )}
+          </SectionShell>
+
+          {selectedRunId ? (
+            <section className="rounded-lg border border-hire-300/20 bg-hire-300/10 p-4">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <h2 className="text-sm font-semibold text-white">Checkpoint 摘要</h2>
+                  <p className="mt-1 text-xs text-slate-400">
+                    Run {shortId(selectedRunId)} 的最近 30 条 checkpoint。
+                  </p>
+                </div>
+                <button
+                  className="rounded-full border border-white/10 bg-white/[0.055] px-2.5 py-1 text-xs font-semibold text-slate-200 transition hover:bg-white/10"
+                  onClick={() => setSelectedRunId("")}
+                  type="button"
+                >
+                  关闭
+                </button>
+              </div>
+              {checkpoints.loading ? (
+                <p className="mt-4 text-sm text-slate-400">Checkpoint 加载中...</p>
+              ) : checkpoints.error ? (
+                <p className="mt-4 rounded-lg border border-rose-300/20 bg-rose-300/10 px-3 py-2 text-sm text-rose-100">
+                  {checkpoints.error}
+                </p>
+              ) : checkpoints.data.length === 0 ? (
+                <p className="mt-4 rounded-lg border border-white/10 bg-white/[0.045] px-3 py-2 text-sm text-slate-400">
+                  该 run 暂无 checkpoint。
+                </p>
+              ) : (
+                <div className="mt-4 space-y-2">
+                  {checkpoints.data.slice(0, 8).map((checkpoint) => (
+                    <article
+                      className="rounded-lg border border-white/10 bg-ink-950/60 p-3"
+                      key={checkpoint.checkpoint_id}
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <p className="text-xs font-semibold text-white">
+                          {checkpoint.title || checkpoint.event_type}
+                        </p>
+                        <span className={`rounded-full border px-2 py-0.5 text-[11px] font-semibold ${statusClass(checkpoint.severity)}`}>
+                          {checkpoint.severity}
+                        </span>
+                      </div>
+                      <p className="mt-1 text-xs text-brand-100">{checkpoint.event_type}</p>
+                      {checkpoint.summary ? (
+                        <p className="mt-2 line-clamp-2 text-xs leading-5 text-slate-400">
+                          {checkpoint.summary}
+                        </p>
+                      ) : null}
+                      <p className="mt-2 text-xs text-slate-500">
+                        {formatTime(checkpoint.created_at)}
+                      </p>
+                    </article>
+                  ))}
+                </div>
+              )}
+            </section>
+          ) : null}
+
+          <SectionShell
+            action={
+              <Link
+                className="rounded-full border border-white/10 bg-white/[0.055] px-3 py-1.5 text-xs font-semibold text-slate-200 transition hover:border-hire-300/35 hover:bg-hire-300/10 hover:text-hire-100"
+                to="/skills"
+              >
+                管理 Skill
+              </Link>
+            }
+            description="展示当前已安装 Skill，完整安装和卸载仍在 Skill 页面完成。"
+            error={skills.error}
+            title="Skill Runtime"
+          >
+            {skills.loading ? (
+              <div className="p-4 text-sm text-slate-400">Skill 状态加载中...</div>
+            ) : visibleSkills.length === 0 ? (
+              <div className="p-8 text-center">
+                <p className="text-base font-semibold text-white">暂无已安装 Skill</p>
+                <p className="mt-2 text-sm text-slate-400">
+                  前往 `/skills` 安装后，这里会显示运行态摘要。
+                </p>
+              </div>
+            ) : (
+              <div className="divide-y divide-white/10">
+                {visibleSkills.slice(0, 6).map((skill) => (
+                  <article className="px-4 py-3" key={skill.skill_id}>
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="truncate text-sm font-semibold text-white">
+                          {skill.name}
+                        </p>
+                        <p className="mt-1 line-clamp-1 text-xs text-slate-400">
+                          {skill.description || "暂无描述"}
+                        </p>
+                      </div>
+                      <span className="shrink-0 rounded-full border border-emerald-300/25 bg-emerald-300/10 px-2 py-0.5 text-[11px] font-semibold text-emerald-100">
+                        已安装
+                      </span>
+                    </div>
+                    <p className="mt-2 text-xs text-slate-500">
+                      {skill.repo_url ?? "本地 Skill"} {skill.installed_at ? `· ${formatTime(skill.installed_at)}` : ""}
+                    </p>
+                  </article>
+                ))}
+              </div>
+            )}
+          </SectionShell>
+        </div>
+      </div>
+    </PageContainer>
+  );
+}
