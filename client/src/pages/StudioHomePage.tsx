@@ -11,10 +11,20 @@ type WorkspaceCategory =
   | "workflow"
   | "knowledge"
   | "mcp"
+  | "api_tools"
+  | "database"
   | "skills"
   | "prompts"
   | "environment"
   | "runs";
+
+type ResourceTag =
+  | "all"
+  | "runnable"
+  | "creatable"
+  | "observable"
+  | "planned"
+  | "xpert";
 
 type Tone = "ready" | "partial" | "planned" | "error";
 
@@ -51,7 +61,8 @@ interface McpSessionPayload {
 
 interface RegistryToolPayload {
   name: string;
-  server_id: string;
+  description?: string | null;
+  server_id?: string;
 }
 
 interface InstalledSkillPayload {
@@ -69,21 +80,35 @@ interface RuntimeRunPayload {
   updated_at: number;
 }
 
+interface ResourceAction {
+  disabled?: boolean;
+  href?: string;
+  label: string;
+}
+
 interface ResourceCardModel {
-  actionLabel: string;
   category: Exclude<WorkspaceCategory, "all">;
   count: string;
   description: string;
   error?: string;
-  href: string;
   icon: string;
   id: string;
   items: string[];
   loading?: boolean;
   metricLabel: string;
+  primaryAction: ResourceAction;
+  secondaryAction?: ResourceAction;
   status: string;
+  tags: Exclude<ResourceTag, "all">[];
   title: string;
   tone: Tone;
+}
+
+interface QuickAction {
+  description: string;
+  href: string;
+  label: string;
+  title: string;
 }
 
 const categories: Array<{ key: WorkspaceCategory; label: string }> = [
@@ -92,10 +117,60 @@ const categories: Array<{ key: WorkspaceCategory; label: string }> = [
   { key: "workflow", label: "工作流" },
   { key: "knowledge", label: "知识库" },
   { key: "mcp", label: "MCP 工具集" },
+  { key: "api_tools", label: "API 工具" },
+  { key: "database", label: "数据库" },
   { key: "skills", label: "Skill" },
   { key: "prompts", label: "提示词" },
   { key: "environment", label: "环境" },
   { key: "runs", label: "运行记录" },
+];
+
+const tagFilters: Array<{ key: ResourceTag; label: string }> = [
+  { key: "all", label: "全部标签" },
+  { key: "runnable", label: "可运行" },
+  { key: "creatable", label: "可创建" },
+  { key: "observable", label: "可观测" },
+  { key: "planned", label: "待接入" },
+  { key: "xpert", label: "Xpert 对齐" },
+];
+
+const quickActions: QuickAction[] = [
+  {
+    title: "创建工作流",
+    description: "进入经典画布，编排 Agent、工具和知识节点。",
+    href: "/workflow",
+    label: "打开画布",
+  },
+  {
+    title: "生成工作流草稿",
+    description: "用元智能体把自然语言目标拆成可编辑工作流。",
+    href: "/agents/meta-agent",
+    label: "进入工作台",
+  },
+  {
+    title: "管理知识库",
+    description: "上传文档，查看知识流水线和引用锚点。",
+    href: "/rag",
+    label: "打开 RAG",
+  },
+  {
+    title: "连接 MCP",
+    description: "管理 MCP server 会话和可调用工具。",
+    href: "/mcps",
+    label: "管理 MCP",
+  },
+  {
+    title: "安装 Skill",
+    description: "查看已安装 Skill，并从仓库注册能力。",
+    href: "/skills",
+    label: "打开 Skill",
+  },
+  {
+    title: "查看运行运维",
+    description: "集中查看 MCP、工具、run 和 checkpoint。",
+    href: "/runtime",
+    label: "打开运维",
+  },
 ];
 
 const dateFormatter = new Intl.DateTimeFormat("zh-CN", {
@@ -140,14 +215,45 @@ function compactItems(items: string[]) {
   return items.filter(Boolean).slice(0, 4);
 }
 
+function countBy<T extends string>(items: T[]) {
+  return items.reduce<Record<string, number>>((result, item) => {
+    result[item] = (result[item] ?? 0) + 1;
+    return result;
+  }, {});
+}
+
+function ActionLink({ action, primary = false }: { action: ResourceAction; primary?: boolean }) {
+  const baseClass = primary
+    ? "rounded-full bg-hire-300 px-3 py-1.5 text-xs font-semibold text-ink-950 transition hover:bg-hire-200"
+    : "rounded-full border border-white/10 bg-white/[0.055] px-3 py-1.5 text-xs font-semibold text-slate-200 transition hover:border-hire-300/35 hover:bg-hire-300/10 hover:text-hire-100";
+
+  if (action.disabled || !action.href) {
+    return (
+      <button
+        className="cursor-not-allowed rounded-full border border-white/10 bg-white/[0.035] px-3 py-1.5 text-xs font-semibold text-slate-500"
+        disabled
+        type="button"
+      >
+        {action.label}
+      </button>
+    );
+  }
+
+  return (
+    <Link className={baseClass} to={action.href}>
+      {action.label}
+    </Link>
+  );
+}
+
 function ResourceCard({ card }: { card: ResourceCardModel }) {
   const visibleItems = compactItems(card.items);
 
   return (
-    <article className="rounded-lg border border-white/10 bg-ink-950/72 p-4 shadow-prism transition duration-200 hover:-translate-y-0.5 hover:border-hire-300/35 hover:bg-surface-900/88">
+    <article className="rounded-lg border border-white/10 bg-ink-950/72 p-4 transition duration-200 hover:-translate-y-0.5 hover:border-hire-300/35 hover:bg-surface-900/88">
       <div className="flex items-start justify-between gap-3">
         <div className="flex min-w-0 items-start gap-3">
-          <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-hire-300/25 bg-hire-300/10 text-sm font-semibold text-hire-100">
+          <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-hire-300/25 bg-hire-300/10 text-xs font-semibold text-hire-100">
             {card.icon}
           </span>
           <div className="min-w-0">
@@ -173,12 +279,21 @@ function ResourceCard({ card }: { card: ResourceCardModel }) {
             {card.loading ? "..." : card.count}
           </p>
         </div>
-        <Link
-          className="rounded-full border border-hire-300/25 bg-hire-300/10 px-3 py-1.5 text-xs font-semibold text-hire-100 transition hover:bg-hire-300/20"
-          to={card.href}
-        >
-          {card.actionLabel}
-        </Link>
+        <div className="flex flex-wrap justify-end gap-2">
+          {card.secondaryAction ? <ActionLink action={card.secondaryAction} /> : null}
+          <ActionLink action={card.primaryAction} primary />
+        </div>
+      </div>
+
+      <div className="mt-3 flex flex-wrap gap-1.5">
+        {card.tags.map((tag) => (
+          <span
+            className="rounded-full border border-white/10 bg-white/[0.04] px-2 py-0.5 text-[11px] text-slate-400"
+            key={tag}
+          >
+            {tagFilters.find((item) => item.key === tag)?.label ?? tag}
+          </span>
+        ))}
       </div>
 
       {card.error ? (
@@ -207,7 +322,7 @@ function WorkspaceSidebar() {
     <div>
       <p className="text-sm font-semibold text-white">工作空间</p>
       <p className="mt-2 text-sm leading-6 text-slate-400">
-        先把现有资源集中到一个入口，再逐步对齐 Xpert Studio、Toolset、知识流水线和运行运维。
+        先把资源入口、运行状态和近期对齐任务收拢到一个工作台，再逐步补齐 Xpert Studio、Toolset、知识流水线和 Runtime Ops。
       </p>
       <div className="mt-4 space-y-2">
         <Link
@@ -224,9 +339,9 @@ function WorkspaceSidebar() {
         </Link>
         <Link
           className="block rounded-lg border border-white/10 bg-white/[0.045] px-3 py-2 text-sm font-semibold text-slate-200 transition hover:border-hire-300/35 hover:bg-hire-300/10"
-          to="/mcps"
+          to="/runtime"
         >
-          管理 MCP 工具
+          打开 Runtime 运维
         </Link>
       </div>
     </div>
@@ -235,6 +350,7 @@ function WorkspaceSidebar() {
 
 export default function StudioHomePage() {
   const [activeCategory, setActiveCategory] = useState<WorkspaceCategory>("all");
+  const [activeTag, setActiveTag] = useState<ResourceTag>("all");
   const [searchTerm, setSearchTerm] = useState("");
   const [knowledgeBases, setKnowledgeBases] = useState(
     createLoadable<KnowledgeBasePayload[]>([]),
@@ -343,6 +459,12 @@ export default function StudioHomePage() {
     };
   }, []);
 
+  const runStats = useMemo(() => {
+    const byType = countBy(runtimeRuns.data.map((run) => run.run_type));
+    const byStatus = countBy(runtimeRuns.data.map((run) => run.status));
+    return { byStatus, byType };
+  }, [runtimeRuns.data]);
+
   const resourceCards = useMemo<ResourceCardModel[]>(() => {
     const knowledgeError =
       knowledgeBases.error || fileAssets.error || artifacts.error || "";
@@ -350,41 +472,41 @@ export default function StudioHomePage() {
 
     return [
       {
-        actionLabel: "查看专家",
         category: "agents",
         count: String(agents.length),
         description: "本地智能体市场与元智能体任务工作台入口。",
-        href: "/agents",
-        icon: "智",
+        icon: "AI",
         id: "agents",
         items: agents.slice(0, 4).map((agent) => agent.name),
         metricLabel: "可用智能体",
+        primaryAction: { href: "/agents", label: "浏览专家" },
+        secondaryAction: { href: "/agents/meta-agent", label: "任务工作台" },
         status: "可用",
+        tags: ["runnable", "creatable", "xpert"],
         title: "数字专家",
         tone: "ready",
       },
       {
-        actionLabel: "打开画布",
         category: "workflow",
         count: "2",
-        description: "经典画布与 native 实验线，承载 Agent、Handoff、Toolset 与 RAG 节点。",
-        href: "/workflow",
-        icon: "流",
+        description: "经典画布与 native 校验线，承载 Agent、Handoff、Toolset 与知识节点。",
+        icon: "FLOW",
         id: "workflow",
         items: ["classic /workflow", "workflow-native validate", "节点运行观测", "RunRegistry"],
         metricLabel: "工作流入口",
+        primaryAction: { href: "/workflow", label: "打开画布" },
+        secondaryAction: { href: "/agents/meta-agent", label: "生成草稿" },
         status: "部分实现",
+        tags: ["runnable", "creatable", "observable", "xpert"],
         title: "工作流",
         tone: "partial",
       },
       {
-        actionLabel: "打开知识库",
         category: "knowledge",
         count: knowledgeError ? "0" : String(knowledgeBases.data.length),
         description: "本地 RAG 知识库、FileAsset、Artifact 与 CitationAnchor 只读视图。",
         error: knowledgeError,
-        href: "/rag",
-        icon: "知",
+        icon: "KB",
         id: "knowledge",
         items: knowledgeError
           ? []
@@ -395,17 +517,17 @@ export default function StudioHomePage() {
             ],
         loading: knowledgeBases.loading || fileAssets.loading || artifacts.loading,
         metricLabel: "知识库",
+        primaryAction: { href: "/rag", label: "管理知识库" },
         status: "部分实现",
+        tags: ["runnable", "creatable", "observable", "xpert"],
         title: "知识库",
         tone: "partial",
       },
       {
-        actionLabel: "管理 MCP",
         category: "mcp",
         count: mcpError ? "0" : String(registryTools.data.length),
-        description: "MCP Server 会话、全局工具注册表和 Runtime Toolset 的入口。",
+        description: "MCP Server 会话、候选工具箱和全局工具注册表入口。",
         error: mcpError,
-        href: "/mcps",
         icon: "MCP",
         id: "mcp",
         items: mcpError
@@ -417,18 +539,48 @@ export default function StudioHomePage() {
             ],
         loading: mcpSessions.loading || registryTools.loading,
         metricLabel: "已注册工具",
+        primaryAction: { href: "/mcps", label: "连接 MCP" },
+        secondaryAction: { href: "/runtime", label: "查看运维" },
         status: "部分实现",
+        tags: ["runnable", "creatable", "observable", "xpert"],
         title: "MCP 工具集",
         tone: "partial",
       },
       {
-        actionLabel: "查看 Skill",
+        category: "api_tools",
+        count: "规划中",
+        description: "对齐 Xpert API 工具集资源。当前保留入口，不创建不可运行配置。",
+        icon: "API",
+        id: "api-tools",
+        items: ["OpenAPI 工具集", "鉴权配置", "请求模板", "响应 schema"],
+        metricLabel: "API 工具",
+        primaryAction: { disabled: true, label: "待接入" },
+        secondaryAction: { href: "/runtime", label: "看运行态" },
+        status: "待接入",
+        tags: ["planned", "xpert"],
+        title: "API 工具",
+        tone: "planned",
+      },
+      {
+        category: "database",
+        count: "规划中",
+        description: "对齐 Xpert 数据库资源页。当前不新增表结构和连接器。",
+        icon: "DB",
+        id: "database",
+        items: ["表列表", "状态", "版本", "消息", "激活时间"],
+        metricLabel: "数据库",
+        primaryAction: { disabled: true, label: "待接入" },
+        status: "待接入",
+        tags: ["planned", "xpert"],
+        title: "数据库",
+        tone: "planned",
+      },
+      {
         category: "skills",
         count: installedSkills.error ? "0" : String(installedSkills.data.length),
         description: "Skill 市场、已安装技能和仓库安装能力。",
         error: installedSkills.error,
-        href: "/skills",
-        icon: "技",
+        icon: "SK",
         id: "skills",
         items: installedSkills.error
           ? []
@@ -438,53 +590,55 @@ export default function StudioHomePage() {
             ],
         loading: installedSkills.loading,
         metricLabel: "已安装",
+        primaryAction: { href: "/skills", label: "安装 Skill" },
         status: "部分实现",
+        tags: ["creatable", "observable", "xpert"],
         title: "Skill",
         tone: "partial",
       },
       {
-        actionLabel: "查看提示词",
         category: "prompts",
         count: "规划中",
         description: "对齐 Xpert 提示词与 Slash Command 工作流，当前先保留入口。",
-        href: "/prompts",
-        icon: "词",
+        icon: "PR",
         id: "prompts",
         items: ["审查", "解释", "测试", "调试", "总结"],
         metricLabel: "工作区提示词",
+        primaryAction: { href: "/prompts", label: "查看提示词" },
         status: "待接入",
+        tags: ["planned", "xpert"],
         title: "提示词",
         tone: "planned",
       },
       {
-        actionLabel: "进入设置",
         category: "environment",
         count: "Default",
         description: "环境变量、模型网关和运行依赖入口，后续对齐 Xpert 环境页。",
-        href: "/settings",
         icon: "ENV",
         id: "environment",
         items: ["OpenRouter / newAPI 网关", "Docker runtime", "MCP / Skill 依赖"],
         metricLabel: "当前环境",
+        primaryAction: { href: "/settings", label: "进入设置" },
         status: "规划中",
+        tags: ["planned", "observable", "xpert"],
         title: "环境",
         tone: "planned",
       },
       {
-        actionLabel: "查看运行",
         category: "runs",
         count: runtimeRuns.error ? "0" : String(runtimeRuns.data.length),
-        description: "RunRegistry 内存态索引，汇总 workflow、chat、agent_task 与 handoff run。",
+        description: "Runtime Ops 只读入口，汇总 MCP、工具、Skill 与 workflow/chat/agent/handoff run。",
         error: runtimeRuns.error,
-        href: "/workflow",
-        icon: "观",
+        icon: "RUN",
         id: "runs",
         items: runtimeRuns.error
           ? []
           : runtimeRuns.data.map((run) => `${run.run_type} · ${run.status}`),
         loading: runtimeRuns.loading,
         metricLabel: "最近运行",
+        primaryAction: { href: "/runtime", label: "打开运维" },
         status: "可观测",
+        tags: ["observable", "xpert"],
         title: "运行记录",
         tone: "partial",
       },
@@ -504,15 +658,23 @@ export default function StudioHomePage() {
     return resourceCards.filter((card) => {
       const matchesCategory =
         activeCategory === "all" || card.category === activeCategory;
+      const matchesTag = activeTag === "all" || card.tags.includes(activeTag);
       const matchesSearch =
         normalizedSearch.length === 0 ||
-        [card.title, card.description, card.status, card.count, ...card.items]
+        [
+          card.title,
+          card.description,
+          card.status,
+          card.count,
+          ...card.items,
+          ...card.tags,
+        ]
           .join(" ")
           .toLowerCase()
           .includes(normalizedSearch);
-      return matchesCategory && matchesSearch;
+      return matchesCategory && matchesTag && matchesSearch;
     });
-  }, [activeCategory, resourceCards, searchTerm]);
+  }, [activeCategory, activeTag, resourceCards, searchTerm]);
 
   return (
     <PageContainer
@@ -527,35 +689,65 @@ export default function StudioHomePage() {
                 Xpert 对齐工作空间 Beta
               </span>
               <span className="rounded-full border border-white/10 bg-white/[0.055] px-3 py-1 text-xs text-slate-300">
-                React / FastAPI 原生实现
+                只读聚合视图
               </span>
             </div>
             <h1 className="mt-3 text-2xl font-semibold text-white sm:text-3xl">
               组织工作空间
             </h1>
             <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-400">
-              聚合智能体、知识库、工具集、Skill、提示词、环境和运行记录。这里先做只读总览，
-              后续再接 Xpert Studio 画布、节点注册表和配置侧栏。
+              聚合智能体、工作流、知识库、工具集、Skill、提示词、环境和运行记录。这里先补齐资源入口和观测摘要，后续再接 Workspace 权限与统一资源模型。
             </p>
           </div>
-          <div className="flex flex-wrap gap-2">
-            <Link
-              className="rounded-full bg-hire-300 px-4 py-2 text-sm font-semibold text-ink-950 transition hover:bg-hire-200"
-              to="/workflow"
-            >
-              创建工作流
-            </Link>
-            <Link
-              className="rounded-full border border-white/10 bg-white/[0.055] px-4 py-2 text-sm font-semibold text-slate-200 transition hover:border-hire-300/35 hover:bg-hire-300/10"
-              to="/agents/meta-agent"
-            >
-              打开任务工作台
-            </Link>
-          </div>
+          <label className="relative block w-full max-w-sm">
+            <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-xs font-semibold text-slate-400">
+              搜索
+            </span>
+            <input
+              className="h-11 w-full rounded-lg border border-white/10 bg-ink-950/72 pl-12 pr-3 text-sm text-white outline-none transition placeholder:text-slate-500 hover:border-white/20 focus:border-hire-300/70 focus:ring-4 focus:ring-hire-300/10"
+              onChange={(event) => setSearchTerm(event.target.value)}
+              placeholder="资源、状态、运行类型"
+              type="search"
+              value={searchTerm}
+            />
+          </label>
         </div>
       </header>
 
-      <section className="mb-5 grid gap-3 lg:grid-cols-[minmax(0,1fr)_320px] lg:items-center">
+      <section className="mb-6 rounded-lg border border-white/10 bg-white/[0.045] p-4">
+        <div className="flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
+          <div>
+            <h2 className="text-sm font-semibold text-white">快速创建 / 连接</h2>
+            <p className="mt-1 text-xs text-slate-400">
+              常用入口集中在这里，减少在多个资源页之间来回找入口。
+            </p>
+          </div>
+          <span className="text-xs text-slate-500">当前不创建新的后端资源模型</span>
+        </div>
+        <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+          {quickActions.map((action) => (
+            <Link
+              className="rounded-lg border border-white/10 bg-ink-950/55 p-3 transition hover:border-hire-300/35 hover:bg-hire-300/10"
+              key={action.title}
+              to={action.href}
+            >
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="text-sm font-semibold text-white">{action.title}</p>
+                  <p className="mt-1 line-clamp-2 text-xs leading-5 text-slate-400">
+                    {action.description}
+                  </p>
+                </div>
+                <span className="shrink-0 rounded-full border border-hire-300/25 bg-hire-300/10 px-2.5 py-1 text-[11px] font-semibold text-hire-100">
+                  {action.label}
+                </span>
+              </div>
+            </Link>
+          ))}
+        </div>
+      </section>
+
+      <section className="mb-5 space-y-3">
         <div className="flex min-w-0 flex-wrap gap-2">
           {categories.map((category) => (
             <button
@@ -572,18 +764,22 @@ export default function StudioHomePage() {
             </button>
           ))}
         </div>
-        <label className="relative block">
-          <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-xs font-semibold text-slate-400">
-            搜索
-          </span>
-          <input
-            className="h-11 w-full rounded-lg border border-white/10 bg-ink-950/72 pl-12 pr-3 text-sm text-white outline-none transition placeholder:text-slate-500 hover:border-white/20 focus:border-hire-300/70 focus:ring-4 focus:ring-hire-300/10"
-            onChange={(event) => setSearchTerm(event.target.value)}
-            placeholder="资源、状态、运行类型"
-            type="search"
-            value={searchTerm}
-          />
-        </label>
+        <div className="flex min-w-0 flex-wrap gap-2">
+          {tagFilters.map((tag) => (
+            <button
+              className={`rounded-full border px-3 py-1.5 text-xs font-semibold transition ${
+                activeTag === tag.key
+                  ? "border-hire-300/60 bg-hire-300/15 text-hire-100"
+                  : "border-white/10 bg-white/[0.035] text-slate-400 hover:border-hire-300/35 hover:text-hire-100"
+              }`}
+              key={tag.key}
+              onClick={() => setActiveTag(tag.key)}
+              type="button"
+            >
+              {tag.label}
+            </button>
+          ))}
+        </div>
       </section>
 
       <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_360px]">
@@ -598,14 +794,14 @@ export default function StudioHomePage() {
             <div className="rounded-lg border border-white/10 bg-white/[0.045] p-8 text-center">
               <p className="text-sm font-semibold text-white">没有匹配的资源</p>
               <p className="mt-2 text-sm text-slate-400">
-                换一个分类或搜索词，资源入口仍然保留在顶部导航中。
+                换一个分类、标签或搜索词，资源入口仍保留在顶部快速操作中。
               </p>
             </div>
           )}
         </section>
 
         <aside className="space-y-4">
-          <section className="rounded-lg border border-white/10 bg-ink-950/72 p-4 shadow-prism">
+          <section className="rounded-lg border border-white/10 bg-ink-950/72 p-4">
             <div className="flex items-center justify-between gap-3">
               <div>
                 <h2 className="text-sm font-semibold text-white">运行观测摘要</h2>
@@ -624,25 +820,54 @@ export default function StudioHomePage() {
             ) : runtimeRuns.loading ? (
               <p className="mt-4 text-sm text-slate-400">运行记录加载中...</p>
             ) : runtimeRuns.data.length > 0 ? (
-              <div className="mt-4 space-y-3">
-                {runtimeRuns.data.slice(0, 8).map((run) => (
-                  <article
-                    className="rounded-lg border border-white/10 bg-white/[0.045] p-3"
-                    key={run.run_id}
-                  >
-                    <div className="flex items-center justify-between gap-3">
-                      <p className="truncate text-xs font-semibold text-white">
-                        {run.title || run.run_type}
-                      </p>
-                      <span className="shrink-0 rounded-full border border-white/10 bg-white/[0.055] px-2 py-0.5 text-[11px] text-slate-300">
-                        {run.status}
-                      </span>
+              <div className="mt-4 space-y-4">
+                <div className="grid grid-cols-2 gap-2">
+                  {Object.entries(runStats.byStatus).slice(0, 4).map(([status, count]) => (
+                    <div
+                      className="rounded-lg border border-white/10 bg-white/[0.045] px-3 py-2"
+                      key={status}
+                    >
+                      <p className="text-[11px] text-slate-500">{status}</p>
+                      <p className="mt-1 text-lg font-semibold text-white">{count}</p>
                     </div>
-                    <p className="mt-2 text-xs text-slate-500">
-                      {run.run_type} · {formatRunTime(run.updated_at ?? run.created_at)}
-                    </p>
-                  </article>
-                ))}
+                  ))}
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {Object.entries(runStats.byType).slice(0, 5).map(([type, count]) => (
+                    <span
+                      className="rounded-full border border-white/10 bg-white/[0.04] px-2.5 py-1 text-[11px] text-slate-300"
+                      key={type}
+                    >
+                      {type}: {count}
+                    </span>
+                  ))}
+                </div>
+                <div className="space-y-3">
+                  {runtimeRuns.data.slice(0, 8).map((run) => (
+                    <article
+                      className="rounded-lg border border-white/10 bg-white/[0.045] p-3"
+                      key={run.run_id}
+                    >
+                      <div className="flex items-center justify-between gap-3">
+                        <p className="truncate text-xs font-semibold text-white">
+                          {run.title || run.run_type}
+                        </p>
+                        <span className="shrink-0 rounded-full border border-white/10 bg-white/[0.055] px-2 py-0.5 text-[11px] text-slate-300">
+                          {run.status}
+                        </span>
+                      </div>
+                      <p className="mt-2 text-xs text-slate-500">
+                        {run.run_type} · {formatRunTime(run.updated_at ?? run.created_at)}
+                      </p>
+                    </article>
+                  ))}
+                </div>
+                <Link
+                  className="inline-flex rounded-full border border-hire-300/25 bg-hire-300/10 px-3 py-1.5 text-xs font-semibold text-hire-100 transition hover:bg-hire-300/20"
+                  to="/runtime"
+                >
+                  查看 Runtime 运维
+                </Link>
               </div>
             ) : (
               <p className="mt-4 rounded-lg border border-white/10 bg-white/[0.04] px-3 py-2 text-xs text-slate-400">
@@ -654,10 +879,10 @@ export default function StudioHomePage() {
           <section className="rounded-lg border border-white/10 bg-white/[0.045] p-4">
             <h2 className="text-sm font-semibold text-white">下一步对齐</h2>
             <ol className="mt-3 space-y-2 text-xs leading-5 text-slate-400">
-              <li>1. 节点注册表与 Xpert 分类菜单</li>
-              <li>2. 智能体配置侧栏分区</li>
-              <li>3. 知识流水线可视化草稿</li>
-              <li>4. Runtime Ops 与环境观测</li>
+              <li>1. 评估节点注册表后端化，减少前后端元数据漂移。</li>
+              <li>2. 接入智能体侧栏中的重试、备用模型和输出结构语义。</li>
+              <li>3. 推进知识流水线草稿的可编辑与运行观测。</li>
+              <li>4. 补齐 Runtime Ops 的失败摘要、环境状态和重试入口。</li>
             </ol>
           </section>
         </aside>

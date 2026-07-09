@@ -6,6 +6,7 @@ import ExpertTeamPage from "./pages/ExpertTeamPage";
 import McpBrowserPage from "./pages/McpBrowserPage";
 import MetaAgentPage from "./pages/MetaAgentPage";
 import ModelListPage from "./pages/ModelListPage";
+import RuntimeOpsPage from "./pages/RuntimeOpsPage";
 import StudioHomePage from "./pages/StudioHomePage";
 import RagPage from "./pages/RagPage";
 import SkillBrowserPage from "./pages/SkillBrowserPage";
@@ -24,6 +25,7 @@ export default function App() {
       <Route element={<ExpertTeamPage />} path="/expert-team" />
       <Route element={<McpBrowserPage />} path="/mcps" />
       <Route element={<SkillBrowserPage />} path="/skills" />
+      <Route element={<RuntimeOpsPage />} path="/runtime" />
       <Route element={<ComingSoonPage resource="prompts" />} path="/prompts" />
       <Route element={<RagPage />} path="/rag" />
       <Route element={<ChatPage />} path="/chat/:modelId" />
