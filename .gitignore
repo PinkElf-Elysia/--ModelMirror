@@ -45,6 +45,7 @@ server/rag/storage/
 server/rag/uploads/
 server/skills/installed/
 server/skills/tmp/
+server/xperts/storage/
 server/mcp/installed/
 server/workflow_sandboxes/
 

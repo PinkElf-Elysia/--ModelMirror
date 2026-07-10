@@ -136,6 +136,18 @@ const tagFilters: Array<{ key: ResourceTag; label: string }> = [
 
 const quickActions: QuickAction[] = [
   {
+    title: "创建 Xpert",
+    description: "从默认 Agent 工作流开始，保存草稿并发布不可变版本。",
+    href: "/agents/studio/new",
+    label: "新建 Xpert",
+  },
+  {
+    title: "我的 Xpert",
+    description: "管理草稿、发布版本，并进入独立聊天页运行。",
+    href: "/agents/studio",
+    label: "打开 Studio",
+  },
+  {
     title: "创建工作流",
     description: "进入经典画布，编排 Agent、工具和知识节点。",
     href: "/workflow",
@@ -327,6 +339,12 @@ function WorkspaceSidebar() {
       <div className="mt-4 space-y-2">
         <Link
           className="block rounded-lg border border-hire-300/25 bg-hire-300/10 px-3 py-2 text-sm font-semibold text-hire-100 transition hover:bg-hire-300/20"
+          to="/agents/studio"
+        >
+          打开 Xpert Studio
+        </Link>
+        <Link
+          className="block rounded-lg border border-white/10 bg-white/[0.045] px-3 py-2 text-sm font-semibold text-slate-200 transition hover:border-hire-300/35 hover:bg-hire-300/10"
           to="/workflow"
         >
           打开工作流画布
@@ -696,7 +714,7 @@ export default function StudioHomePage() {
               组织工作空间
             </h1>
             <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-400">
-              聚合智能体、工作流、知识库、工具集、Skill、提示词、环境和运行记录。这里先补齐资源入口和观测摘要，后续再接 Workspace 权限与统一资源模型。
+              聚合可发布 Xpert、工作流、知识库、工具集、Skill、环境和运行记录。Xpert Studio 现在承载草稿、版本发布与直接运行闭环。
             </p>
           </div>
           <label className="relative block w-full max-w-sm">

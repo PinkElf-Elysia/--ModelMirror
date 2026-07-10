@@ -13,6 +13,10 @@ import SkillBrowserPage from "./pages/SkillBrowserPage";
 import SystemSettingsPage from "./pages/SystemSettingsPage";
 import WorkflowClassicPage from "./pages/WorkflowClassicPage";
 import WorkflowNativePage from "./pages/WorkflowNativePage";
+import XpertChatPage from "./pages/XpertChatPage";
+import XpertCreatePage from "./pages/XpertCreatePage";
+import XpertStudioIndexPage from "./pages/XpertStudioIndexPage";
+import XpertStudioPage from "./pages/XpertStudioPage";
 
 export default function App() {
   return (
@@ -22,6 +26,10 @@ export default function App() {
       <Route element={<StudioHomePage />} path="/studio" />
       <Route element={<AgentsPage />} path="/agents" />
       <Route element={<MetaAgentPage />} path="/agents/meta-agent" />
+      <Route element={<XpertStudioIndexPage />} path="/agents/studio" />
+      <Route element={<XpertCreatePage />} path="/agents/studio/new" />
+      <Route element={<XpertStudioPage />} path="/agents/studio/:xpertId" />
+      <Route element={<XpertChatPage />} path="/agents/xpert/:xpertId/chat" />
       <Route element={<ExpertTeamPage />} path="/expert-team" />
       <Route element={<McpBrowserPage />} path="/mcps" />
       <Route element={<SkillBrowserPage />} path="/skills" />

@@ -23,6 +23,16 @@ import {
 
 const platformCapabilities: PlatformCapability[] = [
   {
+    id: "xpert-studio",
+    icon: "XP",
+    title: "Xpert Studio",
+    summary: "创建、版本化发布并直接运行可组合的智能体应用。",
+    detail:
+      "复用经典工作流内核，把模型、Toolset、知识、中间件与 Handoff 组合成不可变发布版本。",
+    tag: "可发布智能体 · Beta",
+    eta: "已开放草稿、发布与聊天运行",
+  },
+  {
     id: "workflow-builder",
     icon: "流",
     title: "自定义工作流",
@@ -119,6 +129,10 @@ export default function AgentsPage() {
   }
 
   function openPlatformCapability(capability: PlatformCapability) {
+    if (capability.id === "xpert-studio") {
+      navigate("/agents/studio");
+      return;
+    }
     if (capability.id === "workflow-builder") {
       navigate("/workflow/new");
       return;
@@ -237,7 +251,7 @@ export default function AgentsPage() {
               3 个平台能力排队入场
             </span>
           </div>
-          <div className="grid gap-4 md:grid-cols-3">
+          <div className="grid gap-4 md:grid-cols-2 2xl:grid-cols-4">
             {platformCapabilities.map((capability) => (
               <PlatformCapabilityCard
                 capability={capability}

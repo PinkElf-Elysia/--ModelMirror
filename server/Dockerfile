@@ -25,6 +25,7 @@ COPY mcp ./mcp
 COPY registry ./registry
 COPY rag ./rag
 COPY skills ./skills
+COPY xperts ./xperts
 COPY workflow_native ./workflow_native
 COPY xpert_runtime ./xpert_runtime
 COPY meta_agent ./meta_agent

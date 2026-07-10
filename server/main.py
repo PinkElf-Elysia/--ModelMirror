@@ -38,6 +38,23 @@ except ModuleNotFoundError:
     from skills.api import router as skills_router
 
 try:
+    from server.xperts import (
+        XpertNotFoundError,
+        XpertRunRequest,
+        XpertStoreError,
+        get_xpert_store,
+        router as xperts_router,
+    )
+except ModuleNotFoundError:
+    from xperts import (
+        XpertNotFoundError,
+        XpertRunRequest,
+        XpertStoreError,
+        get_xpert_store,
+        router as xperts_router,
+    )
+
+try:
     from server.api.workflow_native import router as workflow_native_router
 except ModuleNotFoundError:
     from api.workflow_native import router as workflow_native_router
@@ -224,7 +241,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
     expose_headers=[
         "X-ModelMirror-Actual-Model",
@@ -237,6 +254,7 @@ app.add_middleware(
 app.include_router(dify_router)
 app.include_router(rag_router)
 app.include_router(skills_router)
+app.include_router(xperts_router)
 app.include_router(workflow_native_router)
 
 request_windows: dict[str, deque[float]] = defaultdict(deque)
@@ -2077,8 +2095,14 @@ async def generate_meta_agent_workflow(
         return JSONResponse(status_code=500, content={"error": str(exc)})
 
 
-@app.post("/api/workflow/run")
-async def run_workflow(payload: WorkflowRunRequest, request: Request):
+async def _run_workflow_response(
+    payload: WorkflowRunRequest,
+    request: Request,
+    *,
+    runtime_run_type: str = "workflow",
+    runtime_source_id: str | None = None,
+    runtime_metadata: dict[str, Any] | None = None,
+):
     requires_model = any(
         (node.data.get("kind") if isinstance(node.data.get("kind"), str) else node.type)
         in {"llm", "workflow_agent"}
@@ -2113,30 +2137,27 @@ async def run_workflow(payload: WorkflowRunRequest, request: Request):
 
     cleanup_expired_workflow_tasks()
     task_id = uuid.uuid4().hex
+    run_metadata = {
+        "workflow_id": payload.workflow.id,
+        "workflow_title": payload.workflow.title,
+        "workflow_task_id": task_id,
+        "node_count": len(payload.workflow.nodes),
+        "edge_count": len(payload.workflow.edges),
+    }
+    run_metadata.update(runtime_metadata or {})
     workflow_run = await run_registry.create_run(
-        "workflow",
+        runtime_run_type,  # type: ignore[arg-type]
         payload.workflow.title,
         status="running",
-        source_id=payload.workflow.id,
-        metadata={
-            "workflow_id": payload.workflow.id,
-            "workflow_title": payload.workflow.title,
-            "workflow_task_id": task_id,
-            "node_count": len(payload.workflow.nodes),
-            "edge_count": len(payload.workflow.edges),
-        },
+        source_id=runtime_source_id or payload.workflow.id,
+        metadata=run_metadata,
     )
     await run_registry.record_checkpoint(
         workflow_run.run_id,
-        event_type="workflow.started",
-        title="Workflow started",
+        event_type=f"{runtime_run_type}.started",
+        title="Xpert started" if runtime_run_type == "xpert" else "Workflow started",
         summary=payload.workflow.title,
-        metadata={
-            "workflow_id": payload.workflow.id,
-            "workflow_task_id": task_id,
-            "node_count": len(payload.workflow.nodes),
-            "edge_count": len(payload.workflow.edges),
-        },
+        metadata=run_metadata,
     )
     initial_queue = deque(sorted(start_node_ids, key=lambda node_id: order_index[node_id]))
     task_state: dict[str, Any] = {
@@ -2495,14 +2516,20 @@ async def run_workflow(payload: WorkflowRunRequest, request: Request):
             return output_text, events
 
         try:
-            yield sse_payload(
-                {
-                    "event": "workflow_meta",
-                    "task_id": task_id,
-                    "run_id": workflow_run.run_id,
-                    "ttl_seconds": WORKFLOW_TASK_TTL_SECONDS,
-                }
-            )
+            meta_event = {
+                "event": "workflow_meta",
+                "task_id": task_id,
+                "run_id": workflow_run.run_id,
+                "ttl_seconds": WORKFLOW_TASK_TTL_SECONDS,
+            }
+            if runtime_run_type == "xpert":
+                meta_event.update(
+                    {
+                        "xpert_id": run_metadata.get("xpert_id"),
+                        "xpert_version": run_metadata.get("xpert_version"),
+                    }
+                )
+            yield sse_payload(meta_event)
             while queue:
                 node_id = queue.popleft()
                 node = nodes_by_id[node_id]
@@ -4643,8 +4670,8 @@ async def run_workflow(payload: WorkflowRunRequest, request: Request):
             )
             await run_registry.record_checkpoint(
                 workflow_run.run_id,
-                event_type="workflow.completed",
-                title="Workflow completed",
+                event_type=f"{runtime_run_type}.completed",
+                title="Xpert completed" if runtime_run_type == "xpert" else "Workflow completed",
                 summary=f"final_output_length={len(final_output or '')}",
                 metadata={
                     "variables_count": len(variables),
@@ -4676,6 +4703,69 @@ async def run_workflow(payload: WorkflowRunRequest, request: Request):
         workflow_stream(),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+    )
+
+
+@app.post("/api/workflow/run")
+async def run_workflow(payload: WorkflowRunRequest, request: Request):
+    return await _run_workflow_response(payload, request)
+
+
+@app.post("/api/xperts/{xpert_id}/run")
+async def run_published_xpert(
+    xpert_id: str,
+    payload: XpertRunRequest,
+    request: Request,
+):
+    try:
+        store = get_xpert_store()
+        xpert = await asyncio.to_thread(store.get_xpert, xpert_id)
+        if xpert.status != "published":
+            raise HTTPException(
+                status_code=409,
+                detail="Xpert must be published before it can run.",
+            )
+        version = await asyncio.to_thread(store.get_version, xpert_id, payload.version)
+    except XpertNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except XpertStoreError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    history: list[dict[str, str]] = []
+    history_size = 0
+    for message in payload.messages[-20:]:
+        content = message.content.strip()
+        if not content:
+            continue
+        next_size = history_size + len(content)
+        if next_size > 40_000:
+            break
+        history.append({"role": message.role, "content": content})
+        history_size = next_size
+    history_json = json.dumps(history, ensure_ascii=False)
+
+    workflow_payload = version.workflow.model_dump(mode="json")
+    workflow_payload.pop("version", None)
+    workflow_payload.pop("source", None)
+    workflow = WorkflowPayload.model_validate(workflow_payload)
+    inputs = {
+        version.input_variable: payload.message,
+        version.history_variable: history_json,
+        "user_input": payload.message,
+        "conversation_history": history_json,
+    }
+    return await _run_workflow_response(
+        WorkflowRunRequest(workflow=workflow, inputs=inputs),
+        request,
+        runtime_run_type="xpert",
+        runtime_source_id=xpert.id,
+        runtime_metadata={
+            "xpert_id": xpert.id,
+            "xpert_slug": xpert.slug,
+            "xpert_version": version.version,
+            "xpert_draft_revision": version.draft_revision,
+            "xpert_checksum": version.checksum,
+        },
     )
 
 
@@ -4918,6 +5008,7 @@ async def list_runtime_runs(
 ):
     valid_run_types = {
         "workflow",
+        "xpert",
         "workflow_agent",
         "agent_task",
         "agent_handoff",
