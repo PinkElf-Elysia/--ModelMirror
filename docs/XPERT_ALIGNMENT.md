@@ -147,3 +147,9 @@ EvoAgentX 只保留为历史参考：此前元智能体曾借鉴其 `goal -> sub
 - Xpert：只参考领域模型、交互结构、文案分类、运行时分层和测试思路；默认参考改写，不复制源码。
 - EvoAgentX：只保留历史归因说明，不继续扩展其 runtime、optimizer、RAG、MCP toolkit 或 dependency graph。
 - 第三方仓库：可用于确认公开能力边界和术语，但不得直接搬运实现；如必须引用片段，先确认许可证兼容并在文档记录来源。
+
+## 2026-07-10 Update: XPERT-KNOWLEDGE-PIPELINE-03
+
+The `/rag` Knowledge Pipeline has moved from a read-only four-stage view to a saved draft config plus preflight observation flow. `GET /api/rag/pipeline/draft` now returns draft metadata, version, `updated_at`, `editable`, and safe per-stage config. `PATCH /api/rag/pipeline/draft/{kb_id}` persists safe draft config. `POST /api/rag/pipeline/draft/{kb_id}/preflight` returns stage checks, warnings, and document/artifact/chunk counts.
+
+Boundary: draft config is stored in RAG metadata only and does not affect upload, parsing, splitting, embedding, vector storage, retrieval, chat RAG, or `knowledge_citation`. Image understanding remains planned/disabled. Responses must not expose local file paths, full chunk text, embeddings, prompts, or secrets. Next route: `XPERT-WORKSPACE-RESOURCE-MODEL-01`.
