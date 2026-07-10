@@ -34,6 +34,18 @@ class UnsupportedDocumentError(RagError):
     """Raised when an uploaded file cannot be parsed."""
 
 
+class PipelineDraftValidationError(RagError):
+    """Raised when a knowledge pipeline draft config is invalid."""
+
+
+PIPELINE_STAGE_IDS = {
+    "data_source": "stage_data_source",
+    "processor": "stage_processor",
+    "chunker": "stage_chunker",
+    "image_understanding": "stage_image_understanding",
+}
+
+
 class RagService:
     """Local knowledge-base service with parsing, splitting, embedding and RAG query."""
 
@@ -109,6 +121,7 @@ class RagService:
         for doc_id in doc_ids:
             metadata["documents"].pop(doc_id, None)
         metadata["knowledge_bases"].pop(kb_id, None)
+        metadata["pipeline_drafts"].pop(kb_id, None)
         self._write_metadata(metadata)
         self.vector_store.delete_knowledge_base(kb_id)
         shutil.rmtree(self.uploads_dir / kb_id, ignore_errors=True)
@@ -219,9 +232,15 @@ class RagService:
         assets = [self._file_asset_payload(document) for document in documents]
         artifacts = [self._artifact_payload(document) for document in documents]
         chunk_count = sum(int(document.get("chunk_count", 0)) for document in documents)
+        draft = self._pipeline_draft_record(metadata, kb_id)
+        configs = draft["stages"]
 
-        return {
+        payload = {
             "kb_id": kb_id,
+            "draft_id": draft["draft_id"],
+            "version": int(draft.get("version", 1)),
+            "updated_at": float(draft.get("updated_at", metadata["knowledge_bases"][kb_id]["updated_at"])),
+            "editable": True,
             "stages": [
                 {
                     "id": "stage_data_source",
@@ -271,6 +290,117 @@ class RagService:
                     },
                 },
             ],
+        }
+        for stage in payload["stages"]:
+            stage["config"] = configs.get(str(stage["id"]), {})
+        return payload
+
+    def update_pipeline_draft(
+        self,
+        kb_id: str,
+        stage_updates: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Persist safe editable draft config without changing ingestion behavior."""
+
+        metadata = self._read_metadata()
+        self._ensure_kb_exists(metadata, kb_id)
+        draft = self._pipeline_draft_record(metadata, kb_id)
+        configs = {
+            stage_id: dict(config)
+            for stage_id, config in draft["stages"].items()
+        }
+
+        if not isinstance(stage_updates, dict):
+            raise PipelineDraftValidationError("pipeline draft stages must be an object.")
+
+        for raw_stage_id, raw_update in stage_updates.items():
+            stage_id = self._normalize_pipeline_stage_id(str(raw_stage_id))
+            if stage_id is None:
+                raise PipelineDraftValidationError(f"Unknown pipeline stage: {raw_stage_id}")
+            if not isinstance(raw_update, dict):
+                raise PipelineDraftValidationError(f"Stage update for {raw_stage_id} must be an object.")
+            raw_config = raw_update.get("config", raw_update)
+            if not isinstance(raw_config, dict):
+                raise PipelineDraftValidationError(f"Stage config for {raw_stage_id} must be an object.")
+            configs[stage_id] = self._validated_pipeline_stage_config(
+                stage_id,
+                configs[stage_id],
+                raw_config,
+            )
+
+        now = time.time()
+        metadata["pipeline_drafts"][kb_id] = {
+            "draft_id": draft["draft_id"],
+            "version": int(draft.get("version", 1)) + 1,
+            "updated_at": now,
+            "stages": configs,
+        }
+        self._write_metadata(metadata)
+        return self.get_pipeline_draft(kb_id)
+
+    def preflight_pipeline_draft(self, kb_id: str) -> dict[str, Any]:
+        """Return a safe preflight summary for the draft without executing it."""
+
+        draft = self.get_pipeline_draft(kb_id)
+        stages = {stage["id"]: stage for stage in draft["stages"]}
+        warnings: list[str] = []
+        stage_checks: list[dict[str, Any]] = []
+
+        document_count = int(stages["stage_data_source"]["metadata"].get("document_count", 0))
+        artifact_count = int(stages["stage_processor"]["metadata"].get("artifact_count", 0))
+        chunk_count = int(stages["stage_chunker"]["metadata"].get("chunk_count", 0))
+
+        if document_count == 0:
+            warnings.append("当前知识库还没有上传文档，流水线只能预检配置。")
+        if artifact_count == 0:
+            warnings.append("当前没有可检索 Artifact，上传文档后处理器才会产生结果。")
+        if chunk_count == 0:
+            warnings.append("当前没有 KnowledgeChunk，RAG 检索不会返回引用片段。")
+
+        for stage in draft["stages"]:
+            severity = "info"
+            status = stage["status"]
+            summary = stage["summary"]
+            if stage["id"] == "stage_data_source" and document_count == 0:
+                severity = "warning"
+                status = "empty"
+                summary = "数据源配置有效，但当前知识库没有上传文件。"
+            elif stage["id"] == "stage_processor" and artifact_count == 0:
+                severity = "warning"
+                status = "empty"
+                summary = "处理器配置有效，但当前没有解析产物。"
+            elif stage["id"] == "stage_chunker" and chunk_count == 0:
+                severity = "warning"
+                status = "empty"
+                summary = "分块器草稿配置有效，但当前没有已索引 chunk。"
+            elif stage["id"] == "stage_image_understanding":
+                status = "planned"
+                summary = "图像理解仍为规划占位，本轮不会执行。"
+
+            stage_checks.append(
+                {
+                    "id": stage["id"],
+                    "kind": stage["kind"],
+                    "title": stage["title"],
+                    "status": status,
+                    "severity": severity,
+                    "summary": summary,
+                    "metadata": {
+                        "item_count": stage["item_count"],
+                        "config": stage.get("config", {}),
+                    },
+                }
+            )
+
+        return {
+            "kb_id": kb_id,
+            "draft_id": draft["draft_id"],
+            "ready": not warnings,
+            "warnings": warnings,
+            "stage_checks": stage_checks,
+            "document_count": document_count,
+            "artifact_count": artifact_count,
+            "chunk_count": chunk_count,
         }
 
     def list_pipeline_artifact_chunks(self, artifact_id: str) -> list[dict[str, Any]]:
@@ -426,18 +556,161 @@ class RagService:
         best = results[0]
         return f"根据知识库资料：{best.text}"
 
+    def _default_pipeline_draft_stages(self) -> dict[str, dict[str, Any]]:
+        return {
+            "stage_data_source": {
+                "source_mode": "uploaded_files",
+                "allowed_extensions": sorted(supported_extensions()),
+            },
+            "stage_processor": {
+                "parser": "local_document_parser",
+            },
+            "stage_chunker": {
+                "strategy": "local_recursive_character_chunks",
+                "chunk_size": self.splitter.chunk_size,
+                "chunk_overlap": self.splitter.chunk_overlap,
+            },
+            "stage_image_understanding": {
+                "enabled": False,
+                "provider": "planned",
+            },
+        }
+
+    def _pipeline_draft_record(
+        self,
+        metadata: dict[str, Any],
+        kb_id: str,
+    ) -> dict[str, Any]:
+        defaults = self._default_pipeline_draft_stages()
+        draft = metadata["pipeline_drafts"].get(kb_id)
+        if not isinstance(draft, dict):
+            return {
+                "draft_id": f"draft_{kb_id}",
+                "version": 1,
+                "updated_at": metadata["knowledge_bases"][kb_id]["updated_at"],
+                "stages": defaults,
+            }
+
+        stages = {
+            stage_id: dict(config)
+            for stage_id, config in defaults.items()
+        }
+        raw_stages = draft.get("stages")
+        if isinstance(raw_stages, dict):
+            for raw_stage_id, raw_config in raw_stages.items():
+                stage_id = self._normalize_pipeline_stage_id(str(raw_stage_id))
+                if stage_id is None or not isinstance(raw_config, dict):
+                    continue
+                try:
+                    stages[stage_id] = self._validated_pipeline_stage_config(
+                        stage_id,
+                        stages[stage_id],
+                        raw_config,
+                    )
+                except PipelineDraftValidationError:
+                    continue
+
+        return {
+            "draft_id": str(draft.get("draft_id") or f"draft_{kb_id}"),
+            "version": int(draft.get("version") or 1),
+            "updated_at": float(draft.get("updated_at") or metadata["knowledge_bases"][kb_id]["updated_at"]),
+            "stages": stages,
+        }
+
+    def _normalize_pipeline_stage_id(self, value: str) -> str | None:
+        if value in self._default_pipeline_draft_stages():
+            return value
+        return PIPELINE_STAGE_IDS.get(value)
+
+    def _validated_pipeline_stage_config(
+        self,
+        stage_id: str,
+        current: dict[str, Any],
+        patch: dict[str, Any],
+    ) -> dict[str, Any]:
+        config = dict(current)
+        if stage_id == "stage_data_source":
+            source_mode = str(patch.get("source_mode", config.get("source_mode", "uploaded_files")))
+            if source_mode != "uploaded_files":
+                raise PipelineDraftValidationError("data_source.source_mode must be uploaded_files.")
+            config["source_mode"] = source_mode
+            config["allowed_extensions"] = sorted(supported_extensions())
+            return config
+
+        if stage_id == "stage_processor":
+            parser = str(patch.get("parser", config.get("parser", "local_document_parser")))
+            if parser != "local_document_parser":
+                raise PipelineDraftValidationError("processor.parser must be local_document_parser.")
+            config["parser"] = parser
+            return config
+
+        if stage_id == "stage_chunker":
+            strategy = str(
+                patch.get(
+                    "strategy",
+                    config.get("strategy", "local_recursive_character_chunks"),
+                )
+            )
+            if strategy != "local_recursive_character_chunks":
+                raise PipelineDraftValidationError(
+                    "chunker.strategy must be local_recursive_character_chunks."
+                )
+            chunk_size = self._coerce_int(
+                patch.get("chunk_size", config.get("chunk_size", self.splitter.chunk_size)),
+                "chunker.chunk_size",
+            )
+            chunk_overlap = self._coerce_int(
+                patch.get("chunk_overlap", config.get("chunk_overlap", self.splitter.chunk_overlap)),
+                "chunker.chunk_overlap",
+            )
+            if chunk_size < 100 or chunk_size > 4000:
+                raise PipelineDraftValidationError("chunker.chunk_size must be between 100 and 4000.")
+            if chunk_overlap < 0 or chunk_overlap >= chunk_size:
+                raise PipelineDraftValidationError(
+                    "chunker.chunk_overlap must be non-negative and smaller than chunk_size."
+                )
+            config.update(
+                {
+                    "strategy": strategy,
+                    "chunk_size": chunk_size,
+                    "chunk_overlap": chunk_overlap,
+                }
+            )
+            return config
+
+        if stage_id == "stage_image_understanding":
+            enabled = patch.get("enabled", config.get("enabled", False))
+            if enabled not in (False, None):
+                raise PipelineDraftValidationError(
+                    "image_understanding.enabled must stay false until the stage is implemented."
+                )
+            config["enabled"] = False
+            config["provider"] = "planned"
+            return config
+
+        raise PipelineDraftValidationError(f"Unknown pipeline stage: {stage_id}")
+
+    def _coerce_int(self, value: Any, field_name: str) -> int:
+        if isinstance(value, bool):
+            raise PipelineDraftValidationError(f"{field_name} must be an integer.")
+        try:
+            return int(value)
+        except (TypeError, ValueError) as exc:
+            raise PipelineDraftValidationError(f"{field_name} must be an integer.") from exc
+
     def _read_metadata(self) -> dict[str, dict[str, Any]]:
         if not self.metadata_path.exists():
-            return {"knowledge_bases": {}, "documents": {}}
+            return {"knowledge_bases": {}, "documents": {}, "pipeline_drafts": {}}
         try:
             data = json.loads(self.metadata_path.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
-            return {"knowledge_bases": {}, "documents": {}}
+            return {"knowledge_bases": {}, "documents": {}, "pipeline_drafts": {}}
         if not isinstance(data, dict):
-            return {"knowledge_bases": {}, "documents": {}}
+            return {"knowledge_bases": {}, "documents": {}, "pipeline_drafts": {}}
         return {
             "knowledge_bases": data.get("knowledge_bases") if isinstance(data.get("knowledge_bases"), dict) else {},
             "documents": data.get("documents") if isinstance(data.get("documents"), dict) else {},
+            "pipeline_drafts": data.get("pipeline_drafts") if isinstance(data.get("pipeline_drafts"), dict) else {},
         }
 
     def _write_metadata(self, metadata: dict[str, Any]) -> None:

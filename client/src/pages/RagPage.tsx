@@ -64,13 +64,44 @@ interface PipelineDraftStage {
   status: string;
   item_count: number;
   summary: string;
+  config?: Record<string, unknown>;
   metadata?: Record<string, unknown>;
 }
 
 interface PipelineDraftResponse {
   kb_id: string;
+  draft_id: string;
+  version: number;
+  updated_at: number;
+  editable: boolean;
   stages: PipelineDraftStage[];
   stage_count: number;
+}
+
+interface PipelinePreflightStage {
+  id: string;
+  kind: string;
+  title: string;
+  status: string;
+  severity: string;
+  summary: string;
+  metadata?: Record<string, unknown>;
+}
+
+interface PipelinePreflightResponse {
+  kb_id: string;
+  draft_id: string;
+  ready: boolean;
+  warnings: string[];
+  stage_checks: PipelinePreflightStage[];
+  document_count: number;
+  artifact_count: number;
+  chunk_count: number;
+}
+
+interface PipelineDraftEdits {
+  chunkSize: string;
+  chunkOverlap: string;
 }
 
 const MAX_FILE_BYTES = 10 * 1024 * 1024;
@@ -102,6 +133,19 @@ function stageStatusClass(status: string) {
   if (status === "ready") return "border-emerald-300/25 bg-emerald-300/10 text-emerald-100";
   if (status === "planned") return "border-amber-300/25 bg-amber-300/10 text-amber-100";
   return "border-white/10 bg-white/[0.06] text-slate-300";
+}
+
+function preflightSeverityClass(severity: string) {
+  if (severity === "warning") return "border-amber-300/25 bg-amber-300/10 text-amber-100";
+  if (severity === "error") return "border-rose-300/25 bg-rose-300/10 text-rose-100";
+  return "border-emerald-300/25 bg-emerald-300/10 text-emerald-100";
+}
+
+function formatConfigValue(value: unknown) {
+  if (Array.isArray(value)) return value.join(", ");
+  if (typeof value === "boolean") return value ? "true" : "false";
+  if (value == null) return "未设置";
+  return String(value);
 }
 
 async function readError(response: Response) {
@@ -146,6 +190,14 @@ export default function RagPage() {
   const [pipelineAssets, setPipelineAssets] = useState<PipelineAsset[]>([]);
   const [pipelineArtifacts, setPipelineArtifacts] = useState<PipelineArtifact[]>([]);
   const [pipelineDraft, setPipelineDraft] = useState<PipelineDraftResponse | null>(null);
+  const [pipelineDraftEdits, setPipelineDraftEdits] = useState<PipelineDraftEdits>({
+    chunkSize: "",
+    chunkOverlap: "",
+  });
+  const [pipelinePreflight, setPipelinePreflight] = useState<PipelinePreflightResponse | null>(null);
+  const [isSavingPipelineDraft, setIsSavingPipelineDraft] = useState(false);
+  const [isPreflightingPipeline, setIsPreflightingPipeline] = useState(false);
+  const [pipelineDraftNotice, setPipelineDraftNotice] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const selectedKnowledgeBase = useMemo(
@@ -169,6 +221,8 @@ export default function RagPage() {
       setPipelineAssets([]);
       setPipelineArtifacts([]);
       setPipelineDraft(null);
+      setPipelinePreflight(null);
+      setPipelineDraftNotice("");
       setPipelineError("");
       return;
     }
@@ -235,12 +289,83 @@ export default function RagPage() {
       setPipelineAssets(assetsData.assets);
       setPipelineArtifacts(artifactsData.artifacts);
       setPipelineDraft(draftData);
+      const chunkerStage = draftData.stages.find((stage) => stage.kind === "chunker");
+      setPipelineDraftEdits({
+        chunkSize: String(chunkerStage?.config?.chunk_size ?? 500),
+        chunkOverlap: String(chunkerStage?.config?.chunk_overlap ?? 50),
+      });
+      setPipelinePreflight(null);
+      setPipelineDraftNotice("");
     } catch (loadError) {
       setPipelineError(
         loadError instanceof Error ? loadError.message : "知识流水线加载失败。",
       );
     } finally {
       setIsLoadingPipeline(false);
+    }
+  }
+
+  async function savePipelineDraft() {
+    if (!selectedKbId || isSavingPipelineDraft) return;
+    setIsSavingPipelineDraft(true);
+    setPipelineError("");
+    setPipelineDraftNotice("");
+    try {
+      const chunkSize = Number(pipelineDraftEdits.chunkSize);
+      const chunkOverlap = Number(pipelineDraftEdits.chunkOverlap);
+      const response = await fetch(`/api/rag/pipeline/draft/${selectedKbId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          stages: {
+            stage_chunker: {
+              config: {
+                chunk_size: chunkSize,
+                chunk_overlap: chunkOverlap,
+              },
+            },
+          },
+        }),
+      });
+      if (!response.ok) throw new Error(await readError(response));
+      const draftData = (await response.json()) as PipelineDraftResponse;
+      const chunkerStage = draftData.stages.find((stage) => stage.kind === "chunker");
+      setPipelineDraft(draftData);
+      setPipelineDraftEdits({
+        chunkSize: String(chunkerStage?.config?.chunk_size ?? chunkSize),
+        chunkOverlap: String(chunkerStage?.config?.chunk_overlap ?? chunkOverlap),
+      });
+      setPipelinePreflight(null);
+      setPipelineDraftNotice("流水线草稿已保存；当前不会影响已上传文档、检索结果或聊天 RAG。");
+    } catch (saveError) {
+      setPipelineError(saveError instanceof Error ? saveError.message : "保存流水线草稿失败。");
+    } finally {
+      setIsSavingPipelineDraft(false);
+    }
+  }
+
+  async function runPipelinePreflight() {
+    if (!selectedKbId || isPreflightingPipeline) return;
+    setIsPreflightingPipeline(true);
+    setPipelineError("");
+    try {
+      const response = await fetch(`/api/rag/pipeline/draft/${selectedKbId}/preflight`, {
+        method: "POST",
+      });
+      if (!response.ok) throw new Error(await readError(response));
+      const preflightData = (await response.json()) as PipelinePreflightResponse;
+      setPipelinePreflight(preflightData);
+      setPipelineDraftNotice(
+        preflightData.ready
+          ? "预检通过：当前草稿配置与已入库文档元数据一致。"
+          : "预检完成：请查看 warnings 与 stage 检查结果。",
+      );
+    } catch (preflightError) {
+      setPipelineError(
+        preflightError instanceof Error ? preflightError.message : "运行流水线预检失败。",
+      );
+    } finally {
+      setIsPreflightingPipeline(false);
     }
   }
 
@@ -557,6 +682,47 @@ export default function RagPage() {
                           不改变上传、切分、向量化或检索行为。
                         </div>
 
+                        <div className="mt-3 rounded-lg border border-sky-300/20 bg-sky-300/10 p-3 text-xs leading-5 text-sky-100">
+                          当前为知识流水线草稿：配置可保存和预检，但不会改变上传、切分、向量化、检索或聊天 RAG 行为。
+                        </div>
+
+                        <div className="mt-3 flex flex-col gap-3 rounded-lg border border-white/10 bg-ink-950/35 p-3 sm:flex-row sm:items-center sm:justify-between">
+                          <div>
+                            <p className="text-xs font-semibold text-slate-300">
+                              草稿版本 v{pipelineDraft?.version ?? 1}
+                            </p>
+                            <p className="mt-1 text-xs text-slate-500">
+                              {pipelineDraft?.updated_at
+                                ? `更新于 ${formatDate(pipelineDraft.updated_at)}`
+                                : "尚未保存草稿"}
+                            </p>
+                          </div>
+                          <div className="flex flex-wrap gap-2">
+                            <button
+                              className="rounded-full border border-hire-300/25 bg-hire-300/10 px-3 py-1.5 text-xs font-semibold text-hire-100 transition hover:bg-hire-300/20 disabled:cursor-not-allowed disabled:opacity-50"
+                              disabled={isSavingPipelineDraft || !pipelineDraft}
+                              onClick={() => void savePipelineDraft()}
+                              type="button"
+                            >
+                              {isSavingPipelineDraft ? "保存中..." : "保存草稿"}
+                            </button>
+                            <button
+                              className="rounded-full border border-white/10 bg-white/[0.06] px-3 py-1.5 text-xs font-semibold text-slate-200 transition hover:bg-white/[0.1] disabled:cursor-not-allowed disabled:opacity-50"
+                              disabled={isPreflightingPipeline || !pipelineDraft}
+                              onClick={() => void runPipelinePreflight()}
+                              type="button"
+                            >
+                              {isPreflightingPipeline ? "预检中..." : "运行预检"}
+                            </button>
+                          </div>
+                        </div>
+
+                        {pipelineDraftNotice ? (
+                          <div className="mt-3 rounded-lg border border-emerald-300/20 bg-emerald-300/10 p-3 text-xs leading-5 text-emerald-100">
+                            {pipelineDraftNotice}
+                          </div>
+                        ) : null}
+
                         <div className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
                           {(pipelineDraft?.stages ?? []).map((stage, index) => (
                             <div
@@ -586,8 +752,147 @@ export default function RagPage() {
                               <p className="mt-2 min-h-10 text-xs leading-5 text-slate-400">
                                 {stage.summary}
                               </p>
+                              {stage.config ? (
+                                <dl className="mt-3 space-y-1 border-t border-white/10 pt-3 text-[11px] text-slate-400">
+                                  {Object.entries(stage.config).map(([key, value]) => (
+                                    <div
+                                      className="flex items-start justify-between gap-2"
+                                      key={key}
+                                    >
+                                      <dt className="shrink-0 text-slate-500">{key}</dt>
+                                      <dd className="break-all text-right text-slate-300">
+                                        {formatConfigValue(value)}
+                                      </dd>
+                                    </div>
+                                  ))}
+                                </dl>
+                              ) : null}
                             </div>
                           ))}
+                        </div>
+
+                        <div className="mt-3 grid gap-3 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
+                          <div className="rounded-lg border border-white/10 bg-white/[0.025] p-4">
+                            <div className="flex items-start justify-between gap-3">
+                              <div>
+                                <p className="text-sm font-semibold text-white">草稿配置</p>
+                                <p className="mt-1 text-xs leading-5 text-slate-400">
+                                  仅保存未来配置，不会重跑当前上传、切分或向量化流程。
+                                </p>
+                              </div>
+                              <span className="rounded-full border border-white/10 bg-white/[0.06] px-2 py-0.5 text-[11px] font-semibold text-slate-300">
+                                editable
+                              </span>
+                            </div>
+                            <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                              <label className="block rounded-lg border border-white/10 bg-ink-950/35 p-3">
+                                <span className="text-xs font-semibold text-slate-300">
+                                  分块大小
+                                </span>
+                                <input
+                                  className="mt-2 w-full rounded-lg border border-white/10 bg-white/[0.06] px-3 py-2 text-sm text-white outline-none transition focus:border-hire-300/50 focus:ring-4 focus:ring-hire-300/10"
+                                  max={4000}
+                                  min={100}
+                                  onChange={(event) =>
+                                    setPipelineDraftEdits((current) => ({
+                                      ...current,
+                                      chunkSize: event.target.value,
+                                    }))
+                                  }
+                                  type="number"
+                                  value={pipelineDraftEdits.chunkSize}
+                                />
+                              </label>
+                              <label className="block rounded-lg border border-white/10 bg-ink-950/35 p-3">
+                                <span className="text-xs font-semibold text-slate-300">
+                                  重叠字符
+                                </span>
+                                <input
+                                  className="mt-2 w-full rounded-lg border border-white/10 bg-white/[0.06] px-3 py-2 text-sm text-white outline-none transition focus:border-hire-300/50 focus:ring-4 focus:ring-hire-300/10"
+                                  min={0}
+                                  onChange={(event) =>
+                                    setPipelineDraftEdits((current) => ({
+                                      ...current,
+                                      chunkOverlap: event.target.value,
+                                    }))
+                                  }
+                                  type="number"
+                                  value={pipelineDraftEdits.chunkOverlap}
+                                />
+                              </label>
+                            </div>
+                            <div className="mt-3 grid gap-2 text-xs text-slate-400 sm:grid-cols-2">
+                              <div className="rounded-lg border border-white/10 bg-white/[0.03] p-3">
+                                数据源锁定为 uploaded_files
+                              </div>
+                              <div className="rounded-lg border border-white/10 bg-white/[0.03] p-3">
+                                处理器锁定为 local_document_parser
+                              </div>
+                              <div className="rounded-lg border border-white/10 bg-white/[0.03] p-3 sm:col-span-2">
+                                图像理解仍为 planned/disabled，占位展示但不可启用。
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="rounded-lg border border-white/10 bg-white/[0.025] p-4">
+                            <div className="flex items-center justify-between gap-3">
+                              <p className="text-sm font-semibold text-white">预检结果</p>
+                              {pipelinePreflight ? (
+                                <span
+                                  className={`rounded-full border px-2 py-0.5 text-[11px] font-semibold ${
+                                    pipelinePreflight.ready
+                                      ? "border-emerald-300/25 bg-emerald-300/10 text-emerald-100"
+                                      : "border-amber-300/25 bg-amber-300/10 text-amber-100"
+                                  }`}
+                                >
+                                  {pipelinePreflight.ready ? "ready" : "warnings"}
+                                </span>
+                              ) : null}
+                            </div>
+                            {!pipelinePreflight ? (
+                              <p className="mt-3 text-xs leading-5 text-slate-400">
+                                点击“运行预检”检查当前草稿与已入库文档、Artifact、Chunk 的一致性。
+                              </p>
+                            ) : (
+                              <div className="mt-3 space-y-3">
+                                {pipelinePreflight.warnings.length > 0 ? (
+                                  <div className="rounded-lg border border-amber-300/20 bg-amber-300/10 p-3 text-xs leading-5 text-amber-100">
+                                    {pipelinePreflight.warnings.map((warning) => (
+                                      <p key={warning}>{warning}</p>
+                                    ))}
+                                  </div>
+                                ) : (
+                                  <div className="rounded-lg border border-emerald-300/20 bg-emerald-300/10 p-3 text-xs text-emerald-100">
+                                    当前草稿通过预检。
+                                  </div>
+                                )}
+                                <div className="space-y-2">
+                                  {pipelinePreflight.stage_checks.map((check) => (
+                                    <div
+                                      className="rounded-lg border border-white/10 bg-ink-950/35 p-3"
+                                      key={check.id}
+                                    >
+                                      <div className="flex items-center justify-between gap-3">
+                                        <p className="text-xs font-semibold text-white">
+                                          {check.title}
+                                        </p>
+                                        <span
+                                          className={`rounded-full border px-2 py-0.5 text-[11px] font-semibold ${preflightSeverityClass(
+                                            check.severity,
+                                          )}`}
+                                        >
+                                          {check.severity}
+                                        </span>
+                                      </div>
+                                      <p className="mt-2 text-xs leading-5 text-slate-400">
+                                        {check.summary}
+                                      </p>
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+                          </div>
                         </div>
 
                         <div className="mt-3 grid gap-3 sm:grid-cols-3">

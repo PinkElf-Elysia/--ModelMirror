@@ -97,6 +97,10 @@ async def test_rag_pipeline_draft_empty_knowledge_base(client: httpx.AsyncClient
     assert response.status_code == 200, response.text
     data = response.json()
     assert data["kb_id"] == kb_id
+    assert data["draft_id"] == f"draft_{kb_id}"
+    assert data["version"] == 1
+    assert data["editable"] is True
+    assert isinstance(data["updated_at"], float)
     assert data["stage_count"] == 4
 
     stages = {stage["kind"]: stage for stage in data["stages"]}
@@ -109,8 +113,12 @@ async def test_rag_pipeline_draft_empty_knowledge_base(client: httpx.AsyncClient
     assert stages["data_source"]["item_count"] == 0
     assert stages["processor"]["item_count"] == 0
     assert stages["chunker"]["item_count"] == 0
+    assert stages["chunker"]["config"]["strategy"] == "local_recursive_character_chunks"
+    assert stages["chunker"]["config"]["chunk_size"] == 500
+    assert stages["chunker"]["config"]["chunk_overlap"] == 50
     assert stages["image_understanding"]["status"] == "planned"
     assert stages["image_understanding"]["metadata"]["enabled"] is False
+    assert stages["image_understanding"]["config"]["enabled"] is False
 
 
 @pytest.mark.asyncio
@@ -132,6 +140,120 @@ async def test_rag_pipeline_draft_counts_and_safe_fields(client: httpx.AsyncClie
     assert stages["chunker"]["metadata"]["chunk_count"] == document["chunk_count"]
 
     serialized = str(data).lower()
+    assert "stored_path" not in serialized
+    assert "embedding" not in serialized
+    assert "modelmirror knowledge pipeline maps uploaded files" not in serialized
+
+
+@pytest.mark.asyncio
+async def test_rag_pipeline_draft_patch_persists_chunker_config(
+    client: httpx.AsyncClient,
+) -> None:
+    kb_id = await create_kb(client, "editable pipeline draft")
+
+    response = await client.patch(
+        f"/api/rag/pipeline/draft/{kb_id}",
+        json={
+            "stages": {
+                "stage_chunker": {
+                    "config": {
+                        "chunk_size": 800,
+                        "chunk_overlap": 120,
+                    }
+                }
+            }
+        },
+    )
+    assert response.status_code == 200, response.text
+    patched = response.json()
+    assert patched["version"] == 2
+    chunker = {stage["kind"]: stage for stage in patched["stages"]}["chunker"]
+    assert chunker["config"]["chunk_size"] == 800
+    assert chunker["config"]["chunk_overlap"] == 120
+
+    response = await client.get(f"/api/rag/pipeline/draft?kb_id={kb_id}")
+    assert response.status_code == 200, response.text
+    data = response.json()
+    chunker = {stage["kind"]: stage for stage in data["stages"]}["chunker"]
+    assert data["version"] == 2
+    assert chunker["config"]["chunk_size"] == 800
+    assert chunker["config"]["chunk_overlap"] == 120
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"chunk_size": 99, "chunk_overlap": 10},
+        {"chunk_size": 4001, "chunk_overlap": 10},
+        {"chunk_size": 200, "chunk_overlap": 200},
+        {"chunk_size": 200, "chunk_overlap": -1},
+    ],
+)
+async def test_rag_pipeline_draft_rejects_invalid_chunker_config(
+    client: httpx.AsyncClient,
+    config: dict,
+) -> None:
+    kb_id = await create_kb(client, "invalid pipeline draft")
+
+    response = await client.patch(
+        f"/api/rag/pipeline/draft/{kb_id}",
+        json={"stages": {"stage_chunker": {"config": config}}},
+    )
+    assert response.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_rag_pipeline_draft_rejects_enabled_image_understanding(
+    client: httpx.AsyncClient,
+) -> None:
+    kb_id = await create_kb(client, "image stage draft")
+
+    response = await client.patch(
+        f"/api/rag/pipeline/draft/{kb_id}",
+        json={
+            "stages": {
+                "stage_image_understanding": {
+                    "config": {"enabled": True},
+                }
+            }
+        },
+    )
+    assert response.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_rag_pipeline_draft_preflight_empty_and_with_document(
+    client: httpx.AsyncClient,
+) -> None:
+    kb_id = await create_kb(client, "pipeline preflight")
+
+    response = await client.post(f"/api/rag/pipeline/draft/{kb_id}/preflight")
+    assert response.status_code == 200, response.text
+    empty = response.json()
+    assert empty["ready"] is False
+    assert empty["document_count"] == 0
+    assert empty["artifact_count"] == 0
+    assert empty["chunk_count"] == 0
+    assert empty["warnings"]
+    assert {item["kind"] for item in empty["stage_checks"]} == {
+        "data_source",
+        "processor",
+        "chunker",
+        "image_understanding",
+    }
+
+    await upload_pipeline_document(client, kb_id)
+    response = await client.post(f"/api/rag/pipeline/draft/{kb_id}/preflight")
+    assert response.status_code == 200, response.text
+    populated = response.json()
+    assert populated["ready"] is True
+    assert populated["document_count"] == 1
+    assert populated["artifact_count"] == 1
+    assert populated["chunk_count"] >= 1
+    assert populated["warnings"] == []
+
+    serialized = str(populated).lower()
     assert "stored_path" not in serialized
     assert "embedding" not in serialized
     assert "modelmirror knowledge pipeline maps uploaded files" not in serialized
@@ -175,3 +297,12 @@ async def test_rag_pipeline_missing_resources_return_404(client: httpx.AsyncClie
 
     draft_response = await client.get("/api/rag/pipeline/draft?kb_id=missing")
     assert draft_response.status_code == 404
+
+    draft_patch_response = await client.patch(
+        "/api/rag/pipeline/draft/missing",
+        json={"stages": {"stage_chunker": {"config": {"chunk_size": 500}}}},
+    )
+    assert draft_patch_response.status_code == 404
+
+    preflight_response = await client.post("/api/rag/pipeline/draft/missing/preflight")
+    assert preflight_response.status_code == 404

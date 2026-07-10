@@ -357,3 +357,15 @@ curl -X POST http://localhost:8000/api/rag/pipeline/citations \
 前端 `/rag` 的“知识流水线 Beta”折叠区已展示当前知识库的数据源、处理器、分块器、图像理解 stage 草稿，并保留 assets / artifacts / chunks 计数和最近 artifacts。后续知识类工作流节点、Agent 引用和 citation 面板会基于这层 schema 继续扩展。
 
 最后更新日期：2026-07-09
+
+## 2026-07-10 Update: Knowledge Pipeline Draft Config And Preflight
+
+The local RAG pipeline now exposes a safe editable draft layer:
+
+- `GET /api/rag/pipeline/draft?kb_id=...` returns `draft_id`, `version`, `updated_at`, `editable`, stages, counts, and safe stage config.
+- `PATCH /api/rag/pipeline/draft/{kb_id}` persists safe draft fields only: uploaded file source mode, local parser, local recursive character chunking, `chunk_size`, and `chunk_overlap`.
+- `POST /api/rag/pipeline/draft/{kb_id}/preflight` returns readiness, warnings, per-stage checks, and document/artifact/chunk counts.
+
+Validation boundaries: `chunk_size` must stay between 100 and 4000, `chunk_overlap` must be non-negative and smaller than `chunk_size`, and image understanding cannot be enabled yet. The draft layer does not change upload, parsing, splitting, embedding, vector storage, retrieval, chat RAG, or workflow `knowledge_citation` behavior. Responses must not expose local stored paths, full chunk text, embeddings, prompts, tools outputs, or secrets.
+
+Last updated: 2026-07-10

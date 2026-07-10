@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 from .rag_service import (
     DocumentNotFoundError,
     KnowledgeBaseNotFoundError,
+    PipelineDraftValidationError,
     RagService,
     UnsupportedDocumentError,
 )
@@ -121,13 +122,47 @@ class PipelineDraftStagePayload(BaseModel):
     status: str
     item_count: int
     summary: str
+    config: dict[str, Any] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class PipelineDraftResponse(BaseModel):
     kb_id: str
+    draft_id: str
+    version: int
+    updated_at: float
+    editable: bool
     stages: list[PipelineDraftStagePayload]
     stage_count: int
+
+
+class PipelineDraftStageUpdate(BaseModel):
+    config: dict[str, Any] = Field(default_factory=dict)
+
+
+class PipelineDraftUpdateRequest(BaseModel):
+    stages: dict[str, PipelineDraftStageUpdate] = Field(default_factory=dict)
+
+
+class PipelinePreflightStagePayload(BaseModel):
+    id: str
+    kind: str
+    title: str
+    status: str
+    severity: str
+    summary: str
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class PipelineDraftPreflightResponse(BaseModel):
+    kb_id: str
+    draft_id: str
+    ready: bool
+    warnings: list[str]
+    stage_checks: list[PipelinePreflightStagePayload]
+    document_count: int
+    artifact_count: int
+    chunk_count: int
 
 
 class CitationAnchorPayload(BaseModel):
@@ -279,8 +314,65 @@ async def get_pipeline_draft(kb_id: str) -> PipelineDraftResponse:
         ]
         return PipelineDraftResponse(
             kb_id=str(draft["kb_id"]),
+            draft_id=str(draft["draft_id"]),
+            version=int(draft["version"]),
+            updated_at=float(draft["updated_at"]),
+            editable=bool(draft["editable"]),
             stages=stages,
             stage_count=len(stages),
+        )
+    except KnowledgeBaseNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.patch("/pipeline/draft/{kb_id}", response_model=PipelineDraftResponse)
+async def update_pipeline_draft(
+    kb_id: str,
+    payload: PipelineDraftUpdateRequest,
+) -> PipelineDraftResponse:
+    try:
+        draft = get_rag_service().update_pipeline_draft(
+            kb_id,
+            {
+                stage_id: stage_update.model_dump()
+                for stage_id, stage_update in payload.stages.items()
+            },
+        )
+        stages = [
+            PipelineDraftStagePayload.model_validate(item)
+            for item in draft.get("stages", [])
+        ]
+        return PipelineDraftResponse(
+            kb_id=str(draft["kb_id"]),
+            draft_id=str(draft["draft_id"]),
+            version=int(draft["version"]),
+            updated_at=float(draft["updated_at"]),
+            editable=bool(draft["editable"]),
+            stages=stages,
+            stage_count=len(stages),
+        )
+    except KnowledgeBaseNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PipelineDraftValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/pipeline/draft/{kb_id}/preflight", response_model=PipelineDraftPreflightResponse)
+async def preflight_pipeline_draft(kb_id: str) -> PipelineDraftPreflightResponse:
+    try:
+        preflight = get_rag_service().preflight_pipeline_draft(kb_id)
+        return PipelineDraftPreflightResponse(
+            kb_id=str(preflight["kb_id"]),
+            draft_id=str(preflight["draft_id"]),
+            ready=bool(preflight["ready"]),
+            warnings=list(preflight["warnings"]),
+            stage_checks=[
+                PipelinePreflightStagePayload.model_validate(item)
+                for item in preflight["stage_checks"]
+            ],
+            document_count=int(preflight["document_count"]),
+            artifact_count=int(preflight["artifact_count"]),
+            chunk_count=int(preflight["chunk_count"]),
         )
     except KnowledgeBaseNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

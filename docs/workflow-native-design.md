@@ -613,3 +613,5 @@ Classic workflow 新增 `knowledge_citation` 节点，用于把本地 RAG Knowle
 ```
 
 节点会登记 `knowledge_citation` 子 run，`parent_run_id` 指向 workflow run，并写入 `knowledge_citation.started/completed/failed` checkpoint。metadata 只保存知识库 ID、变量名、输出变量、引用数量等摘要，不返回本地文件路径、embedding、完整上传文件内容或密钥。该节点与既有 `knowledge_retrieval` 并存，不改变 `/api/rag/query`、聊天 RAG 或向量库行为。
+
+> 2026-07-10 Knowledge Pipeline draft config: `/rag` Pipeline Draft now supports safe saved config and preflight observation. Classic workflow `knowledge_citation` is unchanged; it still reads CitationAnchor summary JSON and does not execute draft config.
