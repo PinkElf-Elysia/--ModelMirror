@@ -505,7 +505,25 @@ function initialDefinition(workflowId: string): WorkflowDefinition {
   };
 }
 
-function loadDefinition(workflowId: string) {
+function cloneDefinition(definition: WorkflowDefinition): WorkflowDefinition {
+  return {
+    ...definition,
+    nodes: definition.nodes.map((node) => ({
+      ...node,
+      position: { ...node.position },
+      data: { ...node.data },
+    })),
+    edges: definition.edges.map((edge) => ({ ...edge })),
+  };
+}
+
+function loadDefinition(
+  workflowId: string,
+  controlledDefinition?: WorkflowDefinition,
+) {
+  if (controlledDefinition) {
+    return cloneDefinition(controlledDefinition);
+  }
   return readStoredWorkflow(workflowId) ?? initialDefinition(workflowId);
 }
 
@@ -2132,12 +2150,23 @@ function NodeConfig({ node, onChange }: NodeConfigProps) {
 
 interface WorkflowCanvasProps {
   workflowId: string;
+  initialDefinition?: WorkflowDefinition;
+  onSave?: (definition: WorkflowDefinition) => Promise<void> | void;
+  saveLabel?: string;
 }
 
 type WorkflowWorkspaceTab = "config" | "run";
 
-function WorkflowCanvas({ workflowId }: WorkflowCanvasProps) {
-  const loadedDefinition = useMemo(() => loadDefinition(workflowId), [workflowId]);
+function WorkflowCanvas({
+  workflowId,
+  initialDefinition: controlledDefinition,
+  onSave,
+  saveLabel = "保存草稿",
+}: WorkflowCanvasProps) {
+  const loadedDefinition = useMemo(
+    () => loadDefinition(workflowId, controlledDefinition),
+    [controlledDefinition, workflowId],
+  );
   const [title, setTitle] = useState(loadedDefinition.title);
   const [nodes, setNodes, onNodesChange] = useNodesState<WorkflowNode>(
     loadedDefinition.nodes,
@@ -2148,6 +2177,7 @@ function WorkflowCanvas({ workflowId }: WorkflowCanvasProps) {
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [saveNotice, setSaveNotice] = useState("");
+  const [isSaving, setIsSaving] = useState(false);
   const [isNodePaletteOpen, setIsNodePaletteOpen] = useState(false);
   const [workspaceTab, setWorkspaceTab] =
     useState<WorkflowWorkspaceTab>("config");
@@ -2247,13 +2277,27 @@ function WorkflowCanvas({ workflowId }: WorkflowCanvasProps) {
     );
   }
 
-  function saveWorkflow() {
+  async function saveWorkflow() {
     const savedDefinition = {
       ...definition,
       updatedAt: new Date().toISOString(),
     };
-    saveStoredWorkflow(savedDefinition);
-    setSaveNotice("已保存到本地草稿箱");
+    setIsSaving(true);
+    try {
+      if (onSave) {
+        await onSave(savedDefinition);
+        setSaveNotice("Xpert 草稿已保存");
+      } else {
+        saveStoredWorkflow(savedDefinition);
+        setSaveNotice("已保存到本地草稿箱");
+      }
+    } catch (error) {
+      setSaveNotice(
+        error instanceof Error ? error.message : "草稿保存失败，请稍后重试",
+      );
+    } finally {
+      setIsSaving(false);
+    }
     window.setTimeout(() => setSaveNotice(""), 1800);
   }
 
@@ -2357,10 +2401,11 @@ function WorkflowCanvas({ workflowId }: WorkflowCanvasProps) {
             ) : null}
             <button
               className="rounded-full border border-white/10 bg-white/[0.06] px-4 py-2 text-sm font-semibold text-slate-100 transition hover:border-hire-300/40 hover:bg-hire-300/10 hover:text-hire-100"
-              onClick={saveWorkflow}
+              disabled={isSaving}
+              onClick={() => void saveWorkflow()}
               type="button"
             >
-              保存草稿
+              {isSaving ? "保存中..." : saveLabel}
             </button>
           </div>
         </div>
@@ -2490,10 +2535,10 @@ function WorkflowCanvas({ workflowId }: WorkflowCanvasProps) {
   );
 }
 
-export default function WorkflowEditor({ workflowId }: WorkflowCanvasProps) {
+export default function WorkflowEditor(props: WorkflowCanvasProps) {
   return (
     <ReactFlowProvider>
-      <WorkflowCanvas workflowId={workflowId} />
+      <WorkflowCanvas {...props} />
     </ReactFlowProvider>
   );
 }

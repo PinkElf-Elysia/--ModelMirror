@@ -14669,8 +14669,983 @@ const rawCatalogModels: RawCatalogModel[] = [
     "created": 1685232000,
     "expiration_date": null,
     "model_author": "OpenAI"
-  }
-];
+  },
+  {
+    "id": "openai/gpt-5.6-luna-pro",
+    "canonical_slug": "openai/gpt-5.6-luna-pro-20260709",
+    "name": "OpenAI: GPT-5.6 Luna Pro",
+    "raw_description": "GPT-5.6 Luna Pro is the same underlying model as [GPT-5.6 Luna](https://openrouter.ai/openai/gpt-5.6-luna), served with `reasoning.mode` set to `pro` for higher-quality responses on complex tasks.\n\nLearn more in OpenAI's docs: https://developers.openai.com/api/docs/guides/reasoning#reasoning-mode",
+    "context_length": 1050000,
+    "pricing": {
+      "input": 1,
+      "output": 6
+    },
+    "input_modalities": [
+      "image",
+      "text"
+    ],
+    "output_modalities": [
+      "text"
+    ],
+    "tokenizer": "GPT",
+    "supported_parameters": [
+      "include_reasoning",
+      "max_completion_tokens",
+      "max_tokens",
+      "reasoning",
+      "reasoning_effort",
+      "response_format",
+      "seed",
+      "structured_outputs",
+      "tool_choice",
+      "tools"
+    ],
+    "created": 1783590867,
+    "expiration_date": null,
+    "model_author": "OpenAI"
+  },
+  {
+    "id": "openai/gpt-5.6-luna",
+    "canonical_slug": "openai/gpt-5.6-luna-20260709",
+    "name": "OpenAI: GPT-5.6 Luna",
+    "raw_description": "GPT-5.6 Luna is a fast, cost-efficient model in OpenAI's GPT-5.6 series. It is suited for high-volume, latency-sensitive tasks such as chat, classification, and lightweight agentic workflows, providing capable reasoning for...",
+    "context_length": 1050000,
+    "pricing": {
+      "input": 1,
+      "output": 6
+    },
+    "input_modalities": [
+      "image",
+      "text"
+    ],
+    "output_modalities": [
+      "text"
+    ],
+    "tokenizer": "GPT",
+    "supported_parameters": [
+      "include_reasoning",
+      "max_completion_tokens",
+      "max_tokens",
+      "reasoning",
+      "reasoning_effort",
+      "response_format",
+      "seed",
+      "structured_outputs",
+      "tool_choice",
+      "tools"
+    ],
+    "created": 1783590864,
+    "expiration_date": null,
+    "model_author": "OpenAI"
+  },
+  {
+    "id": "openai/gpt-5.6-terra-pro",
+    "canonical_slug": "openai/gpt-5.6-terra-pro-20260709",
+    "name": "OpenAI: GPT-5.6 Terra Pro",
+    "raw_description": "GPT-5.6 Terra Pro is the same underlying model as [GPT-5.6 Terra](https://openrouter.ai/openai/gpt-5.6-terra), served with `reasoning.mode` set to `pro` for higher-quality responses on complex tasks.\n\nLearn more in OpenAI's docs: https://developers.openai.com/api/docs/guides/reasoning#reasoning-mode",
+    "context_length": 1050000,
+    "pricing": {
+      "input": 2.5,
+      "output": 15
+    },
+    "input_modalities": [
+      "image",
+      "text"
+    ],
+    "output_modalities": [
+      "text"
+    ],
+    "tokenizer": "GPT",
+    "supported_parameters": [
+      "include_reasoning",
+      "max_completion_tokens",
+      "max_tokens",
+      "reasoning",
+      "reasoning_effort",
+      "response_format",
+      "seed",
+      "structured_outputs",
+      "tool_choice",
+      "tools"
+    ],
+    "created": 1783590861,
+    "expiration_date": null,
+    "model_author": "OpenAI"
+  },
+  {
+    "id": "openai/gpt-5.6-terra",
+    "canonical_slug": "openai/gpt-5.6-terra-20260709",
+    "name": "OpenAI: GPT-5.6 Terra",
+    "raw_description": "GPT-5.6 Terra is a balanced model in OpenAI's GPT-5.6 series, positioned between the flagship Sol tier and the cost-efficient Luna tier. It is suited for everyday coding, reasoning, and agentic...",
+    "context_length": 1050000,
+    "pricing": {
+      "input": 2.5,
+      "output": 15
+    },
+    "input_modalities": [
+      "image",
+      "text"
+    ],
+    "output_modalities": [
+      "text"
+    ],
+    "tokenizer": "GPT",
+    "supported_parameters": [
+      "include_reasoning",
+      "max_completion_tokens",
+      "max_tokens",
+      "reasoning",
+      "reasoning_effort",
+      "response_format",
+      "seed",
+      "structured_outputs",
+      "tool_choice",
+      "tools"
+    ],
+    "created": 1783590857,
+    "expiration_date": null,
+    "model_author": "OpenAI"
+  },
+  {
+    "id": "openai/gpt-5.6-sol-pro",
+    "canonical_slug": "openai/gpt-5.6-sol-pro-20260709",
+    "name": "OpenAI: GPT-5.6 Sol Pro",
+    "raw_description": "GPT-5.6 Sol Pro is the same underlying model as [GPT-5.6 Sol](https://openrouter.ai/openai/gpt-5.6-sol), served with `reasoning.mode` set to `pro` for higher-quality responses on complex tasks.\n\nLearn more in OpenAI's docs: https://developers.openai.com/api/docs/guides/reasoning#reasoning-mode",
+    "context_length": 1050000,
+    "pricing": {
+      "input": 5,
+      "output": 30
+    },
+    "input_modalities": [
+      "image",
+      "text"
+    ],
+    "output_modalities": [
+      "text"
+    ],
+    "tokenizer": "GPT",
+    "supported_parameters": [
+      "include_reasoning",
+      "max_completion_tokens",
+      "max_tokens",
+      "reasoning",
+      "reasoning_effort",
+      "response_format",
+      "seed",
+      "structured_outputs",
+      "tool_choice",
+      "tools"
+    ],
+    "created": 1783590854,
+    "expiration_date": null,
+    "model_author": "OpenAI"
+  },
+  {
+    "id": "openai/gpt-5.6-sol",
+    "canonical_slug": "openai/gpt-5.6-sol-20260709",
+    "name": "OpenAI: GPT-5.6 Sol",
+    "raw_description": "GPT-5.6 Sol is the flagship model in OpenAI's GPT-5.6 series. It is suited for complex reasoning, coding, and agentic workflows, and is particularly strong at command-line and multi-step coding tasks...",
+    "context_length": 1050000,
+    "pricing": {
+      "input": 5,
+      "output": 30
+    },
+    "input_modalities": [
+      "image",
+      "text"
+    ],
+    "output_modalities": [
+      "text"
+    ],
+    "tokenizer": "GPT",
+    "supported_parameters": [
+      "include_reasoning",
+      "max_completion_tokens",
+      "max_tokens",
+      "reasoning",
+      "reasoning_effort",
+      "response_format",
+      "seed",
+      "structured_outputs",
+      "tool_choice",
+      "tools"
+    ],
+    "created": 1783590850,
+    "expiration_date": null,
+    "model_author": "OpenAI"
+  },
+  {
+    "id": "x-ai/grok-4.5",
+    "canonical_slug": "x-ai/grok-4.5-20260708",
+    "name": "xAI: Grok 4.5",
+    "raw_description": "Grok 4.5 is SpaceXAI's smartest model with frontier performance on coding, knowledge work, and STEM.",
+    "context_length": 500000,
+    "pricing": {
+      "input": 2,
+      "output": 6
+    },
+    "input_modalities": [
+      "text",
+      "image"
+    ],
+    "output_modalities": [
+      "text"
+    ],
+    "tokenizer": "Grok",
+    "supported_parameters": [
+      "frequency_penalty",
+      "include_reasoning",
+      "logprobs",
+      "max_tokens",
+      "presence_penalty",
+      "reasoning",
+      "reasoning_effort",
+      "response_format",
+      "seed",
+      "stop",
+      "structured_outputs",
+      "temperature",
+      "tool_choice",
+      "tools",
+      "top_logprobs",
+      "top_p"
+    ],
+    "created": 1783523154,
+    "expiration_date": null,
+    "model_author": "xAI"
+  },
+  {
+    "id": "~x-ai/grok-latest",
+    "canonical_slug": "~x-ai/grok-latest",
+    "name": "xAI: Grok Latest",
+    "raw_description": "This model always redirects to the latest Grok model from xAI.",
+    "context_length": 500000,
+    "pricing": {
+      "input": 2,
+      "output": 6
+    },
+    "input_modalities": [
+      "text",
+      "image"
+    ],
+    "output_modalities": [
+      "text"
+    ],
+    "tokenizer": "Router",
+    "supported_parameters": [
+      "frequency_penalty",
+      "include_reasoning",
+      "logprobs",
+      "max_tokens",
+      "presence_penalty",
+      "reasoning",
+      "reasoning_effort",
+      "response_format",
+      "seed",
+      "stop",
+      "structured_outputs",
+      "temperature",
+      "tool_choice",
+      "tools",
+      "top_logprobs",
+      "top_p"
+    ],
+    "created": 1783519360,
+    "expiration_date": null,
+    "model_author": "xAI"
+  },
+  {
+    "id": "aion-labs/aion-3.0-mini",
+    "canonical_slug": "aion-labs/aion-3.0-mini-20260707",
+    "name": "AionLabs: Aion-3.0-Mini",
+    "raw_description": "Aion-3.0 Mini is a multi-model roleplaying and storytelling system from AionLabs, built on the DeepSeek family of models. It uses a collaborative generation process in which multiple specialized models each...",
+    "context_length": 131072,
+    "pricing": {
+      "input": 0.7,
+      "output": 1.4
+    },
+    "input_modalities": [
+      "text"
+    ],
+    "output_modalities": [
+      "text"
+    ],
+    "tokenizer": "Other",
+    "supported_parameters": [
+      "include_reasoning",
+      "max_tokens",
+      "reasoning",
+      "response_format",
+      "temperature",
+      "tool_choice",
+      "tools",
+      "top_p"
+    ],
+    "created": 1783443096,
+    "expiration_date": null,
+    "model_author": "AionLabs"
+  },
+  {
+    "id": "aion-labs/aion-3.0",
+    "canonical_slug": "aion-labs/aion-3.0-20260707",
+    "name": "AionLabs: Aion-3.0",
+    "raw_description": "Aion-3.0 is a multi-model roleplaying and storytelling system from AionLabs, built on the GLM family of models. It uses a collaborative generation process in which multiple specialized models each contribute...",
+    "context_length": 131072,
+    "pricing": {
+      "input": 3,
+      "output": 6
+    },
+    "input_modalities": [
+      "text"
+    ],
+    "output_modalities": [
+      "text"
+    ],
+    "tokenizer": "Other",
+    "supported_parameters": [
+      "include_reasoning",
+      "max_tokens",
+      "reasoning",
+      "response_format",
+      "temperature",
+      "tool_choice",
+      "tools",
+      "top_p"
+    ],
+    "created": 1783443095,
+    "expiration_date": null,
+    "model_author": "AionLabs"
+  },
+  {
+    "id": "tencent/hy3:free",
+    "canonical_slug": "tencent/hy3-20260706",
+    "name": "Tencent: Hy3 (free)",
+    "raw_description": "Hy3 is a 295B-parameter Mixture-of-Experts model from Tencent (21B active, 192 experts with top-8 routing) built for reasoning, agentic workflows, and real-world production use. It supports a configurable reasoning effort:...",
+    "context_length": 262144,
+    "pricing": {
+      "input": 0,
+      "output": 0
+    },
+    "input_modalities": [
+      "text"
+    ],
+    "output_modalities": [
+      "text"
+    ],
+    "tokenizer": "Other",
+    "supported_parameters": [
+      "frequency_penalty",
+      "include_reasoning",
+      "max_tokens",
+      "presence_penalty",
+      "reasoning",
+      "reasoning_effort",
+      "repetition_penalty",
+      "seed",
+      "stop",
+      "structured_outputs",
+      "temperature",
+      "tool_choice",
+      "tools",
+      "top_k",
+      "top_p"
+    ],
+    "created": 1783344048,
+    "expiration_date": 1784592000,
+    "model_author": "Tencent"
+  },
+  {
+    "id": "tencent/hy3",
+    "canonical_slug": "tencent/hy3-20260706",
+    "name": "Tencent: Hy3",
+    "raw_description": "Hy3 is a 295B-parameter Mixture-of-Experts model from Tencent (21B active, 192 experts with top-8 routing) built for reasoning, agentic workflows, and real-world production use. It supports a configurable reasoning effort:...",
+    "context_length": 262144,
+    "pricing": {
+      "input": 0.14,
+      "output": 0.58
+    },
+    "input_modalities": [
+      "text"
+    ],
+    "output_modalities": [
+      "text"
+    ],
+    "tokenizer": "Other",
+    "supported_parameters": [
+      "frequency_penalty",
+      "include_reasoning",
+      "logit_bias",
+      "max_tokens",
+      "min_p",
+      "presence_penalty",
+      "reasoning",
+      "reasoning_effort",
+      "repetition_penalty",
+      "response_format",
+      "seed",
+      "stop",
+      "structured_outputs",
+      "temperature",
+      "tool_choice",
+      "tools",
+      "top_k",
+      "top_p"
+    ],
+    "created": 1783344048,
+    "expiration_date": null,
+    "model_author": "Tencent"
+  },
+  {
+    "id": "poolside/laguna-xs-2.1:free",
+    "canonical_slug": "poolside/laguna-xs-2.1-20260625",
+    "name": "Poolside: Laguna XS 2.1 (free)",
+    "raw_description": "Laguna XS 2.1 is the latest coding agent model in the 33B-A3B category from [Poolside](https://poolside.ai/) and a step forward from their Laguna XS.2 model (released in April 2026). It combines...",
+    "context_length": 262144,
+    "pricing": {
+      "input": 0,
+      "output": 0
+    },
+    "input_modalities": [
+      "text"
+    ],
+    "output_modalities": [
+      "text"
+    ],
+    "tokenizer": "Other",
+    "supported_parameters": [
+      "include_reasoning",
+      "max_tokens",
+      "reasoning",
+      "temperature",
+      "tool_choice",
+      "tools"
+    ],
+    "created": 1783002429,
+    "expiration_date": null,
+    "model_author": "Poolside"
+  },
+  {
+    "id": "poolside/laguna-xs-2.1",
+    "canonical_slug": "poolside/laguna-xs-2.1-20260625",
+    "name": "Poolside: Laguna XS 2.1",
+    "raw_description": "Laguna XS 2.1 is the latest coding agent model in the 33B-A3B category from [Poolside](https://poolside.ai/) and a step forward from their Laguna XS.2 model (released in April 2026). It combines...",
+    "context_length": 262144,
+    "pricing": {
+      "input": 0.06,
+      "output": 0.12
+    },
+    "input_modalities": [
+      "text"
+    ],
+    "output_modalities": [
+      "text"
+    ],
+    "tokenizer": "Other",
+    "supported_parameters": [
+      "include_reasoning",
+      "max_tokens",
+      "reasoning",
+      "temperature",
+      "tool_choice",
+      "tools"
+    ],
+    "created": 1783002429,
+    "expiration_date": null,
+    "model_author": "Poolside"
+  },
+  {
+    "id": "anthropic/claude-sonnet-5",
+    "canonical_slug": "anthropic/claude-sonnet-5-20260630",
+    "name": "Anthropic: Claude Sonnet 5",
+    "raw_description": "Sonnet 5 is Anthropic's most capable Sonnet-class model, with frontier performance across coding, agents, and professional work. It supports adaptive thinking with selectable reasoning effort levels (low, medium, high, max,...",
+    "context_length": 1000000,
+    "pricing": {
+      "input": 2,
+      "output": 10
+    },
+    "input_modalities": [
+      "text",
+      "image"
+    ],
+    "output_modalities": [
+      "text"
+    ],
+    "tokenizer": "Claude",
+    "supported_parameters": [
+      "include_reasoning",
+      "max_completion_tokens",
+      "max_tokens",
+      "reasoning",
+      "reasoning_effort",
+      "response_format",
+      "stop",
+      "structured_outputs",
+      "tool_choice",
+      "tools",
+      "verbosity"
+    ],
+    "created": 1782843083,
+    "expiration_date": null,
+    "model_author": "Anthropic"
+  },
+  {
+    "id": "google/gemini-3.1-flash-lite-image",
+    "canonical_slug": "google/gemini-3.1-flash-lite-image-20260630",
+    "name": "Google: Nano Banana 2 Lite (Gemini 3.1 Flash Lite Image)",
+    "raw_description": "Nano Banana 2 Lite (Gemini 3.1 Flash Lite Image) is Google's fastest, most cost-efficient Gemini image model, built for high-velocity developer pipelines and rapid-fire visual exploration. It delivers text-to-image generation...",
+    "context_length": 65536,
+    "pricing": {
+      "input": 0.25,
+      "output": 1.5
+    },
+    "input_modalities": [
+      "image",
+      "text"
+    ],
+    "output_modalities": [
+      "image",
+      "text"
+    ],
+    "tokenizer": "Gemini",
+    "supported_parameters": [
+      "include_reasoning",
+      "max_tokens",
+      "reasoning",
+      "reasoning_effort",
+      "response_format",
+      "seed",
+      "temperature",
+      "top_p"
+    ],
+    "created": 1782837225,
+    "expiration_date": null,
+    "model_author": "Google"
+  },
+  {
+    "id": "nex-agi/nex-n2-mini",
+    "canonical_slug": "nex-agi/nex-n2-mini",
+    "name": "Nex AGI: Nex-N2-Mini",
+    "raw_description": "Nex-N2-Mini is an open-source agentic mixture-of-experts model from Nex AGI, the smaller sibling in the Nex-N2 series. It accepts text and image input and is built for coding, tool use,...",
+    "context_length": 262144,
+    "pricing": {
+      "input": 0.025,
+      "output": 0.1
+    },
+    "input_modalities": [
+      "text",
+      "image"
+    ],
+    "output_modalities": [
+      "text"
+    ],
+    "tokenizer": "Qwen3",
+    "supported_parameters": [
+      "include_reasoning",
+      "logprobs",
+      "max_tokens",
+      "reasoning",
+      "response_format",
+      "structured_outputs",
+      "temperature",
+      "tool_choice",
+      "tools",
+      "top_k",
+      "top_logprobs",
+      "top_p"
+    ],
+    "created": 1782312964,
+    "expiration_date": null,
+    "model_author": "Nex AGI"
+  },
+  {
+    "id": "sakana/fugu-ultra",
+    "canonical_slug": "sakana/fugu-ultra-20260615",
+    "name": "Sakana: Fugu Ultra",
+    "raw_description": "Fugu Ultra is the higher-performance model in Sakana AI's Fugu family. Rather than a single monolithic model, Fugu is a learned multi-agent orchestration system: a language model trained to route...",
+    "context_length": 1000000,
+    "pricing": {
+      "input": 5,
+      "output": 30
+    },
+    "input_modalities": [
+      "text",
+      "image"
+    ],
+    "output_modalities": [
+      "text"
+    ],
+    "tokenizer": "Other",
+    "supported_parameters": [
+      "include_reasoning",
+      "reasoning",
+      "reasoning_effort",
+      "structured_outputs",
+      "tool_choice",
+      "tools",
+      "web_search_options"
+    ],
+    "created": 1782276303,
+    "expiration_date": null,
+    "model_author": "Sakana"
+  },
+  {
+    "id": "google/gemini-3.1-flash-image",
+    "canonical_slug": "google/gemini-3.1-flash-image-20260528",
+    "name": "Google: Nano Banana 2 (Gemini 3.1 Flash Image)",
+    "raw_description": "Gemini 3.1 Flash Image, a.k.a. \"Nano Banana 2,\" is Google’s latest state of the art image generation and editing model, delivering Pro-level visual quality at Flash speed. It combines advanced...",
+    "context_length": 131072,
+    "pricing": {
+      "input": 0.5,
+      "output": 3
+    },
+    "input_modalities": [
+      "image",
+      "text"
+    ],
+    "output_modalities": [
+      "image",
+      "text"
+    ],
+    "tokenizer": "Gemini",
+    "supported_parameters": [
+      "include_reasoning",
+      "max_tokens",
+      "reasoning",
+      "reasoning_effort",
+      "response_format",
+      "seed",
+      "structured_outputs",
+      "temperature",
+      "top_p"
+    ],
+    "created": 1781754065,
+    "expiration_date": null,
+    "model_author": "Google"
+  },
+  {
+    "id": "google/gemini-3-pro-image",
+    "canonical_slug": "google/gemini-3-pro-image-20260528",
+    "name": "Google: Nano Banana Pro (Gemini 3 Pro Image)",
+    "raw_description": "Nano Banana Pro is Google’s most advanced image-generation and editing model, built on Gemini 3 Pro. It extends the original Nano Banana with significantly improved multimodal reasoning, real-world grounding, and...",
+    "context_length": 65536,
+    "pricing": {
+      "input": 2,
+      "output": 12
+    },
+    "input_modalities": [
+      "image",
+      "text"
+    ],
+    "output_modalities": [
+      "image",
+      "text"
+    ],
+    "tokenizer": "Gemini",
+    "supported_parameters": [
+      "include_reasoning",
+      "max_tokens",
+      "reasoning",
+      "response_format",
+      "seed",
+      "stop",
+      "structured_outputs",
+      "temperature",
+      "tool_choice",
+      "tools",
+      "top_p"
+    ],
+    "created": 1781754054,
+    "expiration_date": null,
+    "model_author": "Google"
+  },
+  {
+    "id": "cohere/north-mini-code:free",
+    "canonical_slug": "cohere/north-mini-code-20260617",
+    "name": "Cohere: North Mini Code (free)",
+    "raw_description": "North Mini Code is Cohere's first agentic coding model and the debut of its North family. A sparse mixture-of-experts model with 30B total parameters and 3B active, it is optimized...",
+    "context_length": 256000,
+    "pricing": {
+      "input": 0,
+      "output": 0
+    },
+    "input_modalities": [
+      "text"
+    ],
+    "output_modalities": [
+      "text"
+    ],
+    "tokenizer": "Cohere",
+    "supported_parameters": [
+      "frequency_penalty",
+      "include_reasoning",
+      "max_tokens",
+      "presence_penalty",
+      "reasoning",
+      "seed",
+      "stop",
+      "temperature",
+      "tool_choice",
+      "tools",
+      "top_k",
+      "top_p"
+    ],
+    "created": 1781723748,
+    "expiration_date": null,
+    "model_author": "Cohere"
+  },
+  {
+    "id": "z-ai/glm-5.2",
+    "canonical_slug": "z-ai/glm-5.2-20260616",
+    "name": "Z.ai: GLM 5.2",
+    "raw_description": "GLM 5.2 is a large-scale reasoning model from Z.ai. It supports text input and output with a 1M-token context window, and is suited for long-horizon agent workflows, project-level software engineering,...",
+    "context_length": 1048576,
+    "pricing": {
+      "input": 0.56,
+      "output": 1.76
+    },
+    "input_modalities": [
+      "text"
+    ],
+    "output_modalities": [
+      "text"
+    ],
+    "tokenizer": "Other",
+    "supported_parameters": [
+      "frequency_penalty",
+      "include_reasoning",
+      "logit_bias",
+      "logprobs",
+      "max_tokens",
+      "min_p",
+      "parallel_tool_calls",
+      "presence_penalty",
+      "reasoning",
+      "reasoning_effort",
+      "repetition_penalty",
+      "response_format",
+      "seed",
+      "stop",
+      "structured_outputs",
+      "temperature",
+      "tool_choice",
+      "tools",
+      "top_k",
+      "top_logprobs",
+      "top_p"
+    ],
+    "created": 1781631930,
+    "expiration_date": null,
+    "model_author": "Z.ai"
+  },
+  {
+    "id": "moonshotai/kimi-k2.7-code",
+    "canonical_slug": "moonshotai/kimi-k2.7-code-20260612",
+    "name": "MoonshotAI: Kimi K2.7 Code",
+    "raw_description": "MoonshotAI: Kimi K2.7 Code is a coding-focused model in Moonshot AI's Kimi K2 family, built to complete end-to-end programming tasks reliably over long contexts. It uses a native multimodal mixture-of-experts...",
+    "context_length": 262144,
+    "pricing": {
+      "input": 0.72,
+      "output": 3.49
+    },
+    "input_modalities": [
+      "text",
+      "image"
+    ],
+    "output_modalities": [
+      "text"
+    ],
+    "tokenizer": "Other",
+    "supported_parameters": [
+      "frequency_penalty",
+      "include_reasoning",
+      "logit_bias",
+      "logprobs",
+      "max_tokens",
+      "min_p",
+      "parallel_tool_calls",
+      "presence_penalty",
+      "reasoning",
+      "repetition_penalty",
+      "response_format",
+      "seed",
+      "stop",
+      "structured_outputs",
+      "temperature",
+      "tool_choice",
+      "tools",
+      "top_k",
+      "top_logprobs",
+      "top_p"
+    ],
+    "created": 1781266361,
+    "expiration_date": null,
+    "model_author": "MoonshotAI"
+  },
+  {
+    "id": "~anthropic/claude-fable-latest",
+    "canonical_slug": "~anthropic/claude-fable-latest",
+    "name": "Anthropic: Claude Fable Latest",
+    "raw_description": "This model always redirects to the latest model in the Claude Fable family.",
+    "context_length": 1000000,
+    "pricing": {
+      "input": 10,
+      "output": 50
+    },
+    "input_modalities": [
+      "text",
+      "image"
+    ],
+    "output_modalities": [
+      "text"
+    ],
+    "tokenizer": "Router",
+    "supported_parameters": [
+      "include_reasoning",
+      "max_completion_tokens",
+      "max_tokens",
+      "reasoning",
+      "reasoning_effort",
+      "response_format",
+      "stop",
+      "structured_outputs",
+      "tool_choice",
+      "tools",
+      "verbosity"
+    ],
+    "created": 1781029944,
+    "expiration_date": null,
+    "model_author": "Anthropic"
+  },
+  {
+    "id": "anthropic/claude-fable-5",
+    "canonical_slug": "anthropic/claude-5-fable-20260609",
+    "name": "Anthropic: Claude Fable 5",
+    "raw_description": "Claude Fable 5 is a Mythos-class model from Anthropic, built for autonomous knowledge work and coding. It supports text, image, and file inputs with text output, with reasoning support and...",
+    "context_length": 1000000,
+    "pricing": {
+      "input": 10,
+      "output": 50
+    },
+    "input_modalities": [
+      "text",
+      "image"
+    ],
+    "output_modalities": [
+      "text"
+    ],
+    "tokenizer": "Claude",
+    "supported_parameters": [
+      "include_reasoning",
+      "max_completion_tokens",
+      "max_tokens",
+      "reasoning",
+      "reasoning_effort",
+      "response_format",
+      "stop",
+      "structured_outputs",
+      "tool_choice",
+      "tools",
+      "verbosity"
+    ],
+    "created": 1781007515,
+    "expiration_date": null,
+    "model_author": "Anthropic"
+  },
+  {
+    "id": "nex-agi/nex-n2-pro",
+    "canonical_slug": "nex-agi/nex-n2-pro",
+    "name": "Nex AGI: Nex-N2-Pro",
+    "raw_description": "Nex-N2-Pro is an agentic mixture-of-experts model from Nex AGI, with 17B active parameters out of 397B total. Built on the Qwen3.5 architecture, it accepts text and image input and produces...",
+    "context_length": 262144,
+    "pricing": {
+      "input": 0.25,
+      "output": 1
+    },
+    "input_modalities": [
+      "text",
+      "image"
+    ],
+    "output_modalities": [
+      "text"
+    ],
+    "tokenizer": "Qwen3",
+    "supported_parameters": [
+      "frequency_penalty",
+      "include_reasoning",
+      "logprobs",
+      "max_tokens",
+      "reasoning",
+      "temperature",
+      "tool_choice",
+      "tools",
+      "top_k",
+      "top_logprobs",
+      "top_p"
+    ],
+    "created": 1780937140,
+    "expiration_date": null,
+    "model_author": "Nex AGI"
+  },
+  {
+    "id": "poolside/laguna-m.1",
+    "canonical_slug": "poolside/laguna-m.1-20260312",
+    "name": "Poolside: Laguna M.1",
+    "raw_description": "Laguna M.1 is the flagship coding agent model from [Poolside](https://poolside.ai/), optimized for complex software engineering tasks. Designed for agentic coding workflows, it supports tool calling and reasoning, with a 256K...",
+    "context_length": 262144,
+    "pricing": {
+      "input": 0.2,
+      "output": 0.4
+    },
+    "input_modalities": [
+      "text"
+    ],
+    "output_modalities": [
+      "text"
+    ],
+    "tokenizer": "Other",
+    "supported_parameters": [
+      "include_reasoning",
+      "max_tokens",
+      "reasoning",
+      "temperature",
+      "tool_choice",
+      "tools"
+    ],
+    "created": 1777388504,
+    "expiration_date": null,
+    "model_author": "Poolside"
+  },
+  {
+    "id": "cognitivecomputations/dolphin-mistral-24b-venice-edition",
+    "canonical_slug": "venice/uncensored",
+    "name": "Venice: Uncensored",
+    "raw_description": "Venice Uncensored Dolphin Mistral 24B Venice Edition is a fine-tuned variant of Mistral-Small-24B-Instruct-2501, developed by dphn.ai in collaboration with Venice.ai. This model is designed as an “uncensored” instruct-tuned LLM, preserving...",
+    "context_length": 128000,
+    "pricing": {
+      "input": 0.2,
+      "output": 0.9
+    },
+    "input_modalities": [
+      "text"
+    ],
+    "output_modalities": [
+      "text"
+    ],
+    "tokenizer": "Other",
+    "supported_parameters": [
+      "frequency_penalty",
+      "max_tokens",
+      "presence_penalty",
+      "response_format",
+      "stop",
+      "temperature",
+      "top_k",
+      "top_p"
+    ],
+    "created": 1752094966,
+    "expiration_date": null,
+    "model_author": "Venice"
+  }];
 
 const CURRENT_TIME_SECONDS = Math.floor(Date.now() / 1000);
 

@@ -36,12 +36,14 @@ services:
       CHROMA_DB_PATH: /app/rag/storage/chroma_db
       SKILL_INSTALLED_DIR: /app/skills/installed
       SKILL_TMP_DIR: /app/skills/tmp
+      XPERT_STORAGE_DIR: /app/xperts/storage
     ports:
       - "8000:8000"
     volumes:
       - ./server/rag/storage:/app/rag/storage
       - ./server/rag/uploads:/app/rag/uploads
       - ./server/skills/installed:/app/skills/installed
+      - ./server/xperts/storage:/app/xperts/storage
     restart: unless-stopped
     healthcheck:
       test:

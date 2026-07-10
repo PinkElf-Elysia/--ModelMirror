@@ -1,7 +1,19 @@
 # Xpert 对齐总纲
 
-最后更新日期：2026-07-09
+最后更新日期：2026-07-10
 维护人：模镜团队
+
+## 2026-07-10 增量：XPERT-STUDIO-PUBLISH-01
+
+Xpert 对齐主线已从资源目录和配置草稿转入可运行的智能体平台。新增 Xpert 文件型 Store、草稿 revision、不可变发布版本、发布预检和已发布 Xpert 聊天入口：
+
+- Xpert 草稿复用 classic workflow 定义；普通 /workflow 仍保持 localStorage 草稿和原有运行协议。
+- 发布会对 workflow 做静态图校验与聊天契约预检，要求唯一聊天输入、唯一最终输出、可用的 workflow_agent 配置，并暂时禁止 human_intervention。
+- 每次发布生成不可变 workflow 快照和递增版本号。后续修改草稿不会改变已发布版本。
+- 已发布版本通过 /agents/xpert/:xpertId/chat 使用同一 classic runner 运行，复用 Toolset、Knowledge、Middleware、Handoff 和 RunRegistry。
+- Xpert run 使用 run_type=xpert，并在 SSE workflow_meta 中附带 xpert_id、xpert_version；RunRegistry 与 checkpoint 只保存版本、ID、长度和错误摘要。
+
+当前边界：Store 是本地文件持久化，不是 workspace 数据库；不做自动 Handoff worker、长期 Goal、记忆写入、文件理解、公开 App/API 或访问 token。这些能力按发布系统之后的功能闭环继续推进。
 
 ## 2026-07-09 增量：XPERT-STUDIO-PANEL-02
 
@@ -48,12 +60,12 @@ EvoAgentX 只保留为历史参考：此前元智能体曾借鉴其 `goal -> sub
 | 能力域 | 当前状态 | 已完成 | 当前边界 | 下一步 |
 | --- | --- | --- | --- | --- |
 | 工作空间资源 | 部分实现 | `/studio` 已作为 Xpert 式资源 Hub，聚合智能体、工作流、知识库、MCP、API 工具、数据库、Skill、提示词、环境、运行记录，并支持快速入口、标签过滤和运行摘要 | 当前是前端只读聚合视图，不做 workspace 权限、持久化资源表或资源创建编排；API 工具与数据库仍为待接入卡片 | `XPERT-WORKFLOW-REGISTRY-API-01` |
-| Xpert Studio 画布 | 部分实现 | classic `/workflow`、节点库浮层、配置/运行 tabs、前端节点 registry、Xpert 分类节点菜单、智能体配置侧栏分区、多个 Xpert 对齐节点 | 仍是 classic workflow 画布，不是完整 Xpert Studio；高级配置先保存为草稿，不改变执行语义 | 后续逐步接入配置真实语义 |
+| Xpert Studio / 发布 | 部分实现 | classic `/workflow`、节点库浮层、配置/运行 tabs、分类节点菜单、智能体配置侧栏，以及 `/agents/studio` 的 Xpert 草稿、版本发布、聊天运行入口 | 使用文件型 Store 和 classic runner；不做协作权限、公开应用、自动调度或数据库迁移 | XPERT-HANDOFF-EXECUTOR-01 |
 | Runtime Middleware | 部分实现 | middleware lifecycle、`event_recorder`、`system_prompt_injector`、`tool_policy`、`tool_audit` | 仍以内存态为主，部分 middleware 仅最小执行 | 继续挂到 Agent/Workflow 节点运行链 |
 | Agent Task | 部分实现 | AgentTask API、MetaAgent 任务工作台、workflow `agent_task` 节点 | 不做真实多 Agent 调度或持久化队列 | 与 Handoff/RunRegistry 继续闭环 |
 | Handoff | 部分实现 | Handoff API、workflow `agent_handoff`、`handoff_router`、MetaAgent Inbox 手动处理 | pending/accepted/completed 仍是人工内存态流程 | 后续做队列、死信、目标 Agent 执行 |
-| RunRegistry / Trace | 部分实现 | workflow/chat/agent_task/agent_handoff run，checkpoint，workflow/chat 观测与 `/runtime` 运维总览 | 内存态，可观测索引，不是调度器；`/runtime` 只做只读聚合 | 失败摘要、重试入口、持久化评估 |
-| Workflow Agent | 部分实现 | `workflow_agent` 节点，模型执行，Runtime Toolset 工具模式，Xpert 式配置侧栏分区 | 轻量 JSON 决策，不是 function calling；重试、备用模型、记忆写入等配置暂只保存草稿 | 后续逐项接入真实运行语义 |
+| RunRegistry / Trace | 部分实现 | workflow/xpert/chat/agent_task/agent_handoff run，checkpoint，workflow/chat/Xpert 观测与 `/runtime` 运维总览 | 内存态，可观测索引，不是调度器；`/runtime` 只做只读聚合 | 为自动 Handoff、Goal 与持久化评估提供护栏 |
+| Workflow Agent | 部分实现 | `workflow_agent` 节点，模型执行，Runtime Toolset 工具模式，Xpert 式配置侧栏分区，失败重试、备用模型、异常转空输出、禁用输出 | 轻量 JSON 决策，不是 function calling；文件理解、并行工具调用、记忆写入和结构化输出仍未接入执行 | 后续逐项接入真实运行语义 |
 | Chat Toolset | 部分实现 | `/api/chat` 可选 MCP 工具模式，chat run 与 checkpoint | 默认关闭，不改变普通聊天；无自动 handoff | 补工具偏好、安全提示和观测 UI |
 | Toolset / MCP | 部分实现 | `MCPToolsetProvider`、`run_tool_with_runtime`、tool policy/audit、MCP 管理基础、`/runtime` MCP Runtime 只读运维，`/studio` 已提供 MCP 与 Runtime 入口 | 缺 Xpert 式 Toolset 资源模型；Runtime Ops 先聚合现有 session/tool 元信息 | `XPERT-RUNTIME-OPS-02` |
 | Plugin / Skill | 部分实现 | `/skills` 与 Skill 安装基础，Docker 已补 git/npm/npx 依赖，`/runtime` 可查看已安装 Skill 摘要 | 尚未形成 Xpert 插件市场/Skill 工作区统一模型；运维页不执行安装/卸载 | 先补市场与安装状态，再抽象资源模型 |
@@ -123,13 +135,24 @@ EvoAgentX 只保留为历史参考：此前元智能体曾借鉴其 `goal -> sub
 - `XPERT-RUNTIME-OPS-01`：已完成 `/runtime` 第一版运维入口，聚合 MCP Runtime、Tool Registry、RunRegistry 与 Skill Runtime 摘要。
 - 当前边界：只读观测，不替代 `/mcps` 或 `/skills` 的管理操作；不新增后端协议、不展示密钥、完整 prompt 或工具输出。
 
-## 近期 5 步工程顺序
+## 已完成的目录路线（历史）
 
 1. `XPERT-WORKFLOW-REGISTRY-API-01`：评估是否把前端节点 registry 升级为后端统一 registry API，避免未来前后端元数据漂移。
 2. `XPERT-STUDIO-PANEL-02`：逐项接入重试、备用模型、输出结构、记忆写入等真实执行语义。
 3. `XPERT-RUNTIME-OPS-02`：在 `/runtime` 上补失败摘要、重试入口占位、MCP runtime 状态细分和环境观测。
 4. `XPERT-KNOWLEDGE-PIPELINE-03`：在 stage 草稿稳定后评估可编辑流水线草稿和执行观测，不迁移现有 RAG 主路径。
 5. `XPERT-WORKSPACE-RESOURCE-MODEL-01`：当 Hub 入口稳定后，再评估是否抽象 workspace 资源模型与后端聚合 API。
+
+## 近期功能闭环顺序
+
+后续优先级从目录和观测页面转为可保存、发布、运行、协作的 Xpert，每步都有独立验收和回退边界：
+
+1. XPERT-STUDIO-PUBLISH-01：已完成第一版 Xpert 草稿、不可变版本、发布预检和已发布聊天运行。
+2. XPERT-HANDOFF-EXECUTOR-01：让 pending Handoff 按目标 Xpert 被领取、执行和回写结果，先做 lease、重试次数、死信和人工接管，不做无护栏自动循环。
+3. XPERT-CONVERSATION-GOAL-01：从对话创建长期 Goal 和 AgentTask，支持暂停、取消、恢复与进度面板。
+4. XPERT-FILE-MEMORY-01：把会话附件接入 FileAsset/Artifact，并提供显式、可观测的 memory search/get/write。
+5. XPERT-KNOWLEDGE-EXECUTE-01：让 Pipeline Draft 启动 ingestion job，生成版本化 chunk/index，并通过预检后原子切换 active version。
+6. XPERT-APP-API-01：为已发布 Xpert 提供稳定 App/API 入口、访问控制、调用配额、版本回滚和审计。
 
 ## 验收护栏
 
