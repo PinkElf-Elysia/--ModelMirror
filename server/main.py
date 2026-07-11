@@ -4,13 +4,14 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
 import uuid
 from collections.abc import AsyncIterator
 from collections import defaultdict, deque
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
@@ -39,17 +40,21 @@ except ModuleNotFoundError:
 
 try:
     from server.xperts import (
+        XpertDefinition,
         XpertNotFoundError,
         XpertRunRequest,
         XpertStoreError,
+        XpertVersion,
         get_xpert_store,
         router as xperts_router,
     )
 except ModuleNotFoundError:
     from xperts import (
+        XpertDefinition,
         XpertNotFoundError,
         XpertRunRequest,
         XpertStoreError,
+        XpertVersion,
         get_xpert_store,
         router as xperts_router,
     )
@@ -114,6 +119,11 @@ try:
     from server.xpert_runtime import (
         AgentTaskStore,
         CapabilityRegistry,
+        HandoffBusyError,
+        HandoffExecutionResult,
+        HandoffExecutor,
+        HandoffExecutorError,
+        HandoffPermanentError,
         InMemoryToolAuditStore,
         MCPToolsetProvider,
         MiddlewareContext,
@@ -134,6 +144,11 @@ except ModuleNotFoundError:
     from xpert_runtime import (
         AgentTaskStore,
         CapabilityRegistry,
+        HandoffBusyError,
+        HandoffExecutionResult,
+        HandoffExecutor,
+        HandoffExecutorError,
+        HandoffPermanentError,
         InMemoryToolAuditStore,
         MCPToolsetProvider,
         MiddlewareContext,
@@ -152,6 +167,20 @@ except ModuleNotFoundError:
     )
 
 load_dotenv()
+
+
+def env_float(name: str, default: float, minimum: float) -> float:
+    try:
+        return max(minimum, float(os.getenv(name, str(default))))
+    except (TypeError, ValueError):
+        return default
+
+
+def env_int(name: str, default: int, minimum: int) -> int:
+    try:
+        return max(minimum, int(os.getenv(name, str(default))))
+    except (TypeError, ValueError):
+        return default
 
 LLM_GATEWAY_URL = os.getenv(
     "LLM_GATEWAY_URL",
@@ -188,6 +217,21 @@ WORKFLOW_PYTHON_SANDBOX_ROOT = Path(__file__).resolve().parent / "workflow_sandb
 WORKFLOW_AGENT_ENABLED = True
 WORKFLOW_AGENT_MAX_ITERATIONS_DEFAULT = 5
 WORKFLOW_AGENT_MAX_TOKENS = 1024
+AGENT_TASK_STORAGE_DIR = os.getenv("AGENT_TASK_STORAGE_DIR", "").strip()
+HANDOFF_EXECUTOR_ENABLED = os.getenv(
+    "HANDOFF_EXECUTOR_ENABLED",
+    "true",
+).strip().lower() in {"1", "true", "yes", "on"}
+HANDOFF_EXECUTOR_POLL_SECONDS = env_float(
+    "HANDOFF_EXECUTOR_POLL_SECONDS", 1.0, 0.1
+)
+HANDOFF_EXECUTOR_LEASE_SECONDS = env_float(
+    "HANDOFF_EXECUTOR_LEASE_SECONDS", 60.0, 1.0
+)
+HANDOFF_EXECUTOR_MAX_ATTEMPTS = env_int(
+    "HANDOFF_EXECUTOR_MAX_ATTEMPTS", 3, 1
+)
+HANDOFF_MAX_DELEGATION_DEPTH = 5
 MAX_IMAGE_DATA_URL_BYTES = 5 * 1024 * 1024
 AGENTS_DATA_PATH = Path(__file__).parent / "data" / "agents.json"
 MAX_AGENT_PROMPT_CHARS = 6000
@@ -268,8 +312,12 @@ workflow_mcp_pipeline = MiddlewarePipeline([event_recorder])
 workflow_tool_policy = ToolPermissionPolicy(allow_by_default=True)
 workflow_tool_audit_store = InMemoryToolAuditStore()
 runtime_event_store = RuntimeEventStore()
-agent_task_store = AgentTaskStore(event_store=runtime_event_store)
+agent_task_store = AgentTaskStore(
+    event_store=runtime_event_store,
+    storage_dir=AGENT_TASK_STORAGE_DIR or None,
+)
 run_registry = RunRegistry()
+handoff_executor: HandoffExecutor | None = None
 runtime_capabilities.register(
     "mcp_tools",
     workflow_mcp_provider,
@@ -2095,13 +2143,74 @@ async def generate_meta_agent_workflow(
         return JSONResponse(status_code=500, content={"error": str(exc)})
 
 
+@dataclass(slots=True)
+class PreparedXpertRun:
+    xpert: XpertDefinition
+    version: XpertVersion
+    request: WorkflowRunRequest
+    runtime_metadata: dict[str, Any]
+
+
+async def prepare_published_xpert_run(
+    reference: str,
+    payload: XpertRunRequest,
+    *,
+    extra_inputs: dict[str, str] | None = None,
+    handoff_depth: int = 0,
+) -> PreparedXpertRun:
+    store = get_xpert_store()
+    xpert = await asyncio.to_thread(store.resolve_xpert, reference)
+    if xpert.status != "published":
+        raise ValueError("Xpert must be published before it can run.")
+    version = await asyncio.to_thread(store.get_version, xpert.id, payload.version)
+
+    history: list[dict[str, str]] = []
+    history_size = 0
+    for message in payload.messages[-20:]:
+        content = message.content.strip()
+        if not content:
+            continue
+        next_size = history_size + len(content)
+        if next_size > 40_000:
+            break
+        history.append({"role": message.role, "content": content})
+        history_size = next_size
+    history_json = json.dumps(history, ensure_ascii=False)
+
+    workflow_payload = version.workflow.model_dump(mode="json")
+    workflow_payload.pop("version", None)
+    workflow_payload.pop("source", None)
+    workflow = WorkflowPayload.model_validate(workflow_payload)
+    inputs = {
+        version.input_variable: payload.message,
+        version.history_variable: history_json,
+        "user_input": payload.message,
+        "conversation_history": history_json,
+        **dict(extra_inputs or {}),
+    }
+    return PreparedXpertRun(
+        xpert=xpert,
+        version=version,
+        request=WorkflowRunRequest(workflow=workflow, inputs=inputs),
+        runtime_metadata={
+            "xpert_id": xpert.id,
+            "xpert_slug": xpert.slug,
+            "xpert_version": version.version,
+            "xpert_draft_revision": version.draft_revision,
+            "xpert_checksum": version.checksum,
+            "handoff_depth": handoff_depth,
+        },
+    )
+
+
 async def _run_workflow_response(
     payload: WorkflowRunRequest,
-    request: Request,
+    request: Request | None,
     *,
     runtime_run_type: str = "workflow",
     runtime_source_id: str | None = None,
     runtime_metadata: dict[str, Any] | None = None,
+    runtime_parent_run_id: str | None = None,
 ):
     requires_model = any(
         (node.data.get("kind") if isinstance(node.data.get("kind"), str) else node.type)
@@ -2115,7 +2224,8 @@ async def _run_workflow_response(
         )
 
     try:
-        rate_limit_or_raise(client_ip(request))
+        if request is not None:
+            rate_limit_or_raise(client_ip(request))
         order = workflow_topological_order(payload.workflow.nodes, payload.workflow.edges)
     except HTTPException as exc:
         return JSONResponse(status_code=exc.status_code, content={"error": str(exc.detail)})
@@ -2150,6 +2260,7 @@ async def _run_workflow_response(
         payload.workflow.title,
         status="running",
         source_id=runtime_source_id or payload.workflow.id,
+        parent_run_id=runtime_parent_run_id,
         metadata=run_metadata,
     )
     await run_registry.record_checkpoint(
@@ -2212,6 +2323,54 @@ async def _run_workflow_response(
             if isinstance(value, str):
                 return value.strip().lower() in {"1", "true", "yes", "on"}
             return bool(value)
+
+        def workflow_handoff_settings(data: dict[str, Any]) -> tuple[str, bool, str, int]:
+            execution_mode = str(data.get("executionMode") or "manual").strip()
+            if execution_mode not in {"manual", "xpert_auto"}:
+                raise ValueError("Handoff executionMode must be manual or xpert_auto.")
+            wait_for_completion = workflow_truthy(data.get("waitForCompletion"))
+            result_variable = str(
+                data.get("resultVariable") or "handoff_result"
+            ).strip() or "handoff_result"
+            try:
+                wait_timeout_seconds = int(data.get("waitTimeoutSeconds") or 120)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("Handoff waitTimeoutSeconds must be an integer.") from exc
+            if not 5 <= wait_timeout_seconds <= 600:
+                raise ValueError("Handoff waitTimeoutSeconds must be between 5 and 600.")
+            return (
+                execution_mode,
+                wait_for_completion,
+                result_variable,
+                wait_timeout_seconds,
+            )
+
+        async def await_xpert_handoff_result(
+            handoff_id: str,
+            agent_task_id: str,
+            *,
+            timeout: int,
+        ) -> str:
+            executor = get_handoff_executor()
+            try:
+                await executor.execute_handoff(handoff_id)
+            except HandoffBusyError:
+                pass
+            terminal = await agent_task_store.wait_for_handoff_terminal(
+                handoff_id,
+                timeout=timeout,
+            )
+            if terminal.status != "completed":
+                error = str(
+                    terminal.metadata.get("last_error")
+                    or terminal.metadata.get("reason")
+                    or terminal.status
+                )
+                raise RuntimeError(f"Xpert handoff did not complete: {error}")
+            completed_task = await agent_task_store.get_task(agent_task_id)
+            if completed_task is None:
+                raise RuntimeError("Xpert handoff task disappeared after completion.")
+            return str(completed_task.result or "")
 
         def workflow_error_summary(exc: Exception) -> str:
             return str(exc or "")[:300]
@@ -4068,6 +4227,8 @@ async def _run_workflow_response(
                     output_variable = str(
                         node.data.get("outputVariable") or "agent_handoff_id"
                     ).strip() or "agent_handoff_id"
+                    execution_mode = "manual"
+                    wait_for_completion = False
                     try:
                         task_id_variable = str(
                             node.data.get("taskIdVariable") or "agent_task_id"
@@ -4077,6 +4238,22 @@ async def _run_workflow_response(
                             node.data.get("sourceAgent") or "workflow"
                         ).strip() or "workflow"
                         reason_template = str(node.data.get("reason") or "")
+                        (
+                            execution_mode,
+                            wait_for_completion,
+                            result_variable,
+                            wait_timeout_seconds,
+                        ) = workflow_handoff_settings(node.data)
+                        if execution_mode == "xpert_auto" and not target_agent.startswith(
+                            "xpert:"
+                        ):
+                            raise ValueError(
+                                "Automatic agent_handoff target must use xpert:<slug-or-id>."
+                            )
+                        if wait_for_completion and execution_mode != "xpert_auto":
+                            raise ValueError(
+                                "agent_handoff waitForCompletion requires xpert_auto."
+                            )
 
                         if not task_id_variable:
                             raise ValueError("agent_handoff node needs taskIdVariable.")
@@ -4116,6 +4293,14 @@ async def _run_workflow_response(
                                 "workflow_node_title": title,
                                 "task_id_variable": task_id_variable,
                                 "output_variable": output_variable,
+                                "execution_mode": execution_mode,
+                                "wait_for_completion": wait_for_completion,
+                                "result_variable": result_variable,
+                                "wait_timeout_seconds": wait_timeout_seconds,
+                                "ready_for_execution": False,
+                                "handoff_depth": int(
+                                    run_metadata.get("handoff_depth") or 0
+                                ),
                             },
                         )
                         handoff_run = await run_registry.create_run(
@@ -4136,6 +4321,9 @@ async def _run_workflow_response(
                                 "target_agent": target_agent,
                                 "task_id_variable": task_id_variable,
                                 "output_variable": output_variable,
+                                "execution_mode": execution_mode,
+                                "wait_for_completion": wait_for_completion,
+                                "result_variable": result_variable,
                             },
                         )
                         await run_registry.record_checkpoint(
@@ -4151,8 +4339,20 @@ async def _run_workflow_response(
                                 "target_agent": target_agent,
                             },
                         )
+                        await agent_task_store.update_handoff_metadata(
+                            handoff.handoff_id,
+                            {"ready_for_execution": True},
+                        )
                         output = handoff.handoff_id
                         variables[output_variable] = output
+                        delegated_result = ""
+                        if execution_mode == "xpert_auto" and wait_for_completion:
+                            delegated_result = await await_xpert_handoff_result(
+                                handoff.handoff_id,
+                                handoff_task_id,
+                                timeout=wait_timeout_seconds,
+                            )
+                            variables[result_variable] = delegated_result
                         yield sse_payload(
                             {
                                 "event": "node_delta",
@@ -4167,10 +4367,18 @@ async def _run_workflow_response(
                                 "agent_task_id": handoff_task_id,
                                 "agent_handoff_id": handoff.handoff_id,
                                 "run_id": handoff_run.run_id,
+                                "execution_mode": execution_mode,
+                                "wait_for_completion": wait_for_completion,
+                                "result_variable": (
+                                    result_variable if wait_for_completion else None
+                                ),
+                                "result_length": len(delegated_result),
                             }
                         )
                     except Exception as exc:
                         logger.warning("Workflow agent_handoff node failed: %s", exc)
+                        if execution_mode == "xpert_auto" and wait_for_completion:
+                            raise
                         output = ""
                         variables[output_variable] = output
                         yield sse_payload(
@@ -4185,6 +4393,8 @@ async def _run_workflow_response(
                     output_variable = str(
                         node.data.get("outputVariable") or "agent_handoff_id"
                     ).strip() or "agent_handoff_id"
+                    execution_mode = "manual"
+                    wait_for_completion = False
                     try:
                         source_variable = str(
                             node.data.get("sourceVariable") or "agent_output"
@@ -4199,6 +4409,22 @@ async def _run_workflow_response(
                         reason_template = str(
                             node.data.get("reasonTemplate") or ""
                         )
+                        (
+                            execution_mode,
+                            wait_for_completion,
+                            result_variable,
+                            wait_timeout_seconds,
+                        ) = workflow_handoff_settings(node.data)
+                        if execution_mode == "xpert_auto" and not target_agent.startswith(
+                            "xpert:"
+                        ):
+                            raise ValueError(
+                                "Automatic handoff_router target must use xpert:<slug-or-id>."
+                            )
+                        if wait_for_completion and execution_mode != "xpert_auto":
+                            raise ValueError(
+                                "handoff_router waitForCompletion requires xpert_auto."
+                            )
 
                         if not source_variable:
                             raise ValueError("handoff_router needs sourceVariable.")
@@ -4242,6 +4468,10 @@ async def _run_workflow_response(
                                 "source_length": len(source_value),
                                 "output_variable": output_variable,
                                 "router": "handoff_router",
+                                "execution_mode": execution_mode,
+                                "wait_for_completion": wait_for_completion,
+                                "result_variable": result_variable,
+                                "wait_timeout_seconds": wait_timeout_seconds,
                             },
                         )
                         agent_task_run = await run_registry.create_run(
@@ -4263,6 +4493,9 @@ async def _run_workflow_response(
                                 "source_length": len(source_value),
                                 "output_variable": output_variable,
                                 "router": "handoff_router",
+                                "execution_mode": execution_mode,
+                                "wait_for_completion": wait_for_completion,
+                                "result_variable": result_variable,
                             },
                         )
                         await run_registry.record_checkpoint(
@@ -4294,6 +4527,14 @@ async def _run_workflow_response(
                                 "source_variable": source_variable,
                                 "output_variable": output_variable,
                                 "router": "handoff_router",
+                                "execution_mode": execution_mode,
+                                "wait_for_completion": wait_for_completion,
+                                "result_variable": result_variable,
+                                "wait_timeout_seconds": wait_timeout_seconds,
+                                "ready_for_execution": False,
+                                "handoff_depth": int(
+                                    run_metadata.get("handoff_depth") or 0
+                                ),
                             },
                         )
                         handoff_run = await run_registry.create_run(
@@ -4315,6 +4556,9 @@ async def _run_workflow_response(
                                 "source_variable": source_variable,
                                 "output_variable": output_variable,
                                 "router": "handoff_router",
+                                "execution_mode": execution_mode,
+                                "wait_for_completion": wait_for_completion,
+                                "result_variable": result_variable,
                             },
                         )
                         await run_registry.record_checkpoint(
@@ -4330,9 +4574,21 @@ async def _run_workflow_response(
                                 "target_agent": target_agent,
                             },
                         )
+                        await agent_task_store.update_handoff_metadata(
+                            handoff.handoff_id,
+                            {"ready_for_execution": True},
+                        )
 
                         output = handoff.handoff_id
                         variables[output_variable] = output
+                        delegated_result = ""
+                        if execution_mode == "xpert_auto" and wait_for_completion:
+                            delegated_result = await await_xpert_handoff_result(
+                                handoff.handoff_id,
+                                task.task_id,
+                                timeout=wait_timeout_seconds,
+                            )
+                            variables[result_variable] = delegated_result
                         yield sse_payload(
                             {
                                 "event": "node_delta",
@@ -4347,10 +4603,18 @@ async def _run_workflow_response(
                                 "agent_task_id": task.task_id,
                                 "agent_handoff_id": handoff.handoff_id,
                                 "run_id": handoff_run.run_id,
+                                "execution_mode": execution_mode,
+                                "wait_for_completion": wait_for_completion,
+                                "result_variable": (
+                                    result_variable if wait_for_completion else None
+                                ),
+                                "result_length": len(delegated_result),
                             }
                         )
                     except Exception as exc:
                         logger.warning("Workflow handoff_router node failed: %s", exc)
+                        if execution_mode == "xpert_auto" and wait_for_completion:
+                            raise
                         output = ""
                         variables[output_variable] = output
                         yield sse_payload(
@@ -4711,6 +4975,133 @@ async def run_workflow(payload: WorkflowRunRequest, request: Request):
     return await _run_workflow_response(payload, request)
 
 
+async def consume_workflow_stream(response: Any) -> dict[str, Any]:
+    if isinstance(response, JSONResponse):
+        try:
+            payload = json.loads(bytes(response.body).decode("utf-8"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            payload = {}
+        message = payload.get("error") if isinstance(payload, dict) else None
+        raise RuntimeError(str(message or "Xpert workflow could not start."))
+    if not isinstance(response, StreamingResponse):
+        raise RuntimeError("Xpert workflow returned an unsupported response.")
+
+    final_event: dict[str, Any] | None = None
+    error_message = ""
+    buffer = ""
+    async for chunk in response.body_iterator:
+        if isinstance(chunk, bytes):
+            buffer += chunk.decode("utf-8")
+        else:
+            buffer += str(chunk)
+        while "\n\n" in buffer:
+            frame, buffer = buffer.split("\n\n", 1)
+            for line in frame.splitlines():
+                if not line.startswith("data:"):
+                    continue
+                try:
+                    event = json.loads(line[5:].strip())
+                except json.JSONDecodeError:
+                    continue
+                if event.get("event") == "error":
+                    error_message = str(event.get("message") or "Xpert run failed.")
+                elif event.get("event") == "workflow_end":
+                    final_event = event
+    if error_message:
+        raise RuntimeError(error_message)
+    if final_event is None:
+        raise RuntimeError("Xpert workflow ended without a final result.")
+    return final_event
+
+
+async def execute_xpert_handoff_target(
+    handoff: Any,
+    task: Any,
+    handoff_run_id: str | None,
+) -> HandoffExecutionResult:
+    source_depth = int(handoff.metadata.get("handoff_depth") or 0)
+    if source_depth >= HANDOFF_MAX_DELEGATION_DEPTH:
+        raise HandoffPermanentError(
+            f"Xpert delegation depth exceeds {HANDOFF_MAX_DELEGATION_DEPTH}."
+        )
+    target_reference = str(handoff.target_agent).removeprefix("xpert:").strip()
+    if not target_reference:
+        raise HandoffPermanentError("Xpert handoff target is empty.")
+
+    pinned_xpert_id = str(handoff.metadata.get("target_xpert_id") or "").strip()
+    pinned_version_raw = handoff.metadata.get("target_xpert_version")
+    try:
+        pinned_version = int(pinned_version_raw) if pinned_version_raw else None
+    except (TypeError, ValueError):
+        pinned_version = None
+
+    try:
+        prepared = await prepare_published_xpert_run(
+            pinned_xpert_id or target_reference,
+            XpertRunRequest(
+                message=task.input,
+                messages=[],
+                version=pinned_version,
+            ),
+            extra_inputs={
+                "handoff_reason": handoff.reason,
+                "source_agent": handoff.source_agent,
+                "source_task_id": task.task_id,
+            },
+            handoff_depth=source_depth + 1,
+        )
+    except (XpertNotFoundError, ValueError) as exc:
+        raise HandoffPermanentError(str(exc)) from exc
+    except XpertStoreError as exc:
+        raise RuntimeError(str(exc)) from exc
+
+    await agent_task_store.update_handoff_metadata(
+        handoff.handoff_id,
+        {
+            "target_xpert_id": prepared.xpert.id,
+            "target_xpert_slug": prepared.xpert.slug,
+            "target_xpert_version": prepared.version.version,
+            "handoff_depth": source_depth,
+        },
+    )
+    response = await _run_workflow_response(
+        prepared.request,
+        None,
+        runtime_run_type="xpert",
+        runtime_source_id=prepared.xpert.id,
+        runtime_metadata={
+            **prepared.runtime_metadata,
+            "handoff_id": handoff.handoff_id,
+            "agent_task_id": task.task_id,
+            "source_agent": handoff.source_agent,
+        },
+        runtime_parent_run_id=handoff_run_id,
+    )
+    final_event = await consume_workflow_stream(response)
+    return HandoffExecutionResult(
+        output=str(final_event.get("final_output") or ""),
+        run_id=str(final_event.get("run_id") or ""),
+        xpert_id=prepared.xpert.id,
+        xpert_slug=prepared.xpert.slug,
+        xpert_version=prepared.version.version,
+    )
+
+
+def get_handoff_executor() -> HandoffExecutor:
+    global handoff_executor
+    if handoff_executor is None:
+        handoff_executor = HandoffExecutor(
+            agent_task_store,
+            run_registry,
+            execute_xpert_handoff_target,
+            enabled=HANDOFF_EXECUTOR_ENABLED,
+            poll_interval=HANDOFF_EXECUTOR_POLL_SECONDS,
+            lease_seconds=HANDOFF_EXECUTOR_LEASE_SECONDS,
+            max_attempts=HANDOFF_EXECUTOR_MAX_ATTEMPTS,
+        )
+    return handoff_executor
+
+
 @app.post("/api/xperts/{xpert_id}/run")
 async def run_published_xpert(
     xpert_id: str,
@@ -4718,54 +5109,19 @@ async def run_published_xpert(
     request: Request,
 ):
     try:
-        store = get_xpert_store()
-        xpert = await asyncio.to_thread(store.get_xpert, xpert_id)
-        if xpert.status != "published":
-            raise HTTPException(
-                status_code=409,
-                detail="Xpert must be published before it can run.",
-            )
-        version = await asyncio.to_thread(store.get_version, xpert_id, payload.version)
+        prepared = await prepare_published_xpert_run(xpert_id, payload)
     except XpertNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except XpertStoreError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-    history: list[dict[str, str]] = []
-    history_size = 0
-    for message in payload.messages[-20:]:
-        content = message.content.strip()
-        if not content:
-            continue
-        next_size = history_size + len(content)
-        if next_size > 40_000:
-            break
-        history.append({"role": message.role, "content": content})
-        history_size = next_size
-    history_json = json.dumps(history, ensure_ascii=False)
-
-    workflow_payload = version.workflow.model_dump(mode="json")
-    workflow_payload.pop("version", None)
-    workflow_payload.pop("source", None)
-    workflow = WorkflowPayload.model_validate(workflow_payload)
-    inputs = {
-        version.input_variable: payload.message,
-        version.history_variable: history_json,
-        "user_input": payload.message,
-        "conversation_history": history_json,
-    }
     return await _run_workflow_response(
-        WorkflowRunRequest(workflow=workflow, inputs=inputs),
+        prepared.request,
         request,
         runtime_run_type="xpert",
-        runtime_source_id=xpert.id,
-        runtime_metadata={
-            "xpert_id": xpert.id,
-            "xpert_slug": xpert.slug,
-            "xpert_version": version.version,
-            "xpert_draft_revision": version.draft_revision,
-            "xpert_checksum": version.checksum,
-        },
+        runtime_source_id=prepared.xpert.id,
+        runtime_metadata=prepared.runtime_metadata,
     )
 
 
@@ -5058,6 +5414,25 @@ async def cancel_runtime_run(run_id: str, payload: dict[str, Any] | None = None)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Runtime run not found.") from exc
     return runtime_run_to_payload(run)
+
+
+@app.get("/api/runtime/environment-summary")
+async def get_runtime_environment_summary():
+    """Return redacted runtime dependency readiness for the ops dashboard."""
+
+    gateway_url, gateway_key = get_llm_gateway_config()
+    return {
+        "llm_gateway_configured": bool(LLM_GATEWAY_URL and LLM_GATEWAY_KEY),
+        "openrouter_configured": bool(OPENROUTER_API_KEY),
+        "model_gateway_ready": bool(gateway_url and gateway_key),
+        "git_available": shutil.which("git") is not None,
+        "node_available": shutil.which("node") is not None,
+        "npm_available": shutil.which("npm") is not None,
+        "npx_available": shutil.which("npx") is not None,
+        "python_available": bool(sys.executable),
+        "redacted": True,
+        "updated_at": time.time(),
+    }
 
 
 @app.post("/api/fusion/chat")
@@ -5479,10 +5854,13 @@ async def team_chat(payload: TeamChatRequest, request: Request):
 @app.on_event("startup")
 async def start_mcp_ttl_cleanup() -> None:
     mcp_manager.start_ttl_cleanup(on_cleanup=tool_registry.unregister_sessions)
+    get_handoff_executor().start()
 
 
 @app.on_event("shutdown")
 async def shutdown_mcp_sessions() -> None:
+    if handoff_executor is not None:
+        await handoff_executor.stop()
     await mcp_manager.stop_ttl_cleanup()
     await mcp_manager.close_all()
     await tool_registry.clear()
@@ -5659,7 +6037,14 @@ async def list_agent_handoffs_global(
     created_after: float | None = None,
     limit: int = 50,
 ):
-    valid_statuses = {"pending", "accepted", "rejected", "completed"}
+    valid_statuses = {
+        "pending",
+        "accepted",
+        "retry_wait",
+        "rejected",
+        "completed",
+        "dead_letter",
+    }
     if status is not None and status not in valid_statuses:
         raise HTTPException(status_code=400, detail="Invalid agent handoff status.")
     handoffs = await agent_task_store.list_handoffs(task_id=task_id)
@@ -5710,12 +6095,25 @@ async def create_agent_handoff(task_id: str, payload: dict[str, Any]):
     metadata = payload.get("metadata")
     if metadata is not None and not isinstance(metadata, dict):
         raise HTTPException(status_code=400, detail="Handoff metadata must be an object.")
+    execution_mode = str(
+        payload.get("execution_mode")
+        or payload.get("executionMode")
+        or (metadata or {}).get("execution_mode")
+        or ("xpert_auto" if target_agent.startswith("xpert:") else "manual")
+    ).strip()
+    if execution_mode not in {"manual", "xpert_auto"}:
+        raise HTTPException(status_code=400, detail="Invalid Handoff execution_mode.")
+    handoff_metadata = {
+        **dict(metadata or {}),
+        "execution_mode": execution_mode,
+        "ready_for_execution": False,
+    }
     handoff = await agent_task_store.create_handoff(
         task_id,
         source_agent=source_agent or "workflow",
         target_agent=target_agent,
         reason=reason,
-        metadata=metadata,
+        metadata=handoff_metadata,
     )
     task_run = await first_runtime_run_for_source(task_id, "agent_task")
     handoff_run = await run_registry.create_run(
@@ -5729,7 +6127,7 @@ async def create_agent_handoff(task_id: str, payload: dict[str, Any]):
             else (task_run.run_id if task_run else None)
         ),
         metadata={
-            **dict(metadata or {}),
+            **handoff_metadata,
             "agent_task_id": task_id,
             "handoff_id": handoff.handoff_id,
             "source_agent": handoff.source_agent,
@@ -5747,6 +6145,10 @@ async def create_agent_handoff(task_id: str, payload: dict[str, Any]):
             "source_agent": handoff.source_agent,
             "target_agent": handoff.target_agent,
         },
+    )
+    await agent_task_store.update_handoff_metadata(
+        handoff.handoff_id,
+        {"ready_for_execution": True},
     )
     return agent_handoff_to_payload(handoff)
 
@@ -5909,6 +6311,50 @@ async def complete_agent_handoff(
     payload: dict[str, Any] | None = None,
 ):
     return await update_agent_handoff_api(handoff_id, "completed", payload)
+
+
+@app.get("/api/runtime/handoff-executor/status")
+async def get_handoff_executor_status():
+    return await get_handoff_executor().status()
+
+
+@app.post("/api/runtime/agent-handoffs/{handoff_id}/execute")
+async def execute_agent_handoff_now(handoff_id: str):
+    existing = await agent_task_store.get_handoff(handoff_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Agent handoff not found.")
+    if existing.status in {"completed", "rejected", "dead_letter"}:
+        return agent_handoff_to_payload(existing)
+    try:
+        handoff = await get_handoff_executor().execute_handoff(handoff_id)
+    except HandoffBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except HandoffExecutorError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return agent_handoff_to_payload(handoff)
+
+
+@app.post("/api/runtime/agent-handoffs/{handoff_id}/requeue")
+async def requeue_agent_handoff(
+    handoff_id: str,
+    payload: dict[str, Any] | None = None,
+):
+    body = payload or {}
+    operator = str(body.get("operator") or "meta-agent-operator").strip()
+    reset_attempts = bool(body.get("reset_attempts", True))
+    repin_version = bool(body.get("repin_version", True))
+    try:
+        handoff = await get_handoff_executor().requeue_handoff(
+            handoff_id,
+            operator=operator or "meta-agent-operator",
+            reset_attempts=reset_attempts,
+            repin_version=repin_version,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Agent handoff not found.") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return agent_handoff_to_payload(handoff)
 
 
 @app.post("/api/runtime/agent-tasks/{task_id}/cancel")

@@ -141,6 +141,17 @@ class XpertStore:
             item = self._find_unlocked(self._read_unlocked(), xpert_id)
             return item.model_copy(deep=True)
 
+    def resolve_xpert(self, reference: str) -> XpertDefinition:
+        """Resolve an Xpert by stable id first, then by its unique slug."""
+
+        clean_reference = reference.strip()
+        with self._lock:
+            items = self._read_unlocked()
+            for item in items:
+                if item.id == clean_reference or item.slug == clean_reference:
+                    return item.model_copy(deep=True)
+        raise XpertNotFoundError(f"Xpert not found: {clean_reference}")
+
     def create_xpert(
         self,
         *,

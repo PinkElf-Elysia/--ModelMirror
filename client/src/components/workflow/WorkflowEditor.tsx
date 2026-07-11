@@ -29,6 +29,7 @@ import {
   type WorkflowNodeKind,
 } from "../../types/workflow";
 import { type RuntimeMiddlewareField } from "../../types/runtimeMiddleware";
+import { type XpertListResponse, type XpertSummary } from "../../types/xpert";
 import { readStoredWorkflow, saveStoredWorkflow } from "../../utils/workflowStorage";
 import NodePalette from "./NodePalette";
 import WorkflowNodeCard from "./WorkflowNodeCard";
@@ -347,6 +348,10 @@ function createNodeData(
       taskIdVariable: "agent_task_id",
       sourceAgent: "workflow-planner",
       targetAgent: "review-agent",
+      executionMode: "manual",
+      waitForCompletion: "false",
+      resultVariable: "handoff_result",
+      waitTimeoutSeconds: "120",
       reason: "请接手处理：{{user_input}}",
       outputVariable: "agent_handoff_id",
     };
@@ -360,6 +365,10 @@ function createNodeData(
       sourceVariable: "agent_output",
       taskTitle: "来自工作流智能体的任务",
       targetAgent: "review-agent",
+      executionMode: "manual",
+      waitForCompletion: "false",
+      resultVariable: "handoff_result",
+      waitTimeoutSeconds: "120",
       sourceAgent: "workflow-agent",
       reasonTemplate: "请处理工作流智能体输出：{{agent_output}}",
       outputVariable: "agent_handoff_id",
@@ -661,6 +670,132 @@ function ConfigSwitch({
         type="checkbox"
       />
     </label>
+  );
+}
+
+function HandoffExecutionConfig({
+  data,
+  update,
+  publishedXperts,
+  publishedXpertsError,
+}: {
+  data: WorkflowNodeData;
+  update: (patch: Partial<WorkflowNodeData>) => void;
+  publishedXperts: XpertSummary[];
+  publishedXpertsError: string;
+}) {
+  const executionMode = data.executionMode ?? "manual";
+  const waitForCompletion = workflowBooleanValue(data.waitForCompletion);
+  const automatic = executionMode === "xpert_auto";
+
+  return (
+    <ConfigSection
+      description="人工目标进入 Inbox；已发布 Xpert 可被自动领取并执行。"
+      title="移交执行"
+    >
+      <Field label="执行方式">
+        <select
+          className={textInputClass()}
+          onChange={(event) => {
+            const mode = event.target.value;
+            const firstTarget = publishedXperts[0]
+              ? `xpert:${publishedXperts[0].slug}`
+              : "";
+            update({
+              executionMode: mode,
+              targetAgent:
+                mode === "xpert_auto" && !String(data.targetAgent ?? "").startsWith("xpert:")
+                  ? firstTarget
+                  : data.targetAgent,
+              waitForCompletion: mode === "xpert_auto" ? "true" : "false",
+            });
+          }}
+          value={executionMode}
+        >
+          <option className="bg-slate-950" value="manual">
+            人工移交
+          </option>
+          <option className="bg-slate-950" value="xpert_auto">
+            自动执行已发布 Xpert
+          </option>
+        </select>
+      </Field>
+
+      {automatic ? (
+        <Field label="目标 Xpert">
+          <select
+            className={textInputClass()}
+            onChange={(event) => update({ targetAgent: event.target.value })}
+            value={data.targetAgent ?? ""}
+          >
+            <option className="bg-slate-950" value="">
+              {publishedXperts.length ? "选择已发布 Xpert" : "暂无已发布 Xpert"}
+            </option>
+            {publishedXperts.map((xpert) => (
+              <option
+                className="bg-slate-950"
+                key={xpert.id}
+                value={`xpert:${xpert.slug}`}
+              >
+                {xpert.name} · v{xpert.published_version ?? "-"}
+              </option>
+            ))}
+          </select>
+          {publishedXpertsError ? (
+            <p className="mt-2 text-xs leading-5 text-amber-200">
+              {publishedXpertsError}
+            </p>
+          ) : null}
+        </Field>
+      ) : (
+        <Field label="目标 Agent">
+          <input
+            className={textInputClass()}
+            onChange={(event) => update({ targetAgent: event.target.value })}
+            placeholder="例如：review-agent"
+            value={data.targetAgent ?? ""}
+          />
+        </Field>
+      )}
+
+      {automatic ? (
+        <>
+          <ConfigSwitch
+            checked={waitForCompletion}
+            description="等待目标 Xpert 完成，并把结果写入下游变量。关闭后源工作流立即继续。"
+            label="等待执行结果"
+            onChange={(checked) =>
+              update({ waitForCompletion: checked ? "true" : "false" })
+            }
+          />
+          {waitForCompletion ? (
+            <div className="grid gap-3 sm:grid-cols-2">
+              <Field label="结果变量">
+                <input
+                  className={textInputClass()}
+                  onChange={(event) =>
+                    update({ resultVariable: event.target.value })
+                  }
+                  value={data.resultVariable ?? "handoff_result"}
+                />
+              </Field>
+              <Field label="等待超时（秒）">
+                <input
+                  className={textInputClass()}
+                  max={600}
+                  min={5}
+                  onChange={(event) =>
+                    update({ waitTimeoutSeconds: event.target.value })
+                  }
+                  type="number"
+                  value={data.waitTimeoutSeconds ?? "120"}
+                />
+              </Field>
+            </div>
+          ) : null}
+        </>
+      ) : null}
+    </ConfigSection>
   );
 }
 
@@ -1031,6 +1166,8 @@ interface NodeConfigProps {
 function NodeConfig({ node, onChange }: NodeConfigProps) {
   const [registryTools, setRegistryTools] = useState<RegistryToolOption[]>([]);
   const [registryToolsError, setRegistryToolsError] = useState("");
+  const [publishedXperts, setPublishedXperts] = useState<XpertSummary[]>([]);
+  const [publishedXpertsError, setPublishedXpertsError] = useState("");
 
   useEffect(() => {
     let cancelled = false;
@@ -1059,7 +1196,29 @@ function NodeConfig({ node, onChange }: NodeConfigProps) {
       }
     }
 
+    async function loadPublishedXperts() {
+      try {
+        const response = await fetch("/api/xperts?status=published&limit=200");
+        const payload = (await response.json()) as XpertListResponse;
+        if (!response.ok || !Array.isArray(payload.items)) {
+          throw new Error("已发布 Xpert 列表暂时不可用。");
+        }
+        if (!cancelled) {
+          setPublishedXperts(payload.items);
+          setPublishedXpertsError("");
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setPublishedXperts([]);
+          setPublishedXpertsError(
+            error instanceof Error ? error.message : "已发布 Xpert 列表加载失败。",
+          );
+        }
+      }
+    }
+
     void loadRegistryTools();
+    void loadPublishedXperts();
 
     return () => {
       cancelled = true;
@@ -1664,7 +1823,7 @@ function NodeConfig({ node, onChange }: NodeConfigProps) {
       {data.kind === "agent_handoff" ? (
         <>
           <div className="rounded-lg border border-purple-300/25 bg-purple-300/10 px-3 py-2 text-xs leading-5 text-purple-50">
-            该节点会读取已有 Agent Task 的 task_id，并创建一条 Handoff 记录；当前只登记移交，不做真实调度。
+            读取已有 Agent Task 并创建 Handoff。人工目标进入 Inbox，显式 Xpert 目标可自动执行并回传结果。
           </div>
           <Field label="任务 ID 变量">
             <input
@@ -1680,13 +1839,12 @@ function NodeConfig({ node, onChange }: NodeConfigProps) {
               value={data.sourceAgent ?? ""}
             />
           </Field>
-          <Field label="目标智能体">
-            <input
-              className={textInputClass()}
-              onChange={(event) => update({ targetAgent: event.target.value })}
-              value={data.targetAgent ?? ""}
-            />
-          </Field>
+          <HandoffExecutionConfig
+            data={data}
+            publishedXperts={publishedXperts}
+            publishedXpertsError={publishedXpertsError}
+            update={update}
+          />
           <Field label="移交理由（支持 {{变量}}）">
             <textarea
               className={`${textInputClass()} min-h-28 resize-none leading-6`}
@@ -1707,7 +1865,7 @@ function NodeConfig({ node, onChange }: NodeConfigProps) {
       {data.kind === "handoff_router" ? (
         <>
           <div className="rounded-lg border border-fuchsia-300/25 bg-fuchsia-300/10 px-3 py-2 text-xs leading-5 text-fuchsia-50">
-            读取上游智能体输出，创建 AgentTask 并投递一条 pending Handoff；目标 Agent 仍需在 Inbox 中人工接受和完成。
+            读取上游智能体输出并创建任务。可投递到人工 Inbox，也可调用已发布 Xpert 完成协作。
           </div>
           <Field label="来源变量">
             <input
@@ -1730,13 +1888,12 @@ function NodeConfig({ node, onChange }: NodeConfigProps) {
               value={data.sourceAgent ?? ""}
             />
           </Field>
-          <Field label="目标智能体">
-            <input
-              className={textInputClass()}
-              onChange={(event) => update({ targetAgent: event.target.value })}
-              value={data.targetAgent ?? ""}
-            />
-          </Field>
+          <HandoffExecutionConfig
+            data={data}
+            publishedXperts={publishedXperts}
+            publishedXpertsError={publishedXpertsError}
+            update={update}
+          />
           <Field label="移交理由模板（支持 {{变量}}）">
             <textarea
               className={`${textInputClass()} min-h-28 resize-none leading-6`}

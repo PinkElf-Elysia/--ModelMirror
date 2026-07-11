@@ -183,8 +183,10 @@ function handoffStatusLabel(status: string) {
   const labels: Record<string, string> = {
     pending: "待处理",
     accepted: "已接受",
+    retry_wait: "等待重试",
     rejected: "已拒绝",
     completed: "已完成",
+    dead_letter: "死信",
   };
   return labels[status] ?? status;
 }
@@ -192,6 +194,8 @@ function handoffStatusLabel(status: string) {
 function handoffStatusClass(status: string) {
   if (status === "completed") return "border-emerald-300/25 bg-emerald-300/10 text-emerald-100";
   if (status === "rejected") return "border-rose-300/25 bg-rose-300/10 text-rose-100";
+  if (status === "dead_letter") return "border-rose-300/35 bg-rose-300/15 text-rose-100";
+  if (status === "retry_wait") return "border-amber-300/25 bg-amber-300/10 text-amber-100";
   if (status === "accepted") return "border-cyan-300/25 bg-cyan-300/10 text-cyan-100";
   return "border-hire-300/25 bg-hire-300/10 text-hire-100";
 }
@@ -337,6 +341,17 @@ export default function MetaAgentPage() {
     void loadAgentTasks();
     void loadHandoffInbox();
   }, []);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      if (document.visibilityState !== "visible") return;
+      void loadHandoffInbox();
+      if (selectedTask?.task_id) {
+        void loadAgentTask(selectedTask.task_id);
+      }
+    }, 3000);
+    return () => window.clearInterval(timer);
+  }, [handoffStatusFilter, handoffTargetFilter, selectedTask?.task_id]);
 
   async function loadAgentTaskHandoffs(taskId: string) {
     try {
@@ -502,7 +517,7 @@ export default function MetaAgentPage() {
 
   async function updateHandoffStatus(
     handoff: AgentHandoffSummary,
-    action: "accept" | "reject" | "complete",
+    action: "accept" | "reject" | "complete" | "execute" | "requeue",
   ) {
     setHandoffActionId(handoff.handoff_id);
     try {
@@ -511,7 +526,13 @@ export default function MetaAgentPage() {
         handoffCompleteDrafts[handoff.handoff_id]?.trim() ||
         "Completed in MetaAgent handoff inbox.";
       const body =
-        action === "reject"
+        action === "requeue"
+          ? {
+              operator,
+              reset_attempts: true,
+              repin_version: true,
+            }
+          : action === "reject"
           ? {
               rejected_by: operator,
               reason: "Rejected in MetaAgent handoff inbox.",
@@ -556,6 +577,53 @@ export default function MetaAgentPage() {
 
   function renderHandoffActions(handoff: AgentHandoffSummary) {
     const busy = handoffActionId === handoff.handoff_id;
+    const automatic =
+      handoffMetaText(handoff, "execution_mode") === "xpert_auto" ||
+      handoff.target_agent.startsWith("xpert:");
+    if (automatic && handoff.status === "pending") {
+      return (
+        <div className="mt-2 flex gap-2">
+          <button
+            className="rounded-md border border-cyan-300/25 bg-cyan-300/10 px-2.5 py-1 text-[11px] font-semibold text-cyan-100 transition hover:bg-cyan-300/15 disabled:opacity-50"
+            disabled={busy}
+            onClick={() => void updateHandoffStatus(handoff, "execute")}
+            type="button"
+          >
+            {busy ? "执行中" : "立即执行"}
+          </button>
+          <button
+            className="rounded-md border border-rose-300/25 bg-rose-300/10 px-2.5 py-1 text-[11px] font-semibold text-rose-100 transition hover:bg-rose-300/15 disabled:opacity-50"
+            disabled={busy}
+            onClick={() => void updateHandoffStatus(handoff, "reject")}
+            type="button"
+          >
+            拒绝
+          </button>
+        </div>
+      );
+    }
+    if (
+      automatic &&
+      (handoff.status === "retry_wait" || handoff.status === "dead_letter")
+    ) {
+      return (
+        <button
+          className="mt-2 rounded-md border border-amber-300/25 bg-amber-300/10 px-2.5 py-1 text-[11px] font-semibold text-amber-100 transition hover:bg-amber-300/15 disabled:opacity-50"
+          disabled={busy}
+          onClick={() => void updateHandoffStatus(handoff, "requeue")}
+          type="button"
+        >
+          {busy ? "重新入队中" : "重新入队"}
+        </button>
+      );
+    }
+    if (automatic && handoff.status === "accepted") {
+      return (
+        <p className="mt-2 text-[11px] text-cyan-200">
+          目标 Xpert 正在执行，完成后会自动回写结果。
+        </p>
+      );
+    }
     if (handoff.status === "pending") {
       return (
         <div className="mt-2 flex gap-2">
@@ -645,17 +713,38 @@ export default function MetaAgentPage() {
     const completedBy = handoffMetaText(handoff, "completed_by");
     const result = handoffMetaText(handoff, "result");
     const reason = handoffMetaText(handoff, "reason");
+    const lastError = handoffMetaText(handoff, "last_error");
+    const targetVersion = handoffMetaText(handoff, "target_xpert_version");
+    const attempts = handoffMetaText(handoff, "attempts");
+    const maxAttempts = handoffMetaText(handoff, "max_attempts");
     const time =
       handoffMetaTime(handoff, "completed_at") ||
       handoffMetaTime(handoff, "rejected_at") ||
       handoffMetaTime(handoff, "accepted_at");
     const handler = completedBy || rejectedBy || acceptedBy;
-    if (!handler && !result && !reason && !time) return null;
+    if (
+      !handler &&
+      !result &&
+      !reason &&
+      !time &&
+      !lastError &&
+      !targetVersion &&
+      !attempts
+    )
+      return null;
     return (
       <div className="mt-2 rounded-md border border-white/10 bg-slate-950/25 px-2 py-1.5 text-[11px] leading-5 text-slate-400">
         {handler ? <p>处理者：{handler}</p> : null}
         {time ? <p>处理时间：{time}</p> : null}
+        {targetVersion ? <p>目标版本：v{targetVersion}</p> : null}
+        {attempts ? (
+          <p>
+            执行尝试：{attempts}
+            {maxAttempts ? ` / ${maxAttempts}` : ""}
+          </p>
+        ) : null}
         {result ? <p className="line-clamp-2">结果：{result}</p> : null}
+        {lastError ? <p className="line-clamp-2 text-rose-200">错误：{lastError}</p> : null}
         {reason && handoff.status === "rejected" ? (
           <p className="line-clamp-2">原因：{reason}</p>
         ) : null}
@@ -1069,7 +1158,7 @@ export default function MetaAgentPage() {
                   Handoff Inbox Beta
                 </p>
                 <p className="mt-1 text-xs text-slate-400">
-                  Manual accept / reject / complete
+                  人工处理与 Xpert 自动协作
                 </p>
               </div>
               <button
@@ -1089,8 +1178,10 @@ export default function MetaAgentPage() {
                 <option value="all">全部状态</option>
                 <option value="pending">待处理</option>
                 <option value="accepted">已接受</option>
+                <option value="retry_wait">等待重试</option>
                 <option value="rejected">已拒绝</option>
                 <option value="completed">已完成</option>
+                <option value="dead_letter">死信</option>
               </select>
               <input
                 className="h-9 rounded-md border border-white/10 bg-slate-950/45 px-2 text-xs text-slate-200 outline-none transition placeholder:text-slate-500 focus:border-hire-300/45 focus:ring-2 focus:ring-hire-300/10"
@@ -1125,6 +1216,11 @@ export default function MetaAgentPage() {
                         <p className="mt-1 break-all font-mono text-[10px] text-slate-500">
                           {handoff.handoff_id}
                         </p>
+                        {handoff.target_agent.startsWith("xpert:") ? (
+                          <span className="mt-1 inline-flex rounded-md border border-violet-300/25 bg-violet-300/10 px-1.5 py-0.5 text-[10px] font-semibold text-violet-100">
+                            Xpert 自动执行
+                          </span>
+                        ) : null}
                       </div>
                       <span
                         className={`shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-semibold ${handoffStatusClass(

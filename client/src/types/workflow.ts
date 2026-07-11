@@ -79,6 +79,10 @@ export interface WorkflowNodeData extends Record<string, unknown> {
   sourceVariable?: string;
   sourceAgent?: string;
   targetAgent?: string;
+  executionMode?: string;
+  waitForCompletion?: string;
+  resultVariable?: string;
+  waitTimeoutSeconds?: string;
   reason?: string;
   reasonTemplate?: string;
   instruction?: string;

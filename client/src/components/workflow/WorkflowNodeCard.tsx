@@ -222,10 +222,12 @@ function outputName(data: WorkflowNode["data"]) {
     return `${data.assignedAgent ?? "workflow-planner"} → ${data.outputVariable ?? "agent_task_id"}`;
   }
   if (data.kind === "agent_handoff") {
-    return `${data.taskIdVariable ?? "agent_task_id"} -> ${data.targetAgent ?? "review-agent"} -> ${data.outputVariable ?? "agent_handoff_id"}`;
+    const mode = data.executionMode === "xpert_auto" ? "auto" : "manual";
+    return `${mode} · ${data.taskIdVariable ?? "agent_task_id"} -> ${data.targetAgent ?? "review-agent"}`;
   }
   if (data.kind === "handoff_router") {
-    return `${data.sourceVariable ?? "agent_output"} -> ${data.targetAgent ?? "review-agent"} -> ${data.outputVariable ?? "agent_handoff_id"}`;
+    const mode = data.executionMode === "xpert_auto" ? "auto" : "manual";
+    return `${mode} · ${data.sourceVariable ?? "agent_output"} -> ${data.targetAgent ?? "review-agent"}`;
   }
   if (data.kind === "mcp_tool") {
     return `🔧 ${data.toolName ?? "未选择"} → ${data.outputVariable ?? "mcp_output"}`;

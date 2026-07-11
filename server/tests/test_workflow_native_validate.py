@@ -1737,6 +1737,75 @@ async def test_handoff_router_output_variable_is_available_downstream(
 
 
 @pytest.mark.asyncio
+async def test_handoff_router_auto_xpert_result_is_available_downstream(
+    client: httpx.AsyncClient,
+) -> None:
+    workflow = linear_workflow()
+    workflow["nodes"][1] = {
+        "id": "router",
+        "type": "handoff_router",
+        "data": {
+            "kind": "handoff_router",
+            "sourceVariable": "user_input",
+            "taskTitle": "Delegate {{user_input}}",
+            "targetAgent": "xpert:specialist",
+            "reasonTemplate": "Complete {{user_input}}",
+            "executionMode": "xpert_auto",
+            "waitForCompletion": "true",
+            "resultVariable": "handoff_result",
+            "waitTimeoutSeconds": "120",
+            "outputVariable": "agent_handoff_id",
+        },
+    }
+    workflow["nodes"][2]["data"]["outputVariable"] = "handoff_result"
+    workflow["edges"] = [
+        {"id": "e1", "source": "input", "target": "router"},
+        {"id": "e2", "source": "router", "target": "output"},
+    ]
+
+    data = await validate(client, workflow)
+
+    assert data["valid"] is True
+    assert "missing_output_variable_reference" not in issue_codes(data)
+
+
+@pytest.mark.asyncio
+async def test_handoff_router_rejects_invalid_auto_execution_settings(
+    client: httpx.AsyncClient,
+) -> None:
+    workflow = linear_workflow()
+    workflow["nodes"][1] = {
+        "id": "router",
+        "type": "handoff_router",
+        "data": {
+            "kind": "handoff_router",
+            "sourceVariable": "user_input",
+            "taskTitle": "Delegate {{user_input}}",
+            "targetAgent": "review-agent",
+            "reasonTemplate": "Complete {{user_input}}",
+            "executionMode": "xpert_auto",
+            "waitForCompletion": "true",
+            "resultVariable": "not valid",
+            "waitTimeoutSeconds": "2",
+            "outputVariable": "agent_handoff_id",
+        },
+    }
+    workflow["nodes"][2]["data"]["outputVariable"] = "agent_handoff_id"
+    workflow["edges"] = [
+        {"id": "e1", "source": "input", "target": "router"},
+        {"id": "e2", "source": "router", "target": "output"},
+    ]
+
+    data = await validate(client, workflow)
+    codes = issue_codes(data)
+
+    assert data["valid"] is False
+    assert "invalid_handoff_router_xpert_target" in codes
+    assert "invalid_handoff_router_result_variable" in codes
+    assert "invalid_handoff_router_wait_timeout" in codes
+
+
+@pytest.mark.asyncio
 async def test_templates_endpoint_returns_starter_template(
     client: httpx.AsyncClient,
 ) -> None:

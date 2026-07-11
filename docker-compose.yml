@@ -37,6 +37,8 @@ services:
       SKILL_INSTALLED_DIR: /app/skills/installed
       SKILL_TMP_DIR: /app/skills/tmp
       XPERT_STORAGE_DIR: /app/xperts/storage
+      AGENT_TASK_STORAGE_DIR: /app/xpert_runtime/storage
+      HANDOFF_EXECUTOR_ENABLED: "true"
     ports:
       - "8000:8000"
     volumes:
@@ -44,6 +46,7 @@ services:
       - ./server/rag/uploads:/app/rag/uploads
       - ./server/skills/installed:/app/skills/installed
       - ./server/xperts/storage:/app/xperts/storage
+      - ./server/xpert_runtime/storage:/app/xpert_runtime/storage
     restart: unless-stopped
     healthcheck:
       test:
