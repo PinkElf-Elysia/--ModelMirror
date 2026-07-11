@@ -19,6 +19,20 @@ from .handoff_executor import (
     HandoffExecutorError,
     HandoffPermanentError,
 )
+from .goal_coordinator import GoalCoordinator, GoalPlan, PinnedXpert
+from .goals import (
+    ConversationGoal,
+    GoalConflictError,
+    GoalNotFoundError,
+    GoalStatus,
+    GoalStep,
+    GoalStepStatus,
+    GoalStore,
+    GoalStoreError,
+    GoalValidationError,
+    goal_to_payload,
+    validate_goal_plan,
+)
 from .defaults import create_default_runtime, event_recorder, system_prompt_injector
 from .events import RuntimeEventStore
 from .middleware import AgentMiddleware, MiddlewarePipeline
@@ -86,6 +100,20 @@ __all__ = [
     "HandoffExecutor",
     "HandoffExecutorError",
     "HandoffPermanentError",
+    "ConversationGoal",
+    "GoalConflictError",
+    "GoalCoordinator",
+    "GoalNotFoundError",
+    "GoalPlan",
+    "GoalStatus",
+    "GoalStep",
+    "GoalStepStatus",
+    "GoalStore",
+    "GoalStoreError",
+    "GoalValidationError",
+    "PinnedXpert",
+    "goal_to_payload",
+    "validate_goal_plan",
     "InMemoryToolAuditStore",
     "MCPToolsetProvider",
     "MiddlewareContext",

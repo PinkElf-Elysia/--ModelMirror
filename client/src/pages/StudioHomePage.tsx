@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
+import matrixOasisTeaser from "../assets/matrix-oasis/matrix-oasis-teaser-640.webp";
 import PageContainer from "../components/PageContainer";
 import { agents } from "../data/agents";
 import { mcpProjects } from "../data/mcpProjects";
@@ -111,6 +112,45 @@ interface QuickAction {
   title: string;
 }
 
+function MatrixOasisTeaser() {
+  return (
+    <Link
+      aria-label="进入矩阵绿洲预告"
+      className="group relative mb-6 flex min-h-40 overflow-hidden rounded-xl bg-ink-950 shadow-[0_1px_0_rgba(255,255,255,0.08)_inset] focus-visible:outline-none sm:min-h-48"
+      to="/matrix-oasis"
+    >
+      <img
+        alt="发光的蓝紫色矩阵门廊"
+        className="absolute inset-0 h-full w-full object-cover object-center opacity-55 transition duration-500 ease-out group-hover:scale-[1.025] group-hover:opacity-70"
+        decoding="async"
+        height="320"
+        src={matrixOasisTeaser}
+        width="640"
+      />
+      <span className="absolute inset-0 bg-[linear-gradient(90deg,rgba(3,6,17,0.96)_0%,rgba(3,6,17,0.76)_48%,rgba(3,6,17,0.18)_100%)]" />
+      <span className="absolute inset-x-0 bottom-0 h-px bg-[linear-gradient(90deg,rgba(36,217,255,0.8),rgba(124,58,237,0.7),transparent)]" />
+
+      <span className="relative flex w-full flex-col justify-between gap-5 p-5 sm:flex-row sm:items-end sm:p-7">
+        <span className="max-w-xl">
+          <span className="inline-flex rounded-full border border-brand-300/30 bg-brand-300/10 px-2.5 py-1 text-[11px] font-semibold text-brand-100">
+            世界生成中
+          </span>
+          <span className="mt-3 block text-2xl font-semibold tracking-[-0.025em] text-white sm:text-3xl">
+            矩阵绿洲
+          </span>
+          <span className="mt-2 block text-sm leading-6 text-slate-300">
+            一段尚未完成的人机开放世界预告。
+          </span>
+        </span>
+        <span className="inline-flex min-h-11 shrink-0 items-center justify-center self-start rounded-full border border-white/20 bg-white/10 px-4 text-sm font-semibold text-white transition duration-200 group-hover:border-brand-200/60 group-hover:bg-brand-300 group-hover:text-ink-950 sm:self-auto">
+          进入预告
+          <span aria-hidden="true" className="ml-2 transition-transform duration-200 group-hover:translate-x-0.5">→</span>
+        </span>
+      </span>
+    </Link>
+  );
+}
+
 const categories: Array<{ key: WorkspaceCategory; label: string }> = [
   { key: "all", label: "全部" },
   { key: "agents", label: "数字专家" },
@@ -135,6 +175,12 @@ const tagFilters: Array<{ key: ResourceTag; label: string }> = [
 ];
 
 const quickActions: QuickAction[] = [
+  {
+    title: "长期 Goal",
+    description: "审核 Planner 生成的依赖计划，暂停、恢复并追踪多 Xpert 协作执行。",
+    href: "/agents/goals",
+    label: "打开 Goal 工作台",
+  },
   {
     title: "创建 Xpert",
     description: "从默认 Agent 工作流开始，保存草稿并发布不可变版本。",
@@ -337,6 +383,12 @@ function WorkspaceSidebar() {
         先把资源入口、运行状态和近期对齐任务收拢到一个工作台，再逐步补齐 Xpert Studio、Toolset、知识流水线和 Runtime Ops。
       </p>
       <div className="mt-4 space-y-2">
+        <Link
+          className="block rounded-lg border border-cyan-300/25 bg-cyan-300/10 px-3 py-2 text-sm font-semibold text-cyan-100 transition hover:bg-cyan-300/20"
+          to="/agents/goals"
+        >
+          打开长期 Goal
+        </Link>
         <Link
           className="block rounded-lg border border-hire-300/25 bg-hire-300/10 px-3 py-2 text-sm font-semibold text-hire-100 transition hover:bg-hire-300/20"
           to="/agents/studio"
@@ -731,6 +783,8 @@ export default function StudioHomePage() {
           </label>
         </div>
       </header>
+
+      <MatrixOasisTeaser />
 
       <section className="mb-6 rounded-lg border border-white/10 bg-white/[0.045] p-4">
         <div className="flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">

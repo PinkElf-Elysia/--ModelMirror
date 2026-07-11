@@ -94,10 +94,22 @@ Public executor interfaces:
 - `POST /api/runtime/agent-handoffs/{handoff_id}/execute`
 - `POST /api/runtime/agent-handoffs/{handoff_id}/requeue`
 
+## Conversation Goal Coordination
+
+Conversation Goals add a durable orchestration layer above AgentTask and Handoff. A published Planner Xpert produces a JSON dependency plan, the user reviews it, and GoalCoordinator dispatches ready steps through explicit `xpert_auto` handoffs. The default per-Goal concurrency is two.
+
+Planner and target Xpert versions are pinned before execution. A step receives the Goal objective, its instruction, and completed dependency results. The combined input is capped at 20,000 characters and marked when truncated.
+
+Pause stops new dispatch while allowing in-flight work to settle. Cancel prevents future dispatch but does not force-terminate an active model request. Exhausted Handoff retries move the Goal to `needs_attention`; users may retry, reassign, or explicitly skip a non-final step.
+
+Goal state is atomically persisted in `goals.json` under `AGENT_TASK_STORAGE_DIR`. RunRegistry adds `run_type=goal` and links planner, task, handoff, target Xpert, and node runs. Since RunRegistry remains in memory, recovery creates a new Goal run with `recovery_of_run_id` metadata.
+
+See `docs/XPERT_GOALS.md` for the model, state machine, API, planner contract, and safety limits.
+
 ## Current Limits
 
 - File persistence is local and is not a workspace database.
 - There is no public App/API token, sharing model, organization permission, or collaborative editor.
 - Automatic Handoff execution is limited to a single backend process and explicit `xpert:` targets.
-- Long-term Goals, durable memory, file understanding, and knowledge-ingestion jobs are separate future milestones.
+- Durable memory, file understanding, and knowledge-ingestion jobs are separate future milestones.
 - A normal /workflow run remains unchanged and continues to use its existing local-draft behavior.

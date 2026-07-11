@@ -1,11 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import PageContainer from "../components/PageContainer";
 import {
   type XpertConversationMessage,
   type XpertDefinition,
+  type XpertSummary,
 } from "../types/xpert";
-import { getXpert } from "../utils/xpertApi";
+import { createGoal } from "../utils/goalApi";
+import { getXpert, listXperts } from "../utils/xpertApi";
 
 interface XpertRunEvent {
   event: string;
@@ -80,6 +82,7 @@ function roleCopy(role: XpertConversationMessage["role"]) {
 
 export default function XpertChatPage() {
   const { xpertId = "" } = useParams();
+  const navigate = useNavigate();
   const [xpert, setXpert] = useState<XpertDefinition | null>(null);
   const [version, setVersion] = useState<number | null>(null);
   const [messages, setMessages] = useState<XpertConversationMessage[]>([]);
@@ -92,6 +95,12 @@ export default function XpertChatPage() {
   const [running, setRunning] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [showGoalComposer, setShowGoalComposer] = useState(false);
+  const [goalTitle, setGoalTitle] = useState("");
+  const [goalObjective, setGoalObjective] = useState("");
+  const [plannerXpertId, setPlannerXpertId] = useState("");
+  const [publishedXperts, setPublishedXperts] = useState<XpertSummary[]>([]);
+  const [creatingGoal, setCreatingGoal] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -112,6 +121,12 @@ export default function XpertChatPage() {
       cancelled = true;
     };
   }, [xpertId]);
+
+  useEffect(() => {
+    listXperts({ status: "published", limit: 200 })
+      .then((payload) => setPublishedXperts(payload.items))
+      .catch(() => setPublishedXperts([]));
+  }, []);
 
   const publishedVersions = useMemo(
     () => [...(xpert?.versions ?? [])].sort((a, b) => b.version - a.version),
@@ -242,6 +257,36 @@ export default function XpertChatPage() {
     }
   }
 
+  function openGoalComposer() {
+    const lastUserMessage = [...messages].reverse().find((message) => message.role === "user");
+    const objective = lastUserMessage?.content || input.trim() || xpert?.starters[0] || "";
+    setGoalTitle(objective ? `长期目标：${objective.slice(0, 36)}` : `长期目标：${xpert?.name ?? "Xpert"}`);
+    setGoalObjective(objective);
+    setPlannerXpertId(xpert?.id ?? publishedXperts[0]?.id ?? "");
+    setShowGoalComposer(true);
+  }
+
+  async function createLongGoal() {
+    if (!xpert || !goalTitle.trim() || !goalObjective.trim() || !plannerXpertId) return;
+    setCreatingGoal(true);
+    setError("");
+    try {
+      const created = await createGoal({
+        title: goalTitle.trim(),
+        objective: goalObjective.trim(),
+        planner_xpert_id: plannerXpertId,
+        source_xpert_id: xpert.id,
+        messages: messages.slice(-20),
+        max_parallel: 2,
+      });
+      navigate(`/agents/goals/${created.goal_id}`);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "长期 Goal 创建失败");
+    } finally {
+      setCreatingGoal(false);
+    }
+  }
+
   if (loading) {
     return (
       <PageContainer activeResource="agents" maxWidthClassName="max-w-[1560px]">
@@ -284,13 +329,38 @@ export default function XpertChatPage() {
                 </div>
               </div>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              <button
+                className="inline-flex h-9 items-center gap-2 rounded-lg border border-cyan-300/25 bg-cyan-300/10 px-3 text-xs font-semibold text-cyan-100 transition hover:border-cyan-200/45 hover:bg-cyan-300/15"
+                onClick={openGoalComposer}
+                type="button"
+              >
+                <span aria-hidden="true" className="text-[10px] font-bold">GL</span>转为长期目标
+              </button>
               <select className="h-9 rounded-lg border border-white/10 bg-white/[0.055] px-3 text-xs text-white outline-none" onChange={(event) => setVersion(Number(event.target.value))} value={version}>
                 {publishedVersions.map((item) => <option className="bg-ink-950" key={item.version} value={item.version}>v{item.version} · revision {item.draft_revision}</option>)}
               </select>
               <Link className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-2 text-xs font-semibold text-slate-300" to={`/agents/studio/${xpert.id}`}>编辑</Link>
             </div>
           </header>
+
+          {showGoalComposer ? (
+            <section className="border-b border-cyan-300/20 bg-cyan-300/[0.055] p-4">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <h2 className="text-sm font-semibold text-white">创建长期 Goal</h2>
+                  <p className="mt-1 text-xs leading-5 text-slate-400">Planner 先生成可编辑计划，审核后才开始执行。</p>
+                </div>
+                <button aria-label="关闭长期目标创建区" className="rounded-md p-1.5 text-base text-slate-400 hover:bg-white/10 hover:text-white" onClick={() => setShowGoalComposer(false)} type="button">×</button>
+              </div>
+              <div className="mt-3 grid gap-3 lg:grid-cols-2">
+                <label className="text-xs font-semibold text-slate-400">标题<input className="mt-1 h-9 w-full rounded-lg border border-white/10 bg-ink-950/50 px-3 text-sm text-white outline-none focus:border-cyan-300/40" onChange={(event) => setGoalTitle(event.target.value)} value={goalTitle} /></label>
+                <label className="text-xs font-semibold text-slate-400">Planner Xpert<select className="mt-1 h-9 w-full rounded-lg border border-white/10 bg-ink-950/50 px-3 text-sm text-white outline-none" onChange={(event) => setPlannerXpertId(event.target.value)} value={plannerXpertId}>{publishedXperts.map((item) => <option className="bg-ink-950" key={item.id} value={item.id}>{item.name} / v{item.published_version}</option>)}</select></label>
+              </div>
+              <label className="mt-3 block text-xs font-semibold text-slate-400">目标<textarea className="mt-1 min-h-24 w-full resize-y rounded-lg border border-white/10 bg-ink-950/50 p-3 text-sm leading-6 text-white outline-none focus:border-cyan-300/40" onChange={(event) => setGoalObjective(event.target.value)} value={goalObjective} /></label>
+              <div className="mt-3 flex justify-end"><button className="h-9 rounded-lg bg-cyan-300 px-4 text-sm font-semibold text-ink-950 disabled:cursor-not-allowed disabled:opacity-50" disabled={creatingGoal || !goalTitle.trim() || !goalObjective.trim() || !plannerXpertId} onClick={() => void createLongGoal()} type="button">{creatingGoal ? "创建中..." : "创建并规划"}</button></div>
+            </section>
+          ) : null}
 
           <div className="min-h-0 flex-1 overflow-y-auto p-4">
             {messages.length === 0 ? (

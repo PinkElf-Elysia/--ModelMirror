@@ -74,7 +74,7 @@ interface EnvironmentSummaryPayload {
   updated_at: number;
 }
 
-type RuntimeFilter = "all" | "workflow" | "workflow_agent" | "agent_task" | "agent_handoff" | "chat";
+type RuntimeFilter = "all" | "workflow" | "workflow_agent" | "agent_task" | "agent_handoff" | "chat" | "goal";
 type StatusFilter = "all" | "pending" | "running" | "completed" | "failed" | "cancelled";
 type McpStatusFilter = "all" | "active" | "failed" | "closed" | "unknown";
 
@@ -92,6 +92,7 @@ const runTypeFilters: Array<{ label: string; value: RuntimeFilter }> = [
   { label: "agent_task", value: "agent_task" },
   { label: "agent_handoff", value: "agent_handoff" },
   { label: "chat", value: "chat" },
+  { label: "goal", value: "goal" },
 ];
 
 const statusFilters: Array<{ label: string; value: StatusFilter }> = [

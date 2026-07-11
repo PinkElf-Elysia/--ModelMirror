@@ -625,6 +625,18 @@ Classic workflow 新增 handoff_router 节点，作为 workflow_agent -> Handoff
 
 最后更新日期：2026-07-09
 
+## 长期 Goal 调度（2026-07-10）
+
+`XPERT-CONVERSATION-GOAL-01` 不新增工作流节点。GoalCoordinator 负责依赖图与生命周期，步骤执行继续复用现有 AgentTask、`xpert_auto` Handoff、HandoffExecutor 和已发布 Xpert 的 classic workflow runner。
+
+- Planner 输出必须经过服务端 DAG 校验和人工审核。
+- 单 Goal 默认最多并发两个 ready 步骤。
+- pause 只停止新派发；cancel 不强制中断已运行节点。
+- 步骤失败进入 `needs_attention`，人工可重试、改派或跳过非最终步骤。
+- 运行层级以 `goal` run 为根，checkpoint 不保存完整 prompt、模型输出、工具结果或密钥。
+
+因此 classic `/workflow` 的节点数据、validate API、拖拽协议和 SSE wire format 均保持不变。详细契约见 `docs/XPERT_GOALS.md`。
+
 ## 2026-07-08 增量：Knowledge Citation 工作流节点
 
 Classic workflow 新增 `knowledge_citation` 节点，用于把本地 RAG Knowledge Pipeline 的 `CitationAnchor` 变成可拖拽、可配置、可运行、可观测的工作流能力。前端字段为 `queryVariable`、`knowledgeBaseId`、`top_k`、`outputVariable`；`knowledgeBaseId` 留空时使用第一个知识库，`top_k` 静态校验范围为 1-10。
