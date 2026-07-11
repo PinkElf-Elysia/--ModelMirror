@@ -5,6 +5,7 @@ import ComingSoonPage from "./pages/ComingSoonPage";
 import ExpertTeamPage from "./pages/ExpertTeamPage";
 import McpBrowserPage from "./pages/McpBrowserPage";
 import MetaAgentPage from "./pages/MetaAgentPage";
+import MatrixOasisPage from "./pages/MatrixOasisPage";
 import ModelListPage from "./pages/ModelListPage";
 import RuntimeOpsPage from "./pages/RuntimeOpsPage";
 import StudioHomePage from "./pages/StudioHomePage";
@@ -33,6 +34,7 @@ export default function App() {
       <Route element={<XpertChatPage />} path="/agents/xpert/:xpertId/chat" />
       <Route element={<ConversationGoalsPage />} path="/agents/goals" />
       <Route element={<ConversationGoalsPage />} path="/agents/goals/:goalId" />
+      <Route element={<MatrixOasisPage />} path="/matrix-oasis" />
       <Route element={<ExpertTeamPage />} path="/expert-team" />
       <Route element={<McpBrowserPage />} path="/mcps" />
       <Route element={<SkillBrowserPage />} path="/skills" />
