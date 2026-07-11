@@ -155,6 +155,7 @@ class RunRegistry:
         status: RuntimeRunStatus | None = None,
         error: str | None = None,
         metadata: dict[str, Any] | None = None,
+        clear_error: bool = False,
     ) -> RuntimeRun:
         async with self._lock:
             run = self._runs.get(run_id)
@@ -164,7 +165,9 @@ class RunRegistry:
                 run.status = status
                 if status == "cancelled" and run.cancelled_at is None:
                     run.cancelled_at = time.time()
-            if error is not None:
+            if clear_error:
+                run.error = None
+            elif error is not None:
                 run.error = error
             if metadata is not None:
                 run.metadata.update(metadata)

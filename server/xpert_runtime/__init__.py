@@ -6,7 +6,19 @@ runtime primitives without adding more orchestration logic to ``server/main.py``
 """
 
 from .capabilities import CapabilityRegistry, RuntimeCapability
-from .agent_tasks import AgentHandoff, AgentTask, AgentTaskStore
+from .agent_tasks import (
+    AUTO_XPERT_TARGET_PREFIX,
+    AgentHandoff,
+    AgentTask,
+    AgentTaskStore,
+)
+from .handoff_executor import (
+    HandoffBusyError,
+    HandoffExecutionResult,
+    HandoffExecutor,
+    HandoffExecutorError,
+    HandoffPermanentError,
+)
 from .defaults import create_default_runtime, event_recorder, system_prompt_injector
 from .events import RuntimeEventStore
 from .middleware import AgentMiddleware, MiddlewarePipeline
@@ -62,12 +74,18 @@ from .tool_runner import run_tool_with_runtime
 
 __all__ = [
     "AgentMiddleware",
+    "AUTO_XPERT_TARGET_PREFIX",
     "AgentHandoff",
     "AgentTask",
     "AgentTaskStore",
     "CapabilityRegistry",
     "create_default_runtime",
     "event_recorder",
+    "HandoffBusyError",
+    "HandoffExecutionResult",
+    "HandoffExecutor",
+    "HandoffExecutorError",
+    "HandoffPermanentError",
     "InMemoryToolAuditStore",
     "MCPToolsetProvider",
     "MiddlewareContext",

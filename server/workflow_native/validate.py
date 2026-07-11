@@ -110,6 +110,82 @@ def node_kind(node: NativeWorkflowNode) -> str:
     return NODE_KIND_ALIASES.get(raw_kind.strip().lower(), raw_kind.strip().lower())
 
 
+def config_truthy(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def validate_handoff_execution_configuration(
+    node: NativeWorkflowNode,
+    *,
+    code_prefix: str,
+) -> list[ValidationIssue]:
+    issues: list[ValidationIssue] = []
+    data = node.data
+    execution_mode = str(data.get("executionMode") or "manual").strip()
+    if execution_mode not in {"manual", "xpert_auto"}:
+        issues.append(
+            ValidationIssue(
+                code=f"invalid_{code_prefix}_execution_mode",
+                message="Handoff executionMode must be manual or xpert_auto.",
+                node_id=node.id,
+            )
+        )
+    target_agent = str(data.get("targetAgent") or "").strip()
+    if execution_mode == "xpert_auto" and not target_agent.startswith("xpert:"):
+        issues.append(
+            ValidationIssue(
+                code=f"invalid_{code_prefix}_xpert_target",
+                message="Automatic Handoff targetAgent must use xpert:<slug-or-id>.",
+                node_id=node.id,
+            )
+        )
+    wait_for_completion = config_truthy(data.get("waitForCompletion"))
+    if wait_for_completion and execution_mode != "xpert_auto":
+        issues.append(
+            ValidationIssue(
+                code=f"invalid_{code_prefix}_wait_mode",
+                message="waitForCompletion requires executionMode=xpert_auto.",
+                node_id=node.id,
+            )
+        )
+    result_variable = str(data.get("resultVariable") or "").strip()
+    if wait_for_completion:
+        if not result_variable:
+            issues.append(
+                ValidationIssue(
+                    code=f"missing_{code_prefix}_result_variable",
+                    message="Waiting Handoff needs data.resultVariable.",
+                    node_id=node.id,
+                )
+            )
+        elif not is_variable_name(result_variable):
+            issues.append(
+                ValidationIssue(
+                    code=f"invalid_{code_prefix}_result_variable",
+                    message="Handoff resultVariable must be an identifier.",
+                    node_id=node.id,
+                )
+            )
+    raw_timeout = data.get("waitTimeoutSeconds", 120)
+    try:
+        wait_timeout = int(raw_timeout)
+    except (TypeError, ValueError):
+        wait_timeout = 0
+    if wait_timeout < 5 or wait_timeout > 600:
+        issues.append(
+            ValidationIssue(
+                code=f"invalid_{code_prefix}_wait_timeout",
+                message="Handoff waitTimeoutSeconds must be between 5 and 600.",
+                node_id=node.id,
+            )
+        )
+    return issues
+
+
 def validate_workflow_graph(workflow: NativeWorkflowDefinition) -> ValidateWorkflowResponse:
     """Validate a workflow graph without executing any node."""
 
@@ -944,6 +1020,12 @@ def validate_node_configuration(
                     node_id=node.id,
                 )
             )
+        issues.extend(
+            validate_handoff_execution_configuration(
+                node,
+                code_prefix="agent_handoff",
+            )
+        )
 
     if kind == "handoff_router":
         source_variable = str(data.get("sourceVariable") or "").strip()
@@ -1011,6 +1093,12 @@ def validate_node_configuration(
                     node_id=node.id,
                 )
             )
+        issues.extend(
+            validate_handoff_execution_configuration(
+                node,
+                code_prefix="handoff_router",
+            )
+        )
 
     if kind == "mcp_tool":
         tool_name = str(data.get("toolName") or "").strip()
@@ -1384,6 +1472,12 @@ def collect_declared_variables(
             variable = str(data.get("outputVariable") or "").strip()
             if is_variable_name(variable):
                 variables.add(variable)
+        if kind in {"agent_handoff", "handoff_router"} and config_truthy(
+            data.get("waitForCompletion")
+        ):
+            result_variable = str(data.get("resultVariable") or "").strip()
+            if is_variable_name(result_variable):
+                variables.add(result_variable)
 
     return variables
 

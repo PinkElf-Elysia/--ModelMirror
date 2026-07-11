@@ -69,10 +69,35 @@ For Xpert runs, workflow_meta also exposes xpert_id and xpert_version. RunRegist
 
 Checkpoints store titles, event types, status, lengths, IDs, and error summaries. They must not store complete prompts, complete model or tool outputs, API keys, local absolute paths, embeddings, or raw secrets.
 
+## Xpert Handoff Execution
+
+Automatic execution is explicit. Only a Handoff with `execution_mode=xpert_auto` and `target_agent=xpert:<slug-or-id>` is eligible. Other targets remain in the manual MetaAgent Inbox.
+
+The executor resolves the target by ID or slug, pins its current published version on the first claim, and invokes the same classic workflow runner used by the public Xpert chat endpoint. It does not call the server through loopback HTTP. The target receives `user_input`, `handoff_reason`, `source_agent`, and `source_task_id`.
+
+The queue uses the following states:
+
+- `pending -> accepted -> completed`
+- `accepted -> retry_wait -> accepted`
+- `accepted/retry_wait -> dead_letter`
+- `dead_letter -> pending` through the requeue API
+
+Claims use a lease token. The default lease is 60 seconds, the maximum attempt count is three, and transient failures use short exponential backoff. Missing, unpublished, or invalid target Xperts are permanent errors and move directly to dead letter. A delegation depth limit of five prevents unbounded Xpert cycles.
+
+`agent_handoff` and `handoff_router` always write the Handoff ID to `outputVariable`. With `waitForCompletion=true`, they also wait up to `waitTimeoutSeconds` and write the target result to `resultVariable`. With waiting disabled, the source workflow continues while the worker executes the target in the background.
+
+Production enables file persistence through `AGENT_TASK_STORAGE_DIR`. The Store uses atomic temporary-file replacement and an in-process lock. This is durable across a single container restart, but it is not a multi-process or distributed queue.
+
+Public executor interfaces:
+
+- `GET /api/runtime/handoff-executor/status`
+- `POST /api/runtime/agent-handoffs/{handoff_id}/execute`
+- `POST /api/runtime/agent-handoffs/{handoff_id}/requeue`
+
 ## Current Limits
 
 - File persistence is local and is not a workspace database.
 - There is no public App/API token, sharing model, organization permission, or collaborative editor.
-- Handoff remains manually managed; no worker automatically accepts or executes a target Xpert.
+- Automatic Handoff execution is limited to a single backend process and explicit `xpert:` targets.
 - Long-term Goals, durable memory, file understanding, and knowledge-ingestion jobs are separate future milestones.
 - A normal /workflow run remains unchanged and continues to use its existing local-draft behavior.

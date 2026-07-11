@@ -61,8 +61,22 @@ interface InstalledSkillPayload {
   installed_at?: number;
 }
 
+interface EnvironmentSummaryPayload {
+  llm_gateway_configured: boolean;
+  openrouter_configured: boolean;
+  model_gateway_ready: boolean;
+  git_available: boolean;
+  node_available: boolean;
+  npm_available: boolean;
+  npx_available: boolean;
+  python_available: boolean;
+  redacted: boolean;
+  updated_at: number;
+}
+
 type RuntimeFilter = "all" | "workflow" | "workflow_agent" | "agent_task" | "agent_handoff" | "chat";
 type StatusFilter = "all" | "pending" | "running" | "completed" | "failed" | "cancelled";
+type McpStatusFilter = "all" | "active" | "failed" | "closed" | "unknown";
 
 const dateFormatter = new Intl.DateTimeFormat("zh-CN", {
   month: "2-digit",
@@ -89,6 +103,14 @@ const statusFilters: Array<{ label: string; value: StatusFilter }> = [
   { label: "cancelled", value: "cancelled" },
 ];
 
+const mcpStatusFilters: Array<{ label: string; value: McpStatusFilter }> = [
+  { label: "全部", value: "all" },
+  { label: "活跃", value: "active" },
+  { label: "异常", value: "failed" },
+  { label: "已关闭", value: "closed" },
+  { label: "未知", value: "unknown" },
+];
+
 function createLoadable<T>(data: T, loading = false): Loadable<T> {
   return { data, error: "", loading };
 }
@@ -113,7 +135,21 @@ function shortId(value: string | null | undefined) {
 }
 
 function normalizeStatus(value: string | null | undefined) {
-  return (value || "active").toLowerCase();
+  return (value || "unknown").toLowerCase();
+}
+
+function getMcpStatusBucket(status: string | null | undefined): Exclude<McpStatusFilter, "all"> {
+  const normalized = normalizeStatus(status);
+  if (["active", "connected", "running", "completed", "succeeded"].includes(normalized)) {
+    return "active";
+  }
+  if (["failed", "error"].includes(normalized)) {
+    return "failed";
+  }
+  if (["cancelled", "closed", "stopped", "disconnected"].includes(normalized)) {
+    return "closed";
+  }
+  return "unknown";
 }
 
 function statusClass(status: string) {
@@ -146,6 +182,29 @@ function schemaFieldCount(tool: RegistryToolPayload) {
     return Object.keys(properties as Record<string, unknown>).length;
   }
   return 0;
+}
+
+function booleanStatus(value: boolean) {
+  return value ? "就绪" : "未就绪";
+}
+
+function booleanTone(value: boolean) {
+  return value
+    ? "border-emerald-300/25 bg-emerald-300/10 text-emerald-100"
+    : "border-slate-300/20 bg-white/[0.055] text-slate-300";
+}
+
+function severityCounts(checkpoints: RuntimeCheckpointPayload[]) {
+  return checkpoints.reduce(
+    (acc, checkpoint) => {
+      const severity = normalizeStatus(checkpoint.severity);
+      if (severity === "error") acc.error += 1;
+      else if (severity === "warning") acc.warning += 1;
+      else acc.info += 1;
+      return acc;
+    },
+    { error: 0, info: 0, warning: 0 },
+  );
 }
 
 function Sidebar() {
@@ -245,8 +304,12 @@ export default function RuntimeOpsPage() {
   const [registryTools, setRegistryTools] = useState(createLoadable<RegistryToolPayload[]>([], true));
   const [runs, setRuns] = useState(createLoadable<RuntimeRunPayload[]>([], true));
   const [skills, setSkills] = useState(createLoadable<InstalledSkillPayload[]>([], true));
+  const [environment, setEnvironment] = useState(
+    createLoadable<EnvironmentSummaryPayload | null>(null, true),
+  );
   const [runType, setRunType] = useState<RuntimeFilter>("all");
   const [status, setStatus] = useState<StatusFilter>("all");
+  const [mcpStatusFilter, setMcpStatusFilter] = useState<McpStatusFilter>("all");
   const [keyword, setKeyword] = useState("");
   const [selectedRunId, setSelectedRunId] = useState("");
   const [checkpoints, setCheckpoints] = useState(
@@ -316,12 +379,29 @@ export default function RuntimeOpsPage() {
     }
   }, []);
 
+  const loadEnvironment = useCallback(async () => {
+    setEnvironment((current) => ({ ...current, loading: true, error: "" }));
+    try {
+      const data = await readJson<EnvironmentSummaryPayload>(
+        "/api/runtime/environment-summary",
+      );
+      setEnvironment(createLoadable(data));
+    } catch (error) {
+      setEnvironment({
+        data: null,
+        error: error instanceof Error ? error.message : "环境观测加载失败",
+        loading: false,
+      });
+    }
+  }, []);
+
   const refreshAll = useCallback(() => {
     void loadMcp();
     void loadTools();
     void loadRuns();
     void loadSkills();
-  }, [loadMcp, loadRuns, loadSkills, loadTools]);
+    void loadEnvironment();
+  }, [loadEnvironment, loadMcp, loadRuns, loadSkills, loadTools]);
 
   useEffect(() => {
     refreshAll();
@@ -361,18 +441,22 @@ export default function RuntimeOpsPage() {
   const normalizedKeyword = keyword.trim().toLowerCase();
 
   const visibleSessions = useMemo(() => {
-    if (!normalizedKeyword) return mcpSessions.data;
-    return mcpSessions.data.filter((session) =>
-      [
-        session.session_id,
-        session.status,
-        ...(session.server_command ?? []),
-      ]
-        .join(" ")
-        .toLowerCase()
-        .includes(normalizedKeyword),
-    );
-  }, [mcpSessions.data, normalizedKeyword]);
+    return mcpSessions.data.filter((session) => {
+      const matchesStatus =
+        mcpStatusFilter === "all" || getMcpStatusBucket(session.status) === mcpStatusFilter;
+      const matchesKeyword =
+        !normalizedKeyword ||
+        [
+          session.session_id,
+          session.status,
+          ...(session.server_command ?? []),
+        ]
+          .join(" ")
+          .toLowerCase()
+          .includes(normalizedKeyword);
+      return matchesStatus && matchesKeyword;
+    });
+  }, [mcpSessions.data, mcpStatusFilter, normalizedKeyword]);
 
   const visibleTools = useMemo(() => {
     if (!normalizedKeyword) return registryTools.data;
@@ -413,22 +497,49 @@ export default function RuntimeOpsPage() {
   }, [normalizedKeyword, skills.data]);
 
   const mcpStatus = useMemo(() => {
-    const active = mcpSessions.data.filter((session) =>
-      ["active", "connected", "running"].includes(normalizeStatus(session.status)),
-    ).length;
-    const failed = mcpSessions.data.filter((session) =>
-      ["failed", "error"].includes(normalizeStatus(session.status)),
-    ).length;
-    const closed = mcpSessions.data.filter((session) =>
-      ["closed", "stopped", "cancelled"].includes(normalizeStatus(session.status)),
-    ).length;
-    return {
-      active: active || mcpSessions.data.length,
-      closed,
-      failed,
-      total: mcpSessions.data.length,
-    };
+    const counts = { active: 0, closed: 0, failed: 0, total: mcpSessions.data.length, unknown: 0 };
+    for (const session of mcpSessions.data) {
+      counts[getMcpStatusBucket(session.status)] += 1;
+    }
+    return counts;
   }, [mcpSessions.data]);
+
+  const runStatusSummary = useMemo(() => {
+    const failed = runs.data.filter((run) => run.status === "failed");
+    const cancelled = runs.data.filter((run) => run.status === "cancelled");
+    const running = runs.data.filter((run) => run.status === "running");
+    return {
+      cancelled: cancelled.length,
+      failed: failed.length,
+      latestFailed: failed[0],
+      running: running.length,
+    };
+  }, [runs.data]);
+
+  const selectedRun = useMemo(
+    () => runs.data.find((run) => run.run_id === selectedRunId),
+    [runs.data, selectedRunId],
+  );
+
+  const selectedCheckpointCounts = useMemo(
+    () => severityCounts(checkpoints.data),
+    [checkpoints.data],
+  );
+
+  const dependencyRows = useMemo(() => {
+    const data = environment.data;
+    if (!data) return [];
+    return [
+      { label: "模型网关", value: data.model_gateway_ready },
+      { label: "OpenRouter", value: data.openrouter_configured },
+      { label: "LLM Gateway", value: data.llm_gateway_configured },
+      { label: "git", value: data.git_available },
+      { label: "node", value: data.node_available },
+      { label: "npm", value: data.npm_available },
+      { label: "npx", value: data.npx_available },
+      { label: "python", value: data.python_available },
+    ];
+  }, [environment.data]);
 
   return (
     <PageContainer
@@ -472,9 +583,9 @@ export default function RuntimeOpsPage() {
         </div>
       </header>
 
-      <section className="mb-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+      <section className="mb-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
         <MetricCard
-          hint={`${mcpStatus.active} 活跃 · ${mcpStatus.failed} 异常 · ${mcpStatus.closed} 已关闭`}
+          hint={`${mcpStatus.active} 活跃 · ${mcpStatus.failed} 异常 · ${mcpStatus.closed} 已关闭 · ${mcpStatus.unknown} 未知`}
           label="MCP 实例"
           tone="brand"
           value={mcpSessions.loading ? "..." : mcpStatus.total}
@@ -486,10 +597,10 @@ export default function RuntimeOpsPage() {
           value={registryTools.loading ? "..." : registryTools.data.length}
         />
         <MetricCard
-          hint="最近 20 条，可按类型和状态过滤"
-          label="Runtime Runs"
-          tone="warning"
-          value={runs.loading ? "..." : runs.data.length}
+          hint={`${runStatusSummary.running} running · ${runStatusSummary.cancelled} cancelled`}
+          label="最近失败 Run"
+          tone={runStatusSummary.failed > 0 ? "error" : "success"}
+          value={runs.loading ? "..." : runStatusSummary.failed}
         />
         <MetricCard
           hint="来自本地 Skill runtime"
@@ -498,9 +609,10 @@ export default function RuntimeOpsPage() {
           value={skills.loading ? "..." : skills.data.length}
         />
         <MetricCard
-          hint="MCP/工具/Run/Skill 分区独立降级"
-          label="观测面板"
-          value="只读"
+          hint="仅显示布尔就绪态，不展示密钥值"
+          label="环境摘要"
+          tone={environment.data?.model_gateway_ready ? "success" : "warning"}
+          value={environment.loading ? "..." : environment.data?.model_gateway_ready ? "就绪" : "检查"}
         />
       </section>
 
@@ -569,48 +681,68 @@ export default function RuntimeOpsPage() {
           >
             {mcpSessions.loading ? (
               <div className="p-4 text-sm text-slate-400">MCP runtime 加载中...</div>
-            ) : visibleSessions.length === 0 ? (
-              <div className="p-8 text-center">
-                <p className="text-base font-semibold text-white">未找到 MCP runtime</p>
-                <p className="mt-2 text-sm text-slate-400">
-                  在 `/mcps` 连接 MCP Server 后，runtime 实例会显示在这里。
-                </p>
-              </div>
             ) : (
-              <div className="overflow-x-auto">
-                <table className="min-w-full divide-y divide-white/10 text-sm">
-                  <thead className="bg-white/[0.04] text-left text-xs text-slate-400">
-                    <tr>
-                      <th className="px-4 py-3">Session</th>
-                      <th className="px-4 py-3">状态</th>
-                      <th className="px-4 py-3">工具</th>
-                      <th className="px-4 py-3">运行时间</th>
-                      <th className="px-4 py-3">命令</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-white/10">
-                    {visibleSessions.map((session) => (
-                      <tr className="align-top text-slate-300" key={session.session_id}>
-                        <td className="px-4 py-3 font-mono text-xs text-brand-100">
-                          {shortId(session.session_id)}
-                        </td>
-                        <td className="px-4 py-3">
-                          <span className={`rounded-full border px-2 py-0.5 text-[11px] font-semibold ${statusClass(session.status ?? "active")}`}>
-                            {session.status ?? "active"}
-                          </span>
-                        </td>
-                        <td className="px-4 py-3 text-white">{session.tools_count ?? 0}</td>
-                        <td className="px-4 py-3 text-slate-400">
-                          {Math.max(0, Math.floor(session.uptime_seconds ?? 0))}s
-                        </td>
-                        <td className="max-w-xl px-4 py-3 font-mono text-xs text-slate-500">
-                          {(session.server_command ?? []).join(" ") || "未记录"}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+              <>
+                <div className="flex flex-wrap gap-2 border-b border-white/10 px-4 py-3">
+                  {mcpStatusFilters.map((filter) => (
+                    <button
+                      className={`rounded-full border px-3 py-1 text-xs font-semibold transition ${
+                        mcpStatusFilter === filter.value
+                          ? "border-hire-300/40 bg-hire-300/15 text-hire-100"
+                          : "border-white/10 bg-white/[0.045] text-slate-300 hover:border-white/20 hover:bg-white/[0.075]"
+                      }`}
+                      key={filter.value}
+                      onClick={() => setMcpStatusFilter(filter.value)}
+                      type="button"
+                    >
+                      {filter.label}
+                    </button>
+                  ))}
+                </div>
+                {visibleSessions.length === 0 ? (
+                  <div className="p-8 text-center">
+                    <p className="text-base font-semibold text-white">未找到 MCP runtime</p>
+                    <p className="mt-2 text-sm text-slate-400">
+                      在 `/mcps` 连接 MCP Server 后，runtime 实例会显示在这里。
+                    </p>
+                  </div>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="min-w-full divide-y divide-white/10 text-sm">
+                      <thead className="bg-white/[0.04] text-left text-xs text-slate-400">
+                        <tr>
+                          <th className="px-4 py-3">Session</th>
+                          <th className="px-4 py-3">状态</th>
+                          <th className="px-4 py-3">工具</th>
+                          <th className="px-4 py-3">运行时间</th>
+                          <th className="px-4 py-3">命令</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-white/10">
+                        {visibleSessions.map((session) => (
+                          <tr className="align-top text-slate-300" key={session.session_id}>
+                            <td className="px-4 py-3 font-mono text-xs text-brand-100">
+                              {shortId(session.session_id)}
+                            </td>
+                            <td className="px-4 py-3">
+                              <span className={`rounded-full border px-2 py-0.5 text-[11px] font-semibold ${statusClass(session.status ?? "unknown")}`}>
+                                {session.status ?? "unknown"}
+                              </span>
+                            </td>
+                            <td className="px-4 py-3 text-white">{session.tools_count ?? 0}</td>
+                            <td className="px-4 py-3 text-slate-400">
+                              {Math.max(0, Math.floor(session.uptime_seconds ?? 0))}s
+                            </td>
+                            <td className="max-w-xl px-4 py-3 font-mono text-xs text-slate-500">
+                              {(session.server_command ?? []).join(" ") || "未记录"}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </>
             )}
           </SectionShell>
 
@@ -685,8 +817,14 @@ export default function RuntimeOpsPage() {
               <div className="divide-y divide-white/10">
                 {visibleRuns.map((run) => (
                   <button
-                    className={`block w-full px-4 py-3 text-left transition hover:bg-white/[0.045] ${
-                      selectedRunId === run.run_id ? "bg-hire-300/10" : ""
+                    className={`block w-full border border-transparent px-4 py-3 text-left transition hover:bg-white/[0.045] ${
+                      selectedRunId === run.run_id ? "border-hire-300/30 bg-hire-300/10" : ""
+                    } ${
+                      run.status === "failed"
+                        ? "border-rose-300/20 bg-rose-300/10"
+                        : run.status === "cancelled"
+                          ? "border-slate-300/15 bg-white/[0.055]"
+                          : ""
                     }`}
                     key={run.run_id}
                     onClick={() => setSelectedRunId((current) => (current === run.run_id ? "" : run.run_id))}
@@ -708,6 +846,16 @@ export default function RuntimeOpsPage() {
                     <p className="mt-2 line-clamp-1 text-xs text-slate-400">
                       {metadataPreview(run.metadata)}
                     </p>
+                    {run.error ? (
+                      <p className="mt-2 line-clamp-2 rounded-md border border-rose-300/20 bg-rose-300/10 px-2 py-1 text-xs leading-5 text-rose-100">
+                        {run.error}
+                      </p>
+                    ) : null}
+                    {run.status === "failed" || run.status === "cancelled" ? (
+                      <span className="mt-2 inline-flex rounded-full border border-white/10 bg-white/[0.055] px-2.5 py-1 text-[11px] font-semibold text-slate-300">
+                        重试待接入
+                      </span>
+                    ) : null}
                     <p className="mt-2 text-xs text-slate-500">
                       更新于 {formatTime(run.updated_at ?? run.created_at)}
                     </p>
@@ -734,6 +882,38 @@ export default function RuntimeOpsPage() {
                   关闭
                 </button>
               </div>
+              {selectedRun ? (
+                <div className="mt-4 rounded-lg border border-white/10 bg-ink-950/60 p-3">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className={`rounded-full border px-2 py-0.5 text-[11px] font-semibold ${statusClass(selectedRun.status)}`}>
+                      {selectedRun.status}
+                    </span>
+                    <span className="rounded-full border border-white/10 bg-white/[0.055] px-2 py-0.5 text-[11px] text-slate-300">
+                      error {selectedCheckpointCounts.error}
+                    </span>
+                    <span className="rounded-full border border-white/10 bg-white/[0.055] px-2 py-0.5 text-[11px] text-slate-300">
+                      warning {selectedCheckpointCounts.warning}
+                    </span>
+                    <span className="rounded-full border border-white/10 bg-white/[0.055] px-2 py-0.5 text-[11px] text-slate-300">
+                      info {selectedCheckpointCounts.info}
+                    </span>
+                  </div>
+                  {selectedRun.error ? (
+                    <p className="mt-3 line-clamp-3 text-xs leading-5 text-rose-100">
+                      {selectedRun.error}
+                    </p>
+                  ) : null}
+                  {selectedRun.status === "failed" || selectedRun.status === "cancelled" ? (
+                    <button
+                      className="mt-3 rounded-full border border-white/10 bg-white/[0.055] px-3 py-1 text-xs font-semibold text-slate-400"
+                      disabled
+                      type="button"
+                    >
+                      重试能力待接入
+                    </button>
+                  ) : null}
+                </div>
+              ) : null}
               {checkpoints.loading ? (
                 <p className="mt-4 text-sm text-slate-400">Checkpoint 加载中...</p>
               ) : checkpoints.error ? (
@@ -820,6 +1000,42 @@ export default function RuntimeOpsPage() {
                   </article>
                 ))}
               </div>
+            )}
+          </SectionShell>
+
+          <SectionShell
+            action={
+              environment.data?.redacted ? (
+                <span className="rounded-full border border-emerald-300/25 bg-emerald-300/10 px-3 py-1.5 text-xs font-semibold text-emerald-100">
+                  已脱敏
+                </span>
+              ) : null
+            }
+            description="只展示网关与运行依赖的布尔就绪态，不读取或显示密钥值。"
+            error={environment.error}
+            title="环境与依赖观测"
+          >
+            {environment.loading ? (
+              <div className="p-4 text-sm text-slate-400">环境摘要加载中...</div>
+            ) : environment.data ? (
+              <div className="grid gap-2 p-4 sm:grid-cols-2">
+                {dependencyRows.map((item) => (
+                  <div
+                    className="flex items-center justify-between gap-3 rounded-lg border border-white/10 bg-white/[0.045] px-3 py-2"
+                    key={item.label}
+                  >
+                    <span className="text-sm text-slate-300">{item.label}</span>
+                    <span className={`rounded-full border px-2 py-0.5 text-[11px] font-semibold ${booleanTone(item.value)}`}>
+                      {booleanStatus(item.value)}
+                    </span>
+                  </div>
+                ))}
+                <p className="sm:col-span-2 text-xs leading-5 text-slate-500">
+                  更新时间 {formatTime(environment.data.updated_at)}。该区不展示 `.env` 内容、API key 或本地路径。
+                </p>
+              </div>
+            ) : (
+              <div className="p-4 text-sm text-slate-400">暂无环境摘要。</div>
             )}
           </SectionShell>
         </div>
