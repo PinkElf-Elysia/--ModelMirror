@@ -13,7 +13,7 @@
 - AgentTask/Handoff 使用可选原子 JSON Store；Docker 通过 `AGENT_TASK_STORAGE_DIR` 持久化，重建或重启容器后仍可恢复。
 - RunRegistry 形成 `source Xpert -> agent_handoff -> target Xpert -> node runs` 父子链，checkpoint 只记录版本、尝试次数、ID、长度和错误摘要。
 
-普通 Agent 名称继续走人工 Inbox，不会被自动猜测或执行。当前可靠性边界是单后端进程文件队列，不承诺多进程锁，不使用 Redis/Celery 或数据库。下一步进入 `XPERT-CONVERSATION-GOAL-01`。
+普通 Agent 名称继续走人工 Inbox，不会被自动猜测或执行。当前可靠性边界是单后端进程文件队列，不承诺多进程锁，不使用 Redis/Celery 或数据库。Handoff Executor 已作为 Conversation Goal 的步骤执行底座。
 
 ## 2026-07-10 增量：XPERT-RUNTIME-OPS-02
 
@@ -78,11 +78,11 @@ EvoAgentX 只保留为历史参考：此前元智能体曾借鉴其 `goal -> sub
 | 能力域 | 当前状态 | 已完成 | 当前边界 | 下一步 |
 | --- | --- | --- | --- | --- |
 | 工作空间资源 | 部分实现 | `/studio` 已作为 Xpert 式资源 Hub，聚合智能体、工作流、知识库、MCP、API 工具、数据库、Skill、提示词、环境、运行记录，并支持快速入口、标签过滤和运行摘要 | 当前是前端只读聚合视图，不做 workspace 权限、持久化资源表或资源创建编排；API 工具与数据库仍为待接入卡片 | `XPERT-WORKFLOW-REGISTRY-API-01` |
-| Xpert Studio / 发布 | 部分实现 | classic `/workflow`、节点库浮层、配置/运行 tabs、分类节点菜单、智能体配置侧栏，以及 `/agents/studio` 的 Xpert 草稿、版本发布、聊天运行与 Xpert-to-Xpert 移交 | 使用文件型 Store 和 classic runner；不做协作权限、公开应用或数据库迁移 | XPERT-CONVERSATION-GOAL-01 |
+| Xpert Studio / 发布 | 部分实现 | classic `/workflow`、节点库浮层、配置/运行 tabs、分类节点菜单、智能体配置侧栏，以及 `/agents/studio` 的 Xpert 草稿、版本发布、聊天运行、长期 Goal 与 Xpert-to-Xpert 移交 | 使用文件型 Store 和 classic runner；不做协作权限、公开应用或数据库迁移 | `XPERT-FILE-MEMORY-01` |
 | Runtime Middleware | 部分实现 | middleware lifecycle、`event_recorder`、`system_prompt_injector`、`tool_policy`、`tool_audit` | 仍以内存态为主，部分 middleware 仅最小执行 | 继续挂到 Agent/Workflow 节点运行链 |
-| Agent Task | 部分实现 | AgentTask API、MetaAgent 任务工作台、workflow `agent_task` 节点、可选文件持久化 | 单进程文件 Store，不是分布式任务队列 | 接入长期 Goal 与暂停/恢复 |
-| Handoff | 部分实现 | Handoff API、workflow `agent_handoff`、`handoff_router`、人工 Inbox、目标 Xpert 自动执行、同步结果回传、重试与死信 | 仅显式 `xpert:` 目标自动执行；单进程 lease，不做分布式调度 | 与 Conversation Goal 形成长期协作 |
-| RunRegistry / Trace | 部分实现 | workflow/xpert/chat/agent_task/agent_handoff run，checkpoint，workflow/chat/Xpert 观测与 `/runtime` 运维总览；`/runtime` 已展示失败摘要、checkpoint severity 与重试占位 | 内存态，可观测索引，不是调度器；重试入口为禁用占位，不触发真实执行 | 为自动 Handoff、Goal 与持久化评估提供护栏 |
+| Agent Task | 部分实现 | AgentTask API、MetaAgent 任务工作台、workflow `agent_task` 节点、可选文件持久化、Goal 步骤派发 | 单进程文件 Store，不是分布式任务队列 | 为文件与记忆任务补安全上下文 |
+| Handoff | 部分实现 | Handoff API、workflow `agent_handoff`、`handoff_router`、人工 Inbox、目标 Xpert 自动执行、同步结果回传、重试、死信与 Goal 协作 | 仅显式 `xpert:` 目标自动执行；单进程 lease，不做分布式调度 | 扩展文件与记忆上下文传递 |
+| RunRegistry / Trace | 部分实现 | workflow/xpert/chat/goal/agent_task/agent_handoff run、checkpoint、workflow/chat/Xpert/Goal 观测与 `/runtime` 运维总览 | 内存态，可观测索引，不是调度器；Goal 重启恢复会创建 recovery run | 为文件、记忆与知识执行提供护栏 |
 | Workflow Agent | 部分实现 | `workflow_agent` 节点，模型执行，Runtime Toolset 工具模式，Xpert 式配置侧栏分区，失败重试、备用模型、异常转空输出、禁用输出 | 轻量 JSON 决策，不是 function calling；文件理解、并行工具调用、记忆写入和结构化输出仍未接入执行 | 后续逐项接入真实运行语义 |
 | Chat Toolset | 部分实现 | `/api/chat` 可选 MCP 工具模式，chat run 与 checkpoint | 默认关闭，不改变普通聊天；无自动 handoff | 补工具偏好、安全提示和观测 UI |
 | Toolset / MCP | 部分实现 | `MCPToolsetProvider`、`run_tool_with_runtime`、tool policy/audit、MCP 管理基础、`/runtime` MCP Runtime 状态细分与只读运维，`/studio` 已提供 MCP 与 Runtime 入口 | 缺 Xpert 式 Toolset 资源模型；Runtime Ops 不执行 MCP start/stop | 后续抽象 Toolset 资源模型 |
@@ -167,7 +167,7 @@ EvoAgentX 只保留为历史参考：此前元智能体曾借鉴其 `goal -> sub
 
 1. XPERT-STUDIO-PUBLISH-01：已完成第一版 Xpert 草稿、不可变版本、发布预检和已发布聊天运行。
 2. XPERT-HANDOFF-EXECUTOR-01：已完成显式目标 Xpert 的自动领取、版本固定、执行回写、同步等待、lease、重试与死信。
-3. XPERT-CONVERSATION-GOAL-01：从对话创建长期 Goal 和 AgentTask，支持暂停、取消、恢复与进度面板。
+3. XPERT-CONVERSATION-GOAL-01：已完成从对话创建 Goal、人工审核 DAG、并发步骤派发、暂停、取消、恢复、人工处理与最终结果汇总。
 4. XPERT-FILE-MEMORY-01：把会话附件接入 FileAsset/Artifact，并提供显式、可观测的 memory search/get/write。
 5. XPERT-KNOWLEDGE-EXECUTE-01：让 Pipeline Draft 启动 ingestion job，生成版本化 chunk/index，并通过预检后原子切换 active version。
 6. XPERT-APP-API-01：为已发布 Xpert 提供稳定 App/API 入口、访问控制、调用配额、版本回滚和审计。
@@ -194,3 +194,16 @@ EvoAgentX 只保留为历史参考：此前元智能体曾借鉴其 `goal -> sub
 The `/rag` Knowledge Pipeline has moved from a read-only four-stage view to a saved draft config plus preflight observation flow. `GET /api/rag/pipeline/draft` now returns draft metadata, version, `updated_at`, `editable`, and safe per-stage config. `PATCH /api/rag/pipeline/draft/{kb_id}` persists safe draft config. `POST /api/rag/pipeline/draft/{kb_id}/preflight` returns stage checks, warnings, and document/artifact/chunk counts.
 
 Boundary: draft config is stored in RAG metadata only and does not affect upload, parsing, splitting, embedding, vector storage, retrieval, chat RAG, or `knowledge_citation`. Image understanding remains planned/disabled. Responses must not expose local file paths, full chunk text, embeddings, prompts, or secrets. Next route: `XPERT-WORKSPACE-RESOURCE-MODEL-01`.
+
+## 2026-07-10 增量：XPERT-CONVERSATION-GOAL-01
+
+Xpert 对齐主线已从一次性发布与移交推进到长期 Goal 执行闭环。用户可在已发布 Xpert 聊天中把最近对话转成 Goal，由已发布 Planner Xpert 生成 2 到 20 步的依赖计划；计划必须人工审核后才会启动。
+
+- GoalStore 以 `goals.json` 原子持久化目标、步骤、固定版本、结果和错误。
+- GoalCoordinator 按 DAG 派发 ready 步骤，单 Goal 默认最多并发 2 步。
+- 每一步复用 AgentTask、显式 `xpert_auto` Handoff、HandoffExecutor 和已发布 Xpert classic runner。
+- 支持暂停、恢复、取消、失败重试、改派、显式跳过与 `needs_attention` 人工处理。
+- RunRegistry 新增 `goal` run，形成 Goal、Planner、Task、Handoff、目标 Xpert 和节点 run 的父子链。
+- 前端新增 `/agents/goals` 工作台，并在 Xpert Chat、`/agents`、`/studio` 提供入口。
+
+当前边界仍是单进程文件 Store；暂停和取消不强制杀死运行中的模型请求，RunRegistry 重启后通过 recovery run 恢复索引。下一步进入 `XPERT-FILE-MEMORY-01`，把附件和显式记忆读写接入已发布 Xpert 与长期 Goal。

@@ -39,6 +39,8 @@ services:
       XPERT_STORAGE_DIR: /app/xperts/storage
       AGENT_TASK_STORAGE_DIR: /app/xpert_runtime/storage
       HANDOFF_EXECUTOR_ENABLED: "true"
+      HANDOFF_EXECUTOR_MAX_CONCURRENCY: "2"
+      GOAL_COORDINATOR_ENABLED: "true"
     ports:
       - "8000:8000"
     volumes:

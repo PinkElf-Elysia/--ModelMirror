@@ -23,6 +23,16 @@ import {
 
 const platformCapabilities: PlatformCapability[] = [
   {
+    id: "conversation-goals",
+    icon: "GL",
+    title: "长期 Goal",
+    summary: "把对话目标拆成可审核的依赖计划，并由已发布 Xpert 持续协作执行。",
+    detail:
+      "选择 Planner Xpert 自动生成计划，人工确认步骤和依赖后启动。支持暂停、恢复、失败重试、改派与最终结果汇总。",
+    tag: "长期任务 · Beta",
+    eta: "已开放规划、执行与恢复工作台",
+  },
+  {
     id: "xpert-studio",
     icon: "XP",
     title: "Xpert Studio",
@@ -129,6 +139,10 @@ export default function AgentsPage() {
   }
 
   function openPlatformCapability(capability: PlatformCapability) {
+    if (capability.id === "conversation-goals") {
+      navigate("/agents/goals");
+      return;
+    }
     if (capability.id === "xpert-studio") {
       navigate("/agents/studio");
       return;

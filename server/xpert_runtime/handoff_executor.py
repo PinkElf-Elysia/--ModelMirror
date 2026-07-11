@@ -54,6 +54,7 @@ class HandoffExecutor:
         poll_interval: float = 1.0,
         lease_seconds: float = 60.0,
         max_attempts: int = 3,
+        max_concurrency: int = 2,
         worker_id: str | None = None,
     ) -> None:
         self.store = store
@@ -63,6 +64,7 @@ class HandoffExecutor:
         self.poll_interval = max(0.1, poll_interval)
         self.lease_seconds = max(1.0, lease_seconds)
         self.max_attempts = max(1, max_attempts)
+        self.max_concurrency = max(1, min(max_concurrency, 20))
         self.worker_id = worker_id or f"handoff-executor-{uuid.uuid4().hex[:8]}"
         self._loop_task: asyncio.Task[None] | None = None
         self._stopping = asyncio.Event()
@@ -92,21 +94,32 @@ class HandoffExecutor:
     async def run_once(self) -> int:
         if not self.enabled:
             return 0
-        processed = 0
-        for handoff in await self.store.list_executable_handoffs(limit=20):
-            if handoff.handoff_id in self._active_handoffs:
-                continue
+        slots = max(0, self.max_concurrency - len(self._active_handoffs))
+        if slots == 0:
+            return 0
+        eligible = [
+            handoff
+            for handoff in await self.store.list_executable_handoffs(limit=20)
+            if handoff.handoff_id not in self._active_handoffs
+        ][:slots]
+
+        async def process(handoff: AgentHandoff) -> bool:
             try:
                 await self.execute_handoff(handoff.handoff_id)
-                processed += 1
+                return True
             except HandoffBusyError:
-                continue
+                return False
             except Exception:
                 logger.exception(
                     "Unexpected handoff executor failure handoff_id=%s",
                     handoff.handoff_id,
                 )
-        return processed
+                return False
+
+        if not eligible:
+            return 0
+        results = await asyncio.gather(*(process(handoff) for handoff in eligible))
+        return sum(1 for value in results if value)
 
     async def execute_handoff(self, handoff_id: str) -> AgentHandoff:
         if not self.enabled:
@@ -315,6 +328,7 @@ class HandoffExecutor:
             "poll_interval": self.poll_interval,
             "lease_seconds": self.lease_seconds,
             "max_attempts": self.max_attempts,
+            "max_concurrency": self.max_concurrency,
             "active_leases": len(self._active_handoffs),
             "executable_pending": len(executable),
             "dead_letter_count": sum(

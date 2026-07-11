@@ -70,6 +70,7 @@ try:
         MetaAgentGenerateResponse,
         build_meta_agent_prompt,
         build_workflow_from_plan,
+        extract_json_object_text,
         parse_meta_agent_plan,
     )
     from server.meta_agent.prompts import META_AGENT_SYSTEM_PROMPT
@@ -81,6 +82,7 @@ except ModuleNotFoundError:
         MetaAgentGenerateResponse,
         build_meta_agent_prompt,
         build_workflow_from_plan,
+        extract_json_object_text,
         parse_meta_agent_plan,
     )
     from meta_agent.prompts import META_AGENT_SYSTEM_PROMPT
@@ -124,18 +126,27 @@ try:
         HandoffExecutor,
         HandoffExecutorError,
         HandoffPermanentError,
+        GoalConflictError,
+        GoalCoordinator,
+        GoalNotFoundError,
+        GoalPlan,
+        GoalStep,
+        GoalStore,
+        GoalValidationError,
         InMemoryToolAuditStore,
         MCPToolsetProvider,
         MiddlewareContext,
         MiddlewarePipeline,
         ModelCallRequest,
         ModelCallResponse,
+        PinnedXpert,
         RunRegistry,
         RuntimeEventStore,
         RuntimeToolCall,
         ToolPermissionPolicy,
         create_default_runtime,
         event_recorder,
+        goal_to_payload,
         run_tool_with_runtime,
         runtime_middleware_registry,
         workflow_node_registry,
@@ -149,18 +160,27 @@ except ModuleNotFoundError:
         HandoffExecutor,
         HandoffExecutorError,
         HandoffPermanentError,
+        GoalConflictError,
+        GoalCoordinator,
+        GoalNotFoundError,
+        GoalPlan,
+        GoalStep,
+        GoalStore,
+        GoalValidationError,
         InMemoryToolAuditStore,
         MCPToolsetProvider,
         MiddlewareContext,
         MiddlewarePipeline,
         ModelCallRequest,
         ModelCallResponse,
+        PinnedXpert,
         RunRegistry,
         RuntimeEventStore,
         RuntimeToolCall,
         ToolPermissionPolicy,
         create_default_runtime,
         event_recorder,
+        goal_to_payload,
         run_tool_with_runtime,
         runtime_middleware_registry,
         workflow_node_registry,
@@ -230,6 +250,16 @@ HANDOFF_EXECUTOR_LEASE_SECONDS = env_float(
 )
 HANDOFF_EXECUTOR_MAX_ATTEMPTS = env_int(
     "HANDOFF_EXECUTOR_MAX_ATTEMPTS", 3, 1
+)
+HANDOFF_EXECUTOR_MAX_CONCURRENCY = env_int(
+    "HANDOFF_EXECUTOR_MAX_CONCURRENCY", 2, 1
+)
+GOAL_COORDINATOR_ENABLED = os.getenv(
+    "GOAL_COORDINATOR_ENABLED",
+    "true",
+).strip().lower() in {"1", "true", "yes", "on"}
+GOAL_COORDINATOR_POLL_SECONDS = env_float(
+    "GOAL_COORDINATOR_POLL_SECONDS", 1.0, 0.1
 )
 HANDOFF_MAX_DELEGATION_DEPTH = 5
 MAX_IMAGE_DATA_URL_BYTES = 5 * 1024 * 1024
@@ -316,8 +346,10 @@ agent_task_store = AgentTaskStore(
     event_store=runtime_event_store,
     storage_dir=AGENT_TASK_STORAGE_DIR or None,
 )
+goal_store = GoalStore(storage_dir=AGENT_TASK_STORAGE_DIR or None)
 run_registry = RunRegistry()
 handoff_executor: HandoffExecutor | None = None
+goal_coordinator: GoalCoordinator | None = None
 runtime_capabilities.register(
     "mcp_tools",
     workflow_mcp_provider,
@@ -5098,8 +5130,128 @@ def get_handoff_executor() -> HandoffExecutor:
             poll_interval=HANDOFF_EXECUTOR_POLL_SECONDS,
             lease_seconds=HANDOFF_EXECUTOR_LEASE_SECONDS,
             max_attempts=HANDOFF_EXECUTOR_MAX_ATTEMPTS,
+            max_concurrency=HANDOFF_EXECUTOR_MAX_CONCURRENCY,
         )
     return handoff_executor
+
+
+async def resolve_published_xpert(reference: str) -> PinnedXpert:
+    store = get_xpert_store()
+    xpert = await asyncio.to_thread(store.resolve_xpert, reference)
+    if xpert.status != "published" or not xpert.published_version:
+        raise ValueError(f"Xpert must be published: {reference}")
+    version = await asyncio.to_thread(
+        store.get_version,
+        xpert.id,
+        xpert.published_version,
+    )
+    return PinnedXpert(
+        xpert_id=xpert.id,
+        slug=xpert.slug,
+        version=version.version,
+        name=xpert.name,
+    )
+
+
+async def plan_conversation_goal(
+    goal: Any,
+    parent_run_id: str,
+) -> GoalPlan:
+    store = get_xpert_store()
+    available = await asyncio.to_thread(
+        store.list_xperts,
+        status="published",
+        limit=200,
+    )
+    catalog = [
+        {
+            "id": item.id,
+            "slug": item.slug,
+            "name": item.name,
+            "description": item.description[:500],
+        }
+        for item in available
+    ]
+    conversation = [
+        {
+            "role": str(message.get("role") or "user"),
+            "content": str(message.get("content") or "")[:4000],
+        }
+        for message in goal.messages[-20:]
+    ]
+    planner_prompt = (
+        "Create an executable long-term goal plan. Return one JSON object only, "
+        "without markdown. Use only target_xpert_id values from available_xperts. "
+        "The plan must contain 2-20 acyclic steps and exactly one final_step_id. "
+        "Every non-final step must be a direct or transitive dependency of the final step.\n\n"
+        "Required JSON shape:\n"
+        '{"summary":"...","final_step_id":"deliver","steps":['
+        '{"step_id":"research","title":"...","instruction":"...",'
+        '"target_xpert_id":"published-id","depends_on":[]}]}\n\n'
+        f"objective={json.dumps(goal.objective, ensure_ascii=False)}\n"
+        f"conversation={json.dumps(conversation, ensure_ascii=False)}\n"
+        f"available_xperts={json.dumps(catalog, ensure_ascii=False)}"
+    )
+    prepared = await prepare_published_xpert_run(
+        goal.planner_xpert_id,
+        XpertRunRequest(
+            message=planner_prompt[:20_000],
+            messages=[],
+            version=goal.planner_version,
+        ),
+        extra_inputs={"goal_id": goal.goal_id, "goal_objective": goal.objective},
+    )
+    response = await _run_workflow_response(
+        prepared.request,
+        None,
+        runtime_run_type="xpert",
+        runtime_source_id=prepared.xpert.id,
+        runtime_metadata={
+            **prepared.runtime_metadata,
+            "goal_id": goal.goal_id,
+            "goal_role": "planner",
+        },
+        runtime_parent_run_id=parent_run_id,
+    )
+    final_event = await consume_workflow_stream(response)
+    raw_output = str(final_event.get("final_output") or "")
+    try:
+        payload = json.loads(extract_json_object_text(raw_output))
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise GoalValidationError(f"Planner returned invalid JSON: {exc}") from exc
+    if not isinstance(payload, dict) or not isinstance(payload.get("steps"), list):
+        raise GoalValidationError("Planner output must contain a steps list.")
+    steps = [
+        GoalStep(
+            step_id=str(item.get("step_id") or "").strip(),
+            title=str(item.get("title") or "").strip(),
+            instruction=str(item.get("instruction") or "").strip(),
+            target_xpert_id=str(item.get("target_xpert_id") or "").strip(),
+            depends_on=[str(value).strip() for value in item.get("depends_on", [])],
+        )
+        for item in payload["steps"]
+        if isinstance(item, dict)
+    ]
+    return GoalPlan(
+        summary=str(payload.get("summary") or "")[:4000],
+        final_step_id=str(payload.get("final_step_id") or "").strip(),
+        steps=steps,
+    )
+
+
+def get_goal_coordinator() -> GoalCoordinator:
+    global goal_coordinator
+    if goal_coordinator is None:
+        goal_coordinator = GoalCoordinator(
+            goal_store,
+            agent_task_store,
+            run_registry,
+            plan_conversation_goal,
+            resolve_published_xpert,
+            enabled=GOAL_COORDINATOR_ENABLED,
+            poll_interval=GOAL_COORDINATOR_POLL_SECONDS,
+        )
+    return goal_coordinator
 
 
 @app.post("/api/xperts/{xpert_id}/run")
@@ -5365,6 +5517,7 @@ async def list_runtime_runs(
     valid_run_types = {
         "workflow",
         "xpert",
+        "goal",
         "workflow_agent",
         "agent_task",
         "agent_handoff",
@@ -5855,10 +6008,13 @@ async def team_chat(payload: TeamChatRequest, request: Request):
 async def start_mcp_ttl_cleanup() -> None:
     mcp_manager.start_ttl_cleanup(on_cleanup=tool_registry.unregister_sessions)
     get_handoff_executor().start()
+    get_goal_coordinator().start()
 
 
 @app.on_event("shutdown")
 async def shutdown_mcp_sessions() -> None:
+    if goal_coordinator is not None:
+        await goal_coordinator.stop()
     if handoff_executor is not None:
         await handoff_executor.stop()
     await mcp_manager.stop_ttl_cleanup()
@@ -6377,6 +6533,223 @@ async def cancel_agent_task(task_id: str, payload: dict[str, Any] | None = None)
         "error": cancelled.error,
         "updated_at": cancelled.updated_at,
     }
+
+
+def goal_api_error(exc: Exception) -> HTTPException:
+    if isinstance(exc, GoalNotFoundError):
+        return HTTPException(status_code=404, detail=str(exc))
+    if isinstance(exc, GoalConflictError):
+        return HTTPException(status_code=409, detail=str(exc))
+    if isinstance(exc, (GoalValidationError, ValueError)):
+        return HTTPException(status_code=400, detail=str(exc))
+    return HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/api/runtime/goals")
+async def create_conversation_goal(payload: dict[str, Any]):
+    title = str(payload.get("title") or "").strip()
+    objective = str(payload.get("objective") or "").strip()
+    planner_reference = str(payload.get("planner_xpert_id") or "").strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="Goal title is required.")
+    if not objective:
+        raise HTTPException(status_code=400, detail="Goal objective is required.")
+    if not planner_reference:
+        raise HTTPException(status_code=400, detail="planner_xpert_id is required.")
+    messages_raw = payload.get("messages") or []
+    if not isinstance(messages_raw, list):
+        raise HTTPException(status_code=400, detail="Goal messages must be a list.")
+    messages: list[dict[str, str]] = []
+    for item in messages_raw[-20:]:
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role") or "user")
+        if role not in {"user", "assistant"}:
+            continue
+        content = str(item.get("content") or "").strip()
+        if content:
+            messages.append({"role": role, "content": content[:20_000]})
+    try:
+        planner = await resolve_published_xpert(planner_reference)
+        goal = await goal_store.create_goal(
+            title=title[:200],
+            objective=objective[:20_000],
+            planner_xpert_id=planner.xpert_id,
+            planner_version=planner.version,
+            source_xpert_id=(
+                str(payload.get("source_xpert_id") or "").strip() or None
+            ),
+            messages=messages,
+            max_parallel=max(1, min(int(payload.get("max_parallel") or 2), 2)),
+        )
+        return goal_to_payload(goal)
+    except Exception as exc:
+        raise goal_api_error(exc) from exc
+
+
+@app.get("/api/runtime/goals")
+async def list_conversation_goals(
+    status: str | None = None,
+    search: str = "",
+    limit: int = 50,
+):
+    valid_statuses = {
+        "planning",
+        "awaiting_review",
+        "running",
+        "paused",
+        "needs_attention",
+        "completed",
+        "cancelled",
+    }
+    if status is not None and status not in valid_statuses:
+        raise HTTPException(status_code=400, detail="Invalid goal status.")
+    goals = await goal_store.list_goals(
+        status=status,  # type: ignore[arg-type]
+        search=search,
+        limit=max(1, min(limit, 200)),
+    )
+    return {
+        "version": "conversation-goals-v1",
+        "items": [goal_to_payload(goal, include_content=False) for goal in goals],
+        "total": len(goals),
+    }
+
+
+@app.get("/api/runtime/goals/{goal_id}")
+async def get_conversation_goal(goal_id: str):
+    goal = await goal_store.get_goal(goal_id)
+    if goal is None:
+        raise HTTPException(status_code=404, detail="Goal not found.")
+    return goal_to_payload(goal)
+
+
+@app.post("/api/runtime/goals/{goal_id}/plan")
+async def replan_conversation_goal(goal_id: str):
+    try:
+        goal = await goal_store.require_goal(goal_id)
+        if goal.status not in {"planning", "awaiting_review", "needs_attention"}:
+            raise GoalConflictError("Goal cannot be replanned in the current state.")
+        updated = await goal_store.update_goal(
+            goal_id,
+            status="planning",
+            clear_error=True,
+        )
+        return goal_to_payload(updated)
+    except Exception as exc:
+        raise goal_api_error(exc) from exc
+
+
+@app.patch("/api/runtime/goals/{goal_id}/plan")
+async def update_conversation_goal_plan(goal_id: str, payload: dict[str, Any]):
+    try:
+        goal = await goal_store.require_goal(goal_id)
+        if goal.status not in {"awaiting_review", "needs_attention"}:
+            raise GoalConflictError("Goal plan cannot be edited in the current state.")
+        steps = payload.get("steps")
+        if not isinstance(steps, list):
+            raise GoalValidationError("Goal plan steps must be a list.")
+        if payload.get("plan_revision") is None:
+            raise GoalValidationError("plan_revision is required.")
+        for item in steps:
+            if isinstance(item, dict):
+                await resolve_published_xpert(
+                    str(item.get("target_xpert_id") or "").strip()
+                )
+        updated = await goal_store.replace_plan(
+            goal_id,
+            steps=steps,
+            final_step_id=str(payload.get("final_step_id") or "").strip(),
+            summary=str(payload.get("summary") or goal.plan_summary),
+            expected_revision=int(payload.get("plan_revision")),
+            status="awaiting_review",
+        )
+        return goal_to_payload(updated)
+    except Exception as exc:
+        raise goal_api_error(exc) from exc
+
+
+@app.post("/api/runtime/goals/{goal_id}/start")
+async def start_conversation_goal(goal_id: str):
+    try:
+        return goal_to_payload(await get_goal_coordinator().start_goal(goal_id))
+    except Exception as exc:
+        raise goal_api_error(exc) from exc
+
+
+@app.post("/api/runtime/goals/{goal_id}/pause")
+async def pause_conversation_goal(goal_id: str):
+    try:
+        return goal_to_payload(await get_goal_coordinator().pause_goal(goal_id))
+    except Exception as exc:
+        raise goal_api_error(exc) from exc
+
+
+@app.post("/api/runtime/goals/{goal_id}/resume")
+async def resume_conversation_goal(goal_id: str):
+    try:
+        return goal_to_payload(await get_goal_coordinator().resume_goal(goal_id))
+    except Exception as exc:
+        raise goal_api_error(exc) from exc
+
+
+@app.post("/api/runtime/goals/{goal_id}/cancel")
+async def cancel_conversation_goal(goal_id: str):
+    try:
+        return goal_to_payload(await get_goal_coordinator().cancel_goal(goal_id))
+    except Exception as exc:
+        raise goal_api_error(exc) from exc
+
+
+@app.post("/api/runtime/goals/{goal_id}/steps/{step_id}/retry")
+async def retry_conversation_goal_step(goal_id: str, step_id: str):
+    try:
+        return goal_to_payload(
+            await get_goal_coordinator().retry_step(goal_id, step_id)
+        )
+    except Exception as exc:
+        raise goal_api_error(exc) from exc
+
+
+@app.patch("/api/runtime/goals/{goal_id}/steps/{step_id}")
+async def reassign_conversation_goal_step(
+    goal_id: str,
+    step_id: str,
+    payload: dict[str, Any],
+):
+    target_xpert_id = str(payload.get("target_xpert_id") or "").strip()
+    if not target_xpert_id:
+        raise HTTPException(status_code=400, detail="target_xpert_id is required.")
+    try:
+        return goal_to_payload(
+            await get_goal_coordinator().reassign_step(
+                goal_id,
+                step_id,
+                target_xpert_id=target_xpert_id,
+                instruction=(
+                    str(payload.get("instruction"))
+                    if payload.get("instruction") is not None
+                    else None
+                ),
+            )
+        )
+    except Exception as exc:
+        raise goal_api_error(exc) from exc
+
+
+@app.post("/api/runtime/goals/{goal_id}/steps/{step_id}/skip")
+async def skip_conversation_goal_step(goal_id: str, step_id: str):
+    try:
+        return goal_to_payload(
+            await get_goal_coordinator().skip_step(goal_id, step_id)
+        )
+    except Exception as exc:
+        raise goal_api_error(exc) from exc
+
+
+@app.get("/api/runtime/goal-coordinator/status")
+async def get_goal_coordinator_status():
+    return await get_goal_coordinator().status()
 
 
 @app.get("/api/runtime/middleware-nodes", response_model=list[dict[str, Any]])

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Any
@@ -197,6 +198,61 @@ async def test_handoff_executor_dead_letters_permanent_failure() -> None:
 
     checkpoints = await registry.list_checkpoints(handoff_run.run_id)
     assert any(item.event_type == "agent_handoff.dead_letter" for item in checkpoints)
+
+
+@pytest.mark.asyncio
+async def test_handoff_executor_runs_two_handoffs_concurrently() -> None:
+    store = AgentTaskStore()
+    registry = RunRegistry()
+    handoff_ids: list[str] = []
+    for index in range(2):
+        task = await store.create_task(f"Concurrent {index}", f"payload {index}")
+        handoff = await store.create_handoff(
+            task.task_id,
+            "goal",
+            f"xpert:specialist-{index}",
+            "parallel goal step",
+            metadata={"execution_mode": "xpert_auto", "ready_for_execution": True},
+        )
+        handoff_ids.append(handoff.handoff_id)
+
+    active = 0
+    peak_active = 0
+
+    async def execute_target(
+        handoff,
+        _task,
+        _parent_run_id,
+    ) -> HandoffExecutionResult:
+        nonlocal active, peak_active
+        active += 1
+        peak_active = max(peak_active, active)
+        await asyncio.sleep(0.03)
+        active -= 1
+        return HandoffExecutionResult(
+            output=handoff.handoff_id,
+            run_id=f"run-{handoff.handoff_id}",
+            xpert_id=handoff.target_agent,
+            xpert_slug=handoff.target_agent,
+            xpert_version=1,
+        )
+
+    executor = HandoffExecutor(
+        store,
+        registry,
+        execute_target,
+        max_concurrency=2,
+        worker_id="parallel-worker",
+    )
+    processed = await executor.run_once()
+    assert processed == 2
+    assert peak_active == 2
+    for handoff_id in handoff_ids:
+        handoff = await store.get_handoff(handoff_id)
+        assert handoff is not None
+        assert handoff.status == "completed"
+    status = await executor.status()
+    assert status["max_concurrency"] == 2
 
 
 @pytest.mark.asyncio

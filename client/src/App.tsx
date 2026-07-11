@@ -17,6 +17,7 @@ import XpertChatPage from "./pages/XpertChatPage";
 import XpertCreatePage from "./pages/XpertCreatePage";
 import XpertStudioIndexPage from "./pages/XpertStudioIndexPage";
 import XpertStudioPage from "./pages/XpertStudioPage";
+import ConversationGoalsPage from "./pages/ConversationGoalsPage";
 
 export default function App() {
   return (
@@ -30,6 +31,8 @@ export default function App() {
       <Route element={<XpertCreatePage />} path="/agents/studio/new" />
       <Route element={<XpertStudioPage />} path="/agents/studio/:xpertId" />
       <Route element={<XpertChatPage />} path="/agents/xpert/:xpertId/chat" />
+      <Route element={<ConversationGoalsPage />} path="/agents/goals" />
+      <Route element={<ConversationGoalsPage />} path="/agents/goals/:goalId" />
       <Route element={<ExpertTeamPage />} path="/expert-team" />
       <Route element={<McpBrowserPage />} path="/mcps" />
       <Route element={<SkillBrowserPage />} path="/skills" />

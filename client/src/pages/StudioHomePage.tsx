@@ -136,6 +136,12 @@ const tagFilters: Array<{ key: ResourceTag; label: string }> = [
 
 const quickActions: QuickAction[] = [
   {
+    title: "长期 Goal",
+    description: "审核 Planner 生成的依赖计划，暂停、恢复并追踪多 Xpert 协作执行。",
+    href: "/agents/goals",
+    label: "打开 Goal 工作台",
+  },
+  {
     title: "创建 Xpert",
     description: "从默认 Agent 工作流开始，保存草稿并发布不可变版本。",
     href: "/agents/studio/new",
@@ -337,6 +343,12 @@ function WorkspaceSidebar() {
         先把资源入口、运行状态和近期对齐任务收拢到一个工作台，再逐步补齐 Xpert Studio、Toolset、知识流水线和 Runtime Ops。
       </p>
       <div className="mt-4 space-y-2">
+        <Link
+          className="block rounded-lg border border-cyan-300/25 bg-cyan-300/10 px-3 py-2 text-sm font-semibold text-cyan-100 transition hover:bg-cyan-300/20"
+          to="/agents/goals"
+        >
+          打开长期 Goal
+        </Link>
         <Link
           className="block rounded-lg border border-hire-300/25 bg-hire-300/10 px-3 py-2 text-sm font-semibold text-hire-100 transition hover:bg-hire-300/20"
           to="/agents/studio"
