@@ -81,6 +81,8 @@ class ConversationGoal:
     planner_xpert_id: str
     planner_version: int
     source_xpert_id: str | None = None
+    source_conversation_id: str | None = None
+    file_asset_ids: list[str] = field(default_factory=list)
     messages: list[dict[str, str]] = field(default_factory=list)
     status: GoalStatus = "planning"
     plan_summary: str = ""
@@ -239,6 +241,8 @@ class GoalStore:
         planner_xpert_id: str,
         planner_version: int,
         source_xpert_id: str | None = None,
+        source_conversation_id: str | None = None,
+        file_asset_ids: list[str] | None = None,
         messages: list[dict[str, str]] | None = None,
         max_parallel: int = 2,
     ) -> ConversationGoal:
@@ -249,6 +253,8 @@ class GoalStore:
             planner_xpert_id=planner_xpert_id,
             planner_version=planner_version,
             source_xpert_id=source_xpert_id,
+            source_conversation_id=source_conversation_id,
+            file_asset_ids=list(dict.fromkeys(file_asset_ids or []))[:5],
             messages=[dict(item) for item in (messages or [])][-20:],
             max_parallel=max(1, min(int(max_parallel), 2)),
         )
@@ -410,6 +416,12 @@ class GoalStore:
                     planner_xpert_id=str(item.get("planner_xpert_id") or ""),
                     planner_version=int(item.get("planner_version") or 1),
                     source_xpert_id=item.get("source_xpert_id"),
+                    source_conversation_id=item.get("source_conversation_id"),
+                    file_asset_ids=[
+                        str(value)
+                        for value in item.get("file_asset_ids", [])
+                        if str(value)
+                    ][:5],
                     messages=[dict(value) for value in item.get("messages", []) if isinstance(value, dict)],
                     status=str(item.get("status") or "planning"),  # type: ignore[arg-type]
                     plan_summary=str(item.get("plan_summary") or ""),

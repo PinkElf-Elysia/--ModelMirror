@@ -40,6 +40,7 @@ class PinnedXpert:
 
 PlanGoal = Callable[[ConversationGoal, str], Awaitable[GoalPlan]]
 ResolveXpert = Callable[[str], Awaitable[PinnedXpert]]
+RenderSharedFileContext = Callable[[ConversationGoal], Awaitable[str]]
 
 
 class GoalCoordinator:
@@ -52,6 +53,7 @@ class GoalCoordinator:
         run_registry: RunRegistry,
         plan_goal: PlanGoal,
         resolve_xpert: ResolveXpert,
+        render_shared_file_context: RenderSharedFileContext | None = None,
         *,
         enabled: bool = True,
         poll_interval: float = 1.0,
@@ -61,6 +63,7 @@ class GoalCoordinator:
         self.run_registry = run_registry
         self.plan_goal_callback = plan_goal
         self.resolve_xpert_callback = resolve_xpert
+        self.render_shared_file_context_callback = render_shared_file_context
         self.enabled = enabled
         self.poll_interval = max(0.1, poll_interval)
         self._loop_task: asyncio.Task[None] | None = None
@@ -606,6 +609,12 @@ class GoalCoordinator:
             )
             step = self._step(await self.goal_store.require_goal(goal.goal_id), step.step_id)
         task_input = self._render_step_input(goal, step)
+        if self.render_shared_file_context_callback and goal.file_asset_ids:
+            shared_context = await self.render_shared_file_context_callback(goal)
+            if shared_context:
+                marker = "\n\nExplicitly shared goal files:\n"
+                available = max(0, 20_000 - len(task_input) - len(marker))
+                task_input = f"{task_input}{marker}{shared_context[:available]}"
         task = await self.task_store.create_task(
             title=f"{goal.title}: {step.title}"[:200],
             input_text=task_input,
@@ -617,6 +626,9 @@ class GoalCoordinator:
                 "parent_run_id": run.run_id,
                 "target_xpert_id": step.target_xpert_id,
                 "target_xpert_version": step.target_version,
+                "source_xpert_id": goal.source_xpert_id,
+                "source_conversation_id": goal.source_conversation_id,
+                "file_asset_ids": list(goal.file_asset_ids),
             },
         )
         task_run = await self.run_registry.create_run(
@@ -644,6 +656,9 @@ class GoalCoordinator:
                 "target_xpert_id": step.target_xpert_id,
                 "target_xpert_version": step.target_version,
                 "handoff_depth": 0,
+                "source_xpert_id": goal.source_xpert_id,
+                "source_conversation_id": goal.source_conversation_id,
+                "file_asset_ids": list(goal.file_asset_ids),
             },
         )
         handoff_run = await self.run_registry.create_run(

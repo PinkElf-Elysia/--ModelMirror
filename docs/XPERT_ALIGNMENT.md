@@ -189,6 +189,17 @@ EvoAgentX 只保留为历史参考：此前元智能体曾借鉴其 `goal -> sub
 - EvoAgentX：只保留历史归因说明，不继续扩展其 runtime、optimizer、RAG、MCP toolkit 或 dependency graph。
 - 第三方仓库：可用于确认公开能力边界和术语，但不得直接搬运实现；如必须引用片段，先确认许可证兼容并在文档记录来源。
 
+## 2026-07-11 Update: XPERT-FILE-MEMORY-01
+
+Published Xperts now have a durable conversation context layer. Xpert Chat can create and reopen conversations, upload explicitly selected TXT/Markdown/PDF files, inject bounded file excerpts into `workflow_agent`, recall conversation/Xpert memories, and manage human-approved memory candidates.
+
+- `XpertContextStore` persists conversations, file metadata/artifacts, active memories, and write candidates through atomic JSON/file replacement under the existing runtime storage mount.
+- `enableFileUnderstanding`, `memoryReadEnabled`, `memoryReadScope`, `memoryWriteEnabled`, and `memoryWriteTarget` now have runtime meaning for `workflow_agent`.
+- `memory_search`, `memory_get`, and `memory_propose_write` are exposed as a dedicated Runtime Toolset capability and continue through middleware, policy, and audit.
+- Model-originated writes remain pending until approved. A user-initiated "remember this" action writes an active record directly.
+- Conversation Goals persist explicit file references and pass them through AgentTask/Handoff metadata. Source conversation memories are not implicitly shared across Xperts.
+- Attachments are not indexed into RAG and do not create a knowledge base. Promotion and versioned ingestion remain the responsibility of `XPERT-KNOWLEDGE-EXECUTE-01`.
+
 ## 2026-07-10 Update: XPERT-KNOWLEDGE-PIPELINE-03
 
 The `/rag` Knowledge Pipeline has moved from a read-only four-stage view to a saved draft config plus preflight observation flow. `GET /api/rag/pipeline/draft` now returns draft metadata, version, `updated_at`, `editable`, and safe per-stage config. `PATCH /api/rag/pipeline/draft/{kb_id}` persists safe draft config. `POST /api/rag/pipeline/draft/{kb_id}/preflight` returns stage checks, warnings, and document/artifact/chunk counts.

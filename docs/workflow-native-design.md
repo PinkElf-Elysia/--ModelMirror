@@ -650,3 +650,14 @@ Classic workflow 新增 `knowledge_citation` 节点，用于把本地 RAG Knowle
 节点会登记 `knowledge_citation` 子 run，`parent_run_id` 指向 workflow run，并写入 `knowledge_citation.started/completed/failed` checkpoint。metadata 只保存知识库 ID、变量名、输出变量、引用数量等摘要，不返回本地文件路径、embedding、完整上传文件内容或密钥。该节点与既有 `knowledge_retrieval` 并存，不改变 `/api/rag/query`、聊天 RAG 或向量库行为。
 
 > 2026-07-10 Knowledge Pipeline draft config: `/rag` Pipeline Draft now supports safe saved config and preflight observation. Classic workflow `knowledge_citation` is unchanged; it still reads CitationAnchor summary JSON and does not execute draft config.
+
+## 2026-07-11 Xpert File and Memory Runtime
+
+The Xpert Studio fields `enableFileUnderstanding`, `memoryReadEnabled`, `memoryReadScope`, `memoryWriteEnabled`, and `memoryWriteTarget` now affect `workflow_agent` execution for published Xpert runs.
+
+- A normal local `/workflow` node still defaults these capabilities off.
+- Published Xpert files are injected only when the run explicitly selects file asset IDs and the node enables file understanding.
+- Memory recall is limited by scope and context budget. Model writes create approval candidates rather than immediately mutating durable memory.
+- In `toolMode=mcp_tools`, memory tools and MCP tools share Runtime Toolset middleware, policy, and audit. The MCP whitelist only filters MCP tools.
+- Goal/Handoff propagation carries explicit file references. It does not copy private conversation memory between Xperts.
+- No workflow node, SSE wire type, RAG index, or `knowledge_citation` execution contract is changed by this milestone.

@@ -43,6 +43,8 @@ export interface ConversationGoal {
   planner_xpert_id: string;
   planner_version: number;
   source_xpert_id: string | null;
+  source_conversation_id: string | null;
+  file_asset_ids: string[];
   messages: XpertConversationMessage[];
   status: GoalStatus;
   plan_summary: string;
@@ -64,6 +66,8 @@ export interface GoalSummary {
   planner_xpert_id: string;
   planner_version: number;
   source_xpert_id: string | null;
+  source_conversation_id: string | null;
+  file_asset_ids: string[];
   status: GoalStatus;
   plan_summary: string;
   plan_revision: number;
@@ -88,6 +92,8 @@ export interface CreateGoalPayload {
   objective: string;
   planner_xpert_id: string;
   source_xpert_id?: string;
+  source_conversation_id?: string;
+  file_asset_ids?: string[];
   messages?: XpertConversationMessage[];
   max_parallel?: number;
 }

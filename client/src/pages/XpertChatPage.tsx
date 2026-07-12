@@ -1,13 +1,31 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import PageContainer from "../components/PageContainer";
 import {
   type XpertConversationMessage,
+  type XpertConversation,
   type XpertDefinition,
+  type XpertFileAsset,
+  type XpertMemoryCandidate,
+  type XpertMemoryRecord,
   type XpertSummary,
 } from "../types/xpert";
 import { createGoal } from "../utils/goalApi";
-import { getXpert, listXperts } from "../utils/xpertApi";
+import {
+  archiveXpertFile,
+  archiveXpertMemory,
+  createXpertConversation,
+  createXpertMemory,
+  decideXpertMemoryCandidate,
+  getXpert,
+  getXpertConversation,
+  listXpertConversations,
+  listXpertFiles,
+  listXpertMemories,
+  listXpertMemoryCandidates,
+  listXperts,
+  uploadXpertFile,
+} from "../utils/xpertApi";
 
 interface XpertRunEvent {
   event: string;
@@ -101,6 +119,16 @@ export default function XpertChatPage() {
   const [plannerXpertId, setPlannerXpertId] = useState("");
   const [publishedXperts, setPublishedXperts] = useState<XpertSummary[]>([]);
   const [creatingGoal, setCreatingGoal] = useState(false);
+  const [conversations, setConversations] = useState<XpertConversation[]>([]);
+  const [conversationId, setConversationId] = useState("");
+  const [files, setFiles] = useState<XpertFileAsset[]>([]);
+  const [selectedFileIds, setSelectedFileIds] = useState<string[]>([]);
+  const [memories, setMemories] = useState<XpertMemoryRecord[]>([]);
+  const [memoryCandidates, setMemoryCandidates] = useState<XpertMemoryCandidate[]>([]);
+  const [contextLoading, setContextLoading] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [showContext, setShowContext] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -128,10 +156,117 @@ export default function XpertChatPage() {
       .catch(() => setPublishedXperts([]));
   }, []);
 
+  useEffect(() => {
+    if (!xpert) return;
+    let cancelled = false;
+    setContextLoading(true);
+    listXpertConversations(xpert.id)
+      .then(async (payload) => {
+        if (cancelled) return;
+        let active = payload.items[0];
+        if (!active) active = await createXpertConversation(xpert.id);
+        if (cancelled) return;
+        setConversations(active ? [active, ...payload.items.filter((item) => item.conversation_id !== active.conversation_id)] : payload.items);
+        await selectConversation(active.conversation_id, xpert.id, cancelled);
+      })
+      .catch((caught) => {
+        if (!cancelled) setError(caught instanceof Error ? caught.message : "\u4f1a\u8bdd\u52a0\u8f7d\u5931\u8d25");
+      })
+      .finally(() => {
+        if (!cancelled) setContextLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [xpert?.id]);
+
   const publishedVersions = useMemo(
     () => [...(xpert?.versions ?? [])].sort((a, b) => b.version - a.version),
     [xpert],
   );
+
+  async function selectConversation(
+    nextConversationId: string,
+    selectedXpertId = xpert?.id,
+    cancelled = false,
+  ) {
+    if (!selectedXpertId || !nextConversationId) return;
+    const [conversation, filePayload, memoryPayload, candidatePayload] = await Promise.all([
+      getXpertConversation(selectedXpertId, nextConversationId),
+      listXpertFiles(selectedXpertId, nextConversationId),
+      listXpertMemories(selectedXpertId, nextConversationId),
+      listXpertMemoryCandidates(selectedXpertId, nextConversationId),
+    ]);
+    if (cancelled) return;
+    setConversationId(nextConversationId);
+    setMessages(conversation.messages ?? []);
+    setFiles(filePayload.items);
+    setSelectedFileIds(filePayload.items.slice(0, 5).map((item) => item.asset_id));
+    setMemories(memoryPayload.items);
+    setMemoryCandidates(candidatePayload.items);
+  }
+
+  async function refreshContext() {
+    if (!xpert || !conversationId) return;
+    const [conversationPayload, filePayload, memoryPayload, candidatePayload] = await Promise.all([
+      listXpertConversations(xpert.id),
+      listXpertFiles(xpert.id, conversationId),
+      listXpertMemories(xpert.id, conversationId),
+      listXpertMemoryCandidates(xpert.id, conversationId),
+    ]);
+    setConversations(conversationPayload.items);
+    setFiles(filePayload.items);
+    setSelectedFileIds((current) =>
+      current.filter((assetId) => filePayload.items.some((item) => item.asset_id === assetId)),
+    );
+    setMemories(memoryPayload.items);
+    setMemoryCandidates(candidatePayload.items);
+  }
+
+  async function startConversation() {
+    if (!xpert || running) return;
+    const created = await createXpertConversation(xpert.id);
+    setConversations((current) => [created, ...current]);
+    await selectConversation(created.conversation_id);
+  }
+
+  async function handleFileUpload(file: File) {
+    if (!xpert || !conversationId) return;
+    setUploading(true);
+    setError("");
+    try {
+      const uploaded = await uploadXpertFile(xpert.id, conversationId, file);
+      await refreshContext();
+      setSelectedFileIds((current) => [...current, uploaded.asset_id].slice(-5));
+      setShowContext(true);
+      setShowTrace(false);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "\u6587\u4ef6\u4e0a\u4f20\u5931\u8d25");
+    } finally {
+      setUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  }
+
+  async function rememberMessage(message: XpertConversationMessage) {
+    if (!xpert || !conversationId) return;
+    await createXpertMemory(xpert.id, {
+      content: message.content,
+      scope: "xpert",
+      conversation_id: conversationId,
+      source_type: "user_action",
+      source_id: message.message_id,
+    });
+    await refreshContext();
+    setShowContext(true);
+    setShowTrace(false);
+  }
+
+  async function decideCandidate(candidateId: string, action: "approve" | "reject") {
+    if (!xpert) return;
+    await decideXpertMemoryCandidate(xpert.id, candidateId, action);
+    await refreshContext();
+  }
 
   async function loadTrace(nextRunId: string, nextTaskId: string) {
     try {
@@ -179,7 +314,7 @@ export default function XpertChatPage() {
 
   async function sendMessage(messageOverride?: string) {
     const message = (messageOverride ?? input).trim();
-    if (!message || !xpert || !version || running) return;
+    if (!message || !xpert || !version || running || !conversationId) return;
 
     const history = messages.slice(-20);
     setMessages((current) => [...current, { role: "user", content: message }]);
@@ -195,7 +330,13 @@ export default function XpertChatPage() {
       const response = await fetch(`/api/xperts/${xpert.id}/run`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message, messages: history, version }),
+        body: JSON.stringify({
+          message,
+          messages: history,
+          version,
+          conversation_id: conversationId,
+          file_asset_ids: selectedFileIds,
+        }),
       });
       if (!response.ok) throw new Error(await responseError(response));
       if (!response.body) throw new Error("浏览器未收到流式响应。 ");
@@ -248,6 +389,7 @@ export default function XpertChatPage() {
         { role: "assistant", content: finalOutput || "运行完成，但没有返回文本输出。" },
       ]);
       if (nextRunId) await loadTrace(nextRunId, nextTaskId);
+      window.setTimeout(() => void refreshContext(), 800);
     } catch (caught) {
       const messageText = caught instanceof Error ? caught.message : "Xpert 运行失败";
       setError(messageText);
@@ -276,6 +418,8 @@ export default function XpertChatPage() {
         objective: goalObjective.trim(),
         planner_xpert_id: plannerXpertId,
         source_xpert_id: xpert.id,
+        source_conversation_id: conversationId,
+        file_asset_ids: selectedFileIds,
         messages: messages.slice(-20),
         max_parallel: 2,
       });
@@ -330,6 +474,26 @@ export default function XpertChatPage() {
               </div>
             </div>
             <div className="flex flex-wrap items-center justify-end gap-2">
+              <select
+                className="h-9 max-w-44 rounded-lg border border-white/10 bg-white/[0.055] px-3 text-xs text-white outline-none"
+                disabled={contextLoading || running}
+                onChange={(event) => void selectConversation(event.target.value)}
+                value={conversationId}
+              >
+                {conversations.map((item) => (
+                  <option className="bg-ink-950" key={item.conversation_id} value={item.conversation_id}>
+                    {item.title}
+                  </option>
+                ))}
+              </select>
+              <button
+                className="inline-flex h-9 items-center rounded-lg border border-white/10 bg-white/[0.04] px-3 text-xs font-semibold text-slate-300 hover:bg-white/[0.08]"
+                disabled={running}
+                onClick={() => void startConversation()}
+                type="button"
+              >
+                {"+ \u65b0\u4f1a\u8bdd"}
+              </button>
               <button
                 className="inline-flex h-9 items-center gap-2 rounded-lg border border-cyan-300/25 bg-cyan-300/10 px-3 text-xs font-semibold text-cyan-100 transition hover:border-cyan-200/45 hover:bg-cyan-300/15"
                 onClick={openGoalComposer}
@@ -381,6 +545,13 @@ export default function XpertChatPage() {
                   <article className={`max-w-[86%] rounded-lg border p-3 ${message.role === "user" ? "ml-auto border-hire-300/25 bg-hire-300/10" : "border-white/10 bg-white/[0.045]"}`} key={`${message.role}-${index}`}>
                     <p className="text-[10px] font-semibold uppercase text-slate-500">{roleCopy(message.role)}</p>
                     <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-slate-100">{message.content}</p>
+                    <button
+                      className="mt-2 text-[10px] font-semibold text-cyan-200/75 transition hover:text-cyan-100"
+                      onClick={() => void rememberMessage(message)}
+                      type="button"
+                    >
+                      {"\u8bb0\u4f4f\u8fd9\u6761"}
+                    </button>
                   </article>
                 ))}
                 {running ? (
@@ -392,7 +563,39 @@ export default function XpertChatPage() {
 
           <footer className="border-t border-white/10 p-4">
             {error ? <p className="mb-3 rounded-lg border border-rose-300/25 bg-rose-300/10 px-3 py-2 text-xs text-rose-100">{error}</p> : null}
+            {selectedFileIds.length > 0 ? (
+              <div className="mb-2 flex flex-wrap gap-2">
+                {files.filter((file) => selectedFileIds.includes(file.asset_id)).map((file) => (
+                  <button
+                    className="rounded-md border border-cyan-300/20 bg-cyan-300/10 px-2 py-1 text-[10px] text-cyan-100"
+                    key={file.asset_id}
+                    onClick={() => setSelectedFileIds((current) => current.filter((item) => item !== file.asset_id))}
+                    type="button"
+                  >
+                    {file.filename} {"\u00d7"}
+                  </button>
+                ))}
+              </div>
+            ) : null}
             <div className="flex items-end gap-2">
+              <input
+                accept=".txt,.md,.markdown,.pdf"
+                className="hidden"
+                onChange={(event) => {
+                  const file = event.target.files?.[0];
+                  if (file) void handleFileUpload(file);
+                }}
+                ref={fileInputRef}
+                type="file"
+              />
+              <button
+                className="h-12 rounded-lg border border-white/10 bg-white/[0.04] px-3 text-xs font-semibold text-slate-300 hover:bg-white/[0.08] disabled:opacity-50"
+                disabled={running || uploading || !conversationId}
+                onClick={() => fileInputRef.current?.click()}
+                type="button"
+              >
+                {uploading ? "\u4e0a\u4f20\u4e2d..." : "\u9644\u4ef6"}
+              </button>
               <textarea className="min-h-12 flex-1 resize-none rounded-lg border border-white/10 bg-white/[0.055] px-3 py-3 text-sm leading-6 text-white outline-none focus:border-hire-300/60" disabled={running} onChange={(event) => setInput(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void sendMessage(); } }} placeholder="输入任务，Enter 发送，Shift+Enter 换行" rows={2} value={input} />
               <button className="h-12 rounded-lg bg-hire-300 px-5 text-sm font-semibold text-ink-950 transition hover:bg-hire-200 disabled:cursor-not-allowed disabled:opacity-50" disabled={running || !input.trim()} onClick={() => void sendMessage()} type="button">{running ? "执行中" : "发送"}</button>
             </div>
@@ -413,6 +616,74 @@ export default function XpertChatPage() {
             <div className="rounded-lg border border-white/10 bg-white/[0.04] p-3"><dt className="text-slate-500">状态</dt><dd className="mt-1 font-semibold text-white">{running ? "运行中" : trace?.run?.status ?? "待运行"}</dd></div>
             <div className="col-span-2 rounded-lg border border-white/10 bg-white/[0.04] p-3"><dt className="text-slate-500">Run ID</dt><dd className="mt-1 break-all font-mono text-[11px] text-slate-300">{runId || "-"}</dd></div>
           </dl>
+
+          <button
+            className="mt-3 w-full rounded-lg border border-cyan-300/20 bg-cyan-300/10 px-3 py-2 text-xs font-semibold text-cyan-100"
+            onClick={() => { setShowContext((current) => !current); setShowTrace(false); }}
+            type="button"
+          >
+            {showContext ? "\u6536\u8d77\u6587\u4ef6\u4e0e\u8bb0\u5fc6" : "\u6587\u4ef6\u4e0e\u8bb0\u5fc6"}
+          </button>
+
+          {showContext ? (
+            <div className="mt-4 min-h-0 flex-1 space-y-5 overflow-y-auto">
+              <section>
+                <div className="flex items-center justify-between">
+                  <h3 className="text-xs font-semibold text-white">{"\u4f1a\u8bdd\u9644\u4ef6"}</h3>
+                  <span className="text-[10px] text-slate-500">{files.length} / 20</span>
+                </div>
+                <p className="mt-1 text-[10px] leading-4 text-slate-500">{"\u6bcf\u6b21\u6700\u591a\u9009\u62e9 5 \u4e2a\u6587\u4ef6\u8fdb\u5165 Xpert \u4e0a\u4e0b\u6587\u3002"}</p>
+                <div className="mt-2 space-y-2">
+                  {files.length ? files.map((file) => (
+                    <div className="flex items-start gap-2 rounded-lg border border-white/10 bg-white/[0.035] p-2.5" key={file.asset_id}>
+                      <input
+                        checked={selectedFileIds.includes(file.asset_id)}
+                        className="mt-1"
+                        onChange={(event) => setSelectedFileIds((current) => {
+                          if (!event.target.checked) return current.filter((item) => item !== file.asset_id);
+                          if (current.includes(file.asset_id) || current.length >= 5) return current;
+                          return [...current, file.asset_id];
+                        })}
+                        type="checkbox"
+                      />
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-[11px] font-semibold text-white">{file.filename}</p>
+                        <p className="mt-1 text-[10px] text-slate-500">{file.character_count} chars / {(file.size_bytes / 1024).toFixed(1)} KB</p>
+                      </div>
+                      <button className="text-[10px] text-rose-200" onClick={() => xpert && void archiveXpertFile(xpert.id, conversationId, file.asset_id).then(refreshContext)} type="button">{"\u5f52\u6863"}</button>
+                    </div>
+                  )) : <p className="rounded-lg border border-dashed border-white/10 p-3 text-center text-xs text-slate-500">{"\u5c1a\u672a\u4e0a\u4f20\u9644\u4ef6"}</p>}
+                </div>
+              </section>
+
+              <section>
+                <div className="flex items-center justify-between"><h3 className="text-xs font-semibold text-white">{"\u5f85\u786e\u8ba4\u8bb0\u5fc6"}</h3><span className="text-[10px] text-slate-500">{memoryCandidates.length}</span></div>
+                <div className="mt-2 space-y-2">
+                  {memoryCandidates.map((candidate) => (
+                    <div className="rounded-lg border border-amber-300/20 bg-amber-300/[0.06] p-2.5" key={candidate.candidate_id}>
+                      <p className="line-clamp-4 text-[11px] leading-5 text-slate-200">{candidate.content}</p>
+                      <div className="mt-2 flex justify-end gap-2">
+                        <button className="text-[10px] text-slate-400" onClick={() => void decideCandidate(candidate.candidate_id, "reject")} type="button">{"\u62d2\u7edd"}</button>
+                        <button className="text-[10px] font-semibold text-emerald-200" onClick={() => void decideCandidate(candidate.candidate_id, "approve")} type="button">{"\u6279\u51c6"}</button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </section>
+
+              <section>
+                <div className="flex items-center justify-between"><h3 className="text-xs font-semibold text-white">{"\u5df2\u751f\u6548\u8bb0\u5fc6"}</h3><span className="text-[10px] text-slate-500">{memories.length}</span></div>
+                <div className="mt-2 space-y-2">
+                  {memories.map((memory) => (
+                    <div className="rounded-lg border border-white/10 bg-white/[0.035] p-2.5" key={memory.memory_id}>
+                      <div className="flex items-center justify-between gap-2"><span className="text-[10px] font-semibold text-cyan-100">{memory.scope}</span><button className="text-[10px] text-rose-200" onClick={() => xpert && void archiveXpertMemory(xpert.id, memory.memory_id).then(refreshContext)} type="button">{"\u5f52\u6863"}</button></div>
+                      <p className="mt-1 line-clamp-4 text-[11px] leading-5 text-slate-300">{memory.content}</p>
+                    </div>
+                  ))}
+                </div>
+              </section>
+            </div>
+          ) : null}
 
           {showTrace ? (
             <div className="mt-4 min-h-0 flex-1 space-y-4 overflow-y-auto">

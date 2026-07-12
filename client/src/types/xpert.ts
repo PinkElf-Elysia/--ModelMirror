@@ -93,6 +93,65 @@ export interface XpertListResponse {
 }
 
 export interface XpertConversationMessage {
+  message_id?: string;
   role: "user" | "assistant";
   content: string;
+  version?: number | null;
+  created_at?: number;
+}
+
+export interface XpertConversation {
+  conversation_id: string;
+  xpert_id: string;
+  title: string;
+  messages?: XpertConversationMessage[];
+  message_count?: number;
+  file_asset_ids: string[];
+  archived: boolean;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface XpertFileAsset {
+  asset_id: string;
+  artifact_id: string;
+  xpert_id: string;
+  conversation_id: string;
+  filename: string;
+  size_bytes: number;
+  extension: string;
+  mime_type: string;
+  status: "ready" | "archived";
+  character_count: number;
+  extracted_truncated: boolean;
+  created_at: number;
+  archived_at: number | null;
+}
+
+export interface XpertMemoryRecord {
+  memory_id: string;
+  xpert_id: string;
+  scope: "conversation" | "xpert";
+  conversation_id: string | null;
+  content: string;
+  tags: string[];
+  source_type: string;
+  source_id: string | null;
+  status: "active" | "archived";
+  created_at: number;
+  updated_at: number;
+}
+
+export interface XpertMemoryCandidate {
+  candidate_id: string;
+  xpert_id: string;
+  scope: "conversation" | "xpert";
+  conversation_id: string | null;
+  content: string;
+  tags: string[];
+  source_run_id: string | null;
+  status: "pending" | "approved" | "rejected";
+  created_at: number;
+  decided_at: number | null;
+  memory_id: string | null;
 }

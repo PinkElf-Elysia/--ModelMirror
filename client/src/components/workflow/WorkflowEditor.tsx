@@ -294,8 +294,10 @@ function createNodeData(
       exceptionHandling: "none",
       outputSchemaMode: "default",
       outputSchemaJson: "",
+      memoryReadEnabled: "false",
+      memoryReadScope: "both",
       memoryWriteEnabled: "false",
-      memoryWriteTarget: "",
+      memoryWriteTarget: "xpert",
       nodeParametersJson: "[]",
     };
   }
@@ -322,8 +324,10 @@ function createNodeData(
       exceptionHandling: "none",
       outputSchemaMode: "default",
       outputSchemaJson: "",
+      memoryReadEnabled: "false",
+      memoryReadScope: "both",
       memoryWriteEnabled: "false",
-      memoryWriteTarget: "",
+      memoryWriteTarget: "xpert",
       nodeParametersJson: "[]",
     };
   }
@@ -817,6 +821,7 @@ function AgentStudioPanel({
       | "enableFileUnderstanding"
       | "parallelToolCalls"
       | "retryOnFailure"
+      | "memoryReadEnabled"
       | "memoryWriteEnabled",
     checked: boolean,
   ) => update({ [key]: checked ? "true" : "false" });
@@ -1135,6 +1140,25 @@ function AgentStudioPanel({
         description="当前仅保存配置草稿，不会写入长期记忆。"
         title="记忆写入"
       >
+        <ConfigSwitch
+          checked={workflowBooleanValue(data.memoryReadEnabled)}
+          label={"\u8bfb\u53d6\u76f8\u5173\u8bb0\u5fc6"}
+          onChange={(checked) =>
+            setStringBoolean("memoryReadEnabled", checked)
+          }
+        />
+        <Field label={"\u8bb0\u5fc6\u8bfb\u53d6\u8303\u56f4"}>
+          <select
+            className={textInputClass()}
+            disabled={!workflowBooleanValue(data.memoryReadEnabled)}
+            onChange={(event) => update({ memoryReadScope: event.target.value })}
+            value={data.memoryReadScope ?? "both"}
+          >
+            <option className="bg-slate-950" value="both">{"\u4f1a\u8bdd + Xpert"}</option>
+            <option className="bg-slate-950" value="conversation">{"\u4ec5\u5f53\u524d\u4f1a\u8bdd"}</option>
+            <option className="bg-slate-950" value="xpert">{"\u4ec5 Xpert \u957f\u671f\u8bb0\u5fc6"}</option>
+          </select>
+        </Field>
         <ConfigSwitch
           checked={workflowBooleanValue(data.memoryWriteEnabled)}
           label="写入记忆"
