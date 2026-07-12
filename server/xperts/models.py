@@ -84,3 +84,5 @@ class XpertRunRequest(BaseModel):
     message: str = Field(min_length=1, max_length=20_000)
     messages: list[XpertConversationMessage] = Field(default_factory=list, max_length=20)
     version: int | None = Field(default=None, ge=1)
+    conversation_id: str | None = Field(default=None, max_length=200)
+    file_asset_ids: list[str] = Field(default_factory=list, max_length=5)

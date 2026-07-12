@@ -41,20 +41,28 @@ except ModuleNotFoundError:
 try:
     from server.xperts import (
         XpertDefinition,
+        XpertContextError,
+        XpertContextNotFoundError,
+        XpertContextValidationError,
         XpertNotFoundError,
         XpertRunRequest,
         XpertStoreError,
         XpertVersion,
+        get_xpert_context_store,
         get_xpert_store,
         router as xperts_router,
     )
 except ModuleNotFoundError:
     from xperts import (
         XpertDefinition,
+        XpertContextError,
+        XpertContextNotFoundError,
+        XpertContextValidationError,
         XpertNotFoundError,
         XpertRunRequest,
         XpertStoreError,
         XpertVersion,
+        get_xpert_context_store,
         get_xpert_store,
         router as xperts_router,
     )
@@ -135,6 +143,7 @@ try:
         GoalValidationError,
         InMemoryToolAuditStore,
         MCPToolsetProvider,
+        MemoryToolsetProvider,
         MiddlewareContext,
         MiddlewarePipeline,
         ModelCallRequest,
@@ -169,6 +178,7 @@ except ModuleNotFoundError:
         GoalValidationError,
         InMemoryToolAuditStore,
         MCPToolsetProvider,
+        MemoryToolsetProvider,
         MiddlewareContext,
         MiddlewarePipeline,
         ModelCallRequest,
@@ -337,6 +347,8 @@ mcp_manager = MCPClientManager()
 mcp_installer = MCPInstaller()
 tool_registry = ToolRegistry()
 workflow_mcp_provider = MCPToolsetProvider(tool_registry, mcp_manager)
+xpert_context_store = get_xpert_context_store()
+workflow_memory_provider = MemoryToolsetProvider(xpert_context_store)
 runtime_capabilities = CapabilityRegistry()
 workflow_mcp_pipeline = MiddlewarePipeline([event_recorder])
 workflow_tool_policy = ToolPermissionPolicy(allow_by_default=True)
@@ -354,6 +366,11 @@ runtime_capabilities.register(
     "mcp_tools",
     workflow_mcp_provider,
     description="MCP tools runtime capability for workflow and agents.",
+)
+runtime_capabilities.register(
+    "memory_tools",
+    workflow_memory_provider,
+    description="Persistent Xpert memory tools for workflow agents.",
 )
 workflow_task_store: dict[str, dict[str, Any]] = {}
 chat_runtime_task_store: dict[str, dict[str, Any]] = {}
@@ -2189,6 +2206,9 @@ async def prepare_published_xpert_run(
     *,
     extra_inputs: dict[str, str] | None = None,
     handoff_depth: int = 0,
+    shared_file_owner_xpert_id: str | None = None,
+    shared_file_conversation_id: str | None = None,
+    shared_file_asset_ids: list[str] | None = None,
 ) -> PreparedXpertRun:
     store = get_xpert_store()
     xpert = await asyncio.to_thread(store.resolve_xpert, reference)
@@ -2209,15 +2229,95 @@ async def prepare_published_xpert_run(
         history_size = next_size
     history_json = json.dumps(history, ensure_ascii=False)
 
+    conversation_id = payload.conversation_id
+    file_owner_xpert_id = shared_file_owner_xpert_id or xpert.id
+    file_conversation_id = shared_file_conversation_id or conversation_id
+    file_asset_ids = list(shared_file_asset_ids or payload.file_asset_ids)
+    if conversation_id:
+        await asyncio.to_thread(
+            xpert_context_store.get_conversation,
+            xpert.id,
+            conversation_id,
+        )
+    if file_asset_ids and not file_conversation_id:
+        raise XpertContextValidationError(
+            "conversation_id is required when file_asset_ids are provided."
+        )
+    file_context = ""
+    selected_files: list[Any] = []
+    if file_asset_ids:
+        file_context, selected_files = await asyncio.to_thread(
+            xpert_context_store.build_file_context,
+            file_owner_xpert_id,
+            file_asset_ids,
+            conversation_id=file_conversation_id,
+            include_archived=bool(shared_file_asset_ids),
+        )
+
+    def render_memory_context(items: list[Any]) -> str:
+        sections: list[str] = []
+        used = 0
+        for item in items:
+            line = (
+                f"[Memory: {item.memory_id}; scope={item.scope}; "
+                f"tags={','.join(item.tags)}]\n{item.content}"
+            )
+            remaining = 8_000 - used
+            if remaining <= 0:
+                break
+            line = line[:remaining]
+            sections.append(line)
+            used += len(line)
+        return "\n\n".join(sections)
+
+    xpert_memories = await asyncio.to_thread(
+        xpert_context_store.search_memories,
+        xpert.id,
+        payload.message,
+        scope="xpert",
+        limit=10,
+    )
+    conversation_memories: list[Any] = []
+    if conversation_id:
+        conversation_memories = await asyncio.to_thread(
+            xpert_context_store.search_memories,
+            xpert.id,
+            payload.message,
+            scope="conversation",
+            conversation_id=conversation_id,
+            limit=10,
+        )
+
     workflow_payload = version.workflow.model_dump(mode="json")
     workflow_payload.pop("version", None)
     workflow_payload.pop("source", None)
     workflow = WorkflowPayload.model_validate(workflow_payload)
+    output_agent_data: dict[str, Any] | None = None
+    for workflow_node in reversed(version.workflow.nodes):
+        node_data = workflow_node.data
+        if (
+            node_data.get("kind") == "workflow_agent"
+            and str(node_data.get("outputVariable") or "agent_output")
+            == version.output_variable
+        ):
+            output_agent_data = node_data
+            break
+
+    def configured_bool(value: Any) -> bool:
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(value)
+
     inputs = {
         version.input_variable: payload.message,
         version.history_variable: history_json,
         "user_input": payload.message,
         "conversation_history": history_json,
+        "xpert_file_context": file_context,
+        "xpert_memory_context_xpert": render_memory_context(xpert_memories),
+        "xpert_memory_context_conversation": render_memory_context(
+            conversation_memories
+        ),
         **dict(extra_inputs or {}),
     }
     return PreparedXpertRun(
@@ -2231,8 +2331,94 @@ async def prepare_published_xpert_run(
             "xpert_draft_revision": version.draft_revision,
             "xpert_checksum": version.checksum,
             "handoff_depth": handoff_depth,
+            "conversation_id": conversation_id,
+            "file_asset_ids": [item.asset_id for item in selected_files],
+            "file_owner_xpert_id": file_owner_xpert_id if selected_files else None,
+            "file_conversation_id": file_conversation_id if selected_files else None,
+            "file_count": len(selected_files),
+            "xpert_memory_count": len(xpert_memories),
+            "conversation_memory_count": len(conversation_memories),
+            "memory_write_enabled": configured_bool(
+                (output_agent_data or {}).get("memoryWriteEnabled")
+            ),
+            "memory_write_target": str(
+                (output_agent_data or {}).get("memoryWriteTarget") or "xpert"
+            ),
+            "memory_write_model_id": str(
+                (output_agent_data or {}).get("modelId") or TEXT_FALLBACK_MODEL
+            ),
         },
     )
+
+
+async def generate_xpert_memory_candidates(
+    *,
+    xpert_id: str,
+    conversation_id: str | None,
+    run_id: str,
+    model_id: str,
+    user_message: str,
+    final_output: str,
+    scope: str,
+) -> None:
+    """Best-effort writeback extraction; candidates never become active automatically."""
+
+    if scope == "conversation" and not conversation_id:
+        return
+    prompt = (
+        "Extract only durable facts, preferences, or decisions that would help future "
+        "conversations. Return one JSON object only: "
+        '{"memories":[{"content":"...","tags":["..."]}]}. '
+        "Return an empty memories list when nothing is worth retaining. "
+        "Never include secrets, API keys, passwords, transient requests, or the answer itself.\n\n"
+        f"User message:\n{user_message[:4000]}\n\n"
+        f"Assistant answer:\n{final_output[:4000]}"
+    )
+    try:
+        raw = await collect_chat_completion_text(
+            model_id,
+            [ChatMessage(role="user", content=prompt)],
+            temperature=0,
+            max_tokens=600,
+        )
+        json_text = raw.strip()
+        fenced = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", json_text, re.DOTALL)
+        if fenced:
+            json_text = fenced.group(1).strip()
+        payload = json.loads(json_text)
+        items = payload.get("memories", []) if isinstance(payload, dict) else []
+        if not isinstance(items, list):
+            return
+        for item in items[:3]:
+            if not isinstance(item, dict):
+                continue
+            content = str(item.get("content") or "").strip()
+            if not content:
+                continue
+            tags_raw = item.get("tags")
+            tags = [str(value) for value in tags_raw] if isinstance(tags_raw, list) else []
+            candidate = await asyncio.to_thread(
+                xpert_context_store.create_candidate,
+                xpert_id,
+                content=content,
+                scope=scope,
+                conversation_id=conversation_id,
+                tags=tags,
+                source_run_id=run_id,
+            )
+            await run_registry.record_checkpoint(
+                run_id,
+                event_type="xpert.memory.candidate_created",
+                title="Memory candidate created",
+                summary=f"candidate_id={candidate.candidate_id}",
+                metadata={
+                    "candidate_id": candidate.candidate_id,
+                    "scope": candidate.scope,
+                    "content_length": len(candidate.content),
+                },
+            )
+    except Exception as exc:
+        logger.warning("Xpert memory candidate extraction failed: %s", exc)
 
 
 async def _run_workflow_response(
@@ -2321,6 +2507,7 @@ async def _run_workflow_response(
         "ttl": WORKFLOW_TASK_TTL_SECONDS,
         "runtime_event_store": RuntimeEventStore(),
         "tool_audit_store": InMemoryToolAuditStore(),
+        "runtime_metadata": run_metadata,
     }
     workflow_task_store[task_id] = task_state
 
@@ -2416,8 +2603,13 @@ async def _run_workflow_response(
             metadata: dict[str, Any] | None = None,
         ):
             matched_tool = await workflow_mcp_provider.find_tool(tool_name)
+            capability_name = "mcp_tools"
+            if not matched_tool:
+                matched_tool = await workflow_memory_provider.find_tool(tool_name)
+                capability_name = "memory_tools"
             if not matched_tool:
                 raise ValueError(f"MCP 工具未注册：{tool_name}")
+            run_context = task_state.get("runtime_metadata") or {}
             return await run_tool_with_runtime(
                 RuntimeToolCall(
                     tool_name=tool_name,
@@ -2426,6 +2618,8 @@ async def _run_workflow_response(
                         "session_id": matched_tool.session_id,
                         "server_id": matched_tool.server_id,
                         "node_id": node.id,
+                        "xpert_id": run_context.get("xpert_id"),
+                        "conversation_id": run_context.get("conversation_id"),
                         **dict(metadata or {}),
                     },
                 ),
@@ -2442,6 +2636,7 @@ async def _run_workflow_response(
                         "workflow": True,
                     },
                 ),
+                capability_name=capability_name,
                 policy=selected_workflow_tool_policy(),
                 audit_store=selected_workflow_tool_audit_store(),
             )
@@ -2463,16 +2658,34 @@ async def _run_workflow_response(
                 ).strip()
             return output_text
 
-        async def workflow_available_tools(tool_names_raw: Any) -> list[Any]:
+        async def workflow_available_tools(
+            tool_names_raw: Any,
+            *,
+            include_memory_read: bool = False,
+            include_memory_write: bool = False,
+        ) -> list[Any]:
             tools = await workflow_mcp_provider.list_tools()
             requested_tool_names = {
                 item.strip()
                 for item in str(tool_names_raw or "").split(",")
                 if item.strip()
             }
-            if not requested_tool_names:
-                return tools
-            return [tool for tool in tools if tool.name in requested_tool_names]
+            if requested_tool_names:
+                tools = [tool for tool in tools if tool.name in requested_tool_names]
+            memory_tools = await workflow_memory_provider.list_tools()
+            if include_memory_read:
+                tools.extend(
+                    tool
+                    for tool in memory_tools
+                    if tool.name in {"memory_search", "memory_get"}
+                )
+            if include_memory_write:
+                tools.extend(
+                    tool
+                    for tool in memory_tools
+                    if tool.name == "memory_propose_write"
+                )
+            return tools
 
         async def run_react_lite_agent(
             *,
@@ -2487,8 +2700,14 @@ async def _run_workflow_response(
             temperature: float,
             output_variable: str,
             run_id: str | None = None,
+            include_memory_read: bool = False,
+            include_memory_write: bool = False,
         ) -> tuple[str, list[dict[str, Any]]]:
-            available_tools = await workflow_available_tools(tool_names_raw)
+            available_tools = await workflow_available_tools(
+                tool_names_raw,
+                include_memory_read=include_memory_read,
+                include_memory_write=include_memory_write,
+            )
             events: list[dict[str, Any]] = []
             if not available_tools:
                 events.append(
@@ -2638,6 +2857,7 @@ async def _run_workflow_response(
                             "agent_kind": kind,
                             "agent_node_id": node.id,
                             "iteration": iteration_index + 1,
+                            "run_id": run_id,
                         },
                     )
                     tool_result_text = runtime_tool_result_text(call_result)
@@ -2718,6 +2938,8 @@ async def _run_workflow_response(
                     {
                         "xpert_id": run_metadata.get("xpert_id"),
                         "xpert_version": run_metadata.get("xpert_version"),
+                        "conversation_id": run_metadata.get("conversation_id"),
+                        "file_count": run_metadata.get("file_count", 0),
                     }
                 )
             yield sse_payload(meta_event)
@@ -3843,6 +4065,52 @@ async def _run_workflow_response(
                         if prompt_suffix:
                             task_input = f"{task_input}\n\n{prompt_suffix}".strip()
                         tool_mode = str(node.data.get("toolMode") or "none").strip()
+                        enable_file_understanding = workflow_truthy(
+                            node.data.get("enableFileUnderstanding")
+                        )
+                        memory_read_enabled = workflow_truthy(
+                            node.data.get("memoryReadEnabled")
+                        )
+                        memory_read_scope = str(
+                            node.data.get("memoryReadScope") or "both"
+                        ).strip() or "both"
+                        memory_write_enabled = workflow_truthy(
+                            node.data.get("memoryWriteEnabled")
+                        )
+                        memory_write_target = str(
+                            node.data.get("memoryWriteTarget") or "xpert"
+                        ).strip() or "xpert"
+                        if memory_read_scope not in {"conversation", "xpert", "both"}:
+                            raise ValueError(
+                                "workflow_agent memoryReadScope must be conversation, xpert, or both."
+                            )
+                        if memory_write_target not in {"conversation", "xpert"}:
+                            raise ValueError(
+                                "workflow_agent memoryWriteTarget must be conversation or xpert."
+                            )
+                        run_context = task_state.get("runtime_metadata") or {}
+                        if enable_file_understanding:
+                            file_context = variables.get("xpert_file_context", "").strip()
+                            if file_context:
+                                task_input = (
+                                    f"{task_input}\n\nSelected file context:\n{file_context}"
+                                ).strip()
+                        recalled_sections: list[str] = []
+                        if memory_read_enabled and memory_read_scope in {"xpert", "both"}:
+                            value = variables.get("xpert_memory_context_xpert", "").strip()
+                            if value:
+                                recalled_sections.append(value)
+                        if memory_read_enabled and memory_read_scope in {"conversation", "both"}:
+                            value = variables.get(
+                                "xpert_memory_context_conversation", ""
+                            ).strip()
+                            if value:
+                                recalled_sections.append(value)
+                        if recalled_sections:
+                            task_input = (
+                                f"{task_input}\n\nRelevant memory context:\n"
+                                + "\n\n".join(recalled_sections)
+                            ).strip()
                         retry_on_failure = workflow_truthy(
                             node.data.get("retryOnFailure")
                         )
@@ -3894,6 +4162,12 @@ async def _run_workflow_response(
                                 "fallback_model_id": fallback_model_id or None,
                                 "exception_handling": exception_handling,
                                 "disable_output": disable_output,
+                                "file_understanding": enable_file_understanding,
+                                "file_count": run_context.get("file_count", 0),
+                                "memory_read_enabled": memory_read_enabled,
+                                "memory_read_scope": memory_read_scope,
+                                "memory_write_enabled": memory_write_enabled,
+                                "memory_write_target": memory_write_target,
                             },
                         )
                         await run_registry.record_checkpoint(
@@ -3911,8 +4185,44 @@ async def _run_workflow_response(
                                 "fallback_model_id": fallback_model_id or None,
                                 "exception_handling": exception_handling,
                                 "disable_output": disable_output,
+                                "file_understanding": enable_file_understanding,
+                                "file_count": run_context.get("file_count", 0),
+                                "memory_read_enabled": memory_read_enabled,
+                                "memory_read_scope": memory_read_scope,
+                                "memory_write_enabled": memory_write_enabled,
                             },
                         )
+                        if enable_file_understanding and run_context.get("file_count"):
+                            await run_registry.record_checkpoint(
+                                workflow_agent_run.run_id,
+                                event_type="xpert.file.context_injected",
+                                title="Xpert file context injected",
+                                summary=f"file_count={run_context.get('file_count', 0)}",
+                                metadata={
+                                    "node_id": node.id,
+                                    "file_count": run_context.get("file_count", 0),
+                                    "file_asset_ids": run_context.get("file_asset_ids", []),
+                                },
+                            )
+                        recalled_count = 0
+                        if memory_read_enabled and memory_read_scope in {"xpert", "both"}:
+                            recalled_count += int(run_context.get("xpert_memory_count") or 0)
+                        if memory_read_enabled and memory_read_scope in {"conversation", "both"}:
+                            recalled_count += int(
+                                run_context.get("conversation_memory_count") or 0
+                            )
+                        if recalled_count:
+                            await run_registry.record_checkpoint(
+                                workflow_agent_run.run_id,
+                                event_type="xpert.memory.recalled",
+                                title="Xpert memory recalled",
+                                summary=f"memory_count={recalled_count}",
+                                metadata={
+                                    "node_id": node.id,
+                                    "memory_count": recalled_count,
+                                    "memory_scope": memory_read_scope,
+                                },
+                            )
 
                         attempt_models: list[tuple[str, bool]] = [(model_id, False)]
                         if retry_on_failure:
@@ -4006,6 +4316,8 @@ async def _run_workflow_response(
                                         temperature=0.7,
                                         output_variable=output_variable,
                                         run_id=workflow_agent_run.run_id,
+                                        include_memory_read=memory_read_enabled,
+                                        include_memory_write=memory_write_enabled,
                                     )
                                     for agent_event in agent_events:
                                         yield sse_payload(agent_event)
@@ -4973,6 +5285,43 @@ async def _run_workflow_response(
                     "variables_count": len(variables),
                 },
             )
+            if runtime_run_type == "xpert" and run_metadata.get("conversation_id"):
+                try:
+                    await asyncio.to_thread(
+                        xpert_context_store.append_message,
+                        str(run_metadata.get("xpert_id") or ""),
+                        str(run_metadata.get("conversation_id") or ""),
+                        role="assistant",
+                        content=final_output or "Run completed without text output.",
+                        version=int(run_metadata.get("xpert_version") or 1),
+                    )
+                except XpertContextError as exc:
+                    logger.warning("Failed to persist Xpert assistant message: %s", exc)
+            if (
+                runtime_run_type == "xpert"
+                and run_metadata.get("memory_write_enabled")
+                and final_output
+            ):
+                asyncio.create_task(
+                    generate_xpert_memory_candidates(
+                        xpert_id=str(run_metadata.get("xpert_id") or ""),
+                        conversation_id=(
+                            str(run_metadata.get("conversation_id"))
+                            if run_metadata.get("conversation_id")
+                            else None
+                        ),
+                        run_id=workflow_run.run_id,
+                        model_id=str(
+                            run_metadata.get("memory_write_model_id")
+                            or TEXT_FALLBACK_MODEL
+                        ),
+                        user_message=variables.get("user_input", ""),
+                        final_output=final_output,
+                        scope=str(
+                            run_metadata.get("memory_write_target") or "xpert"
+                        ),
+                    )
+                )
             yield sse_payload(
                 {
                     "event": "workflow_end",
@@ -5068,6 +5417,11 @@ async def execute_xpert_handoff_target(
         pinned_version = None
 
     try:
+        shared_file_asset_ids = [
+            str(value)
+            for value in handoff.metadata.get("file_asset_ids", [])
+            if str(value)
+        ][:5]
         prepared = await prepare_published_xpert_run(
             pinned_xpert_id or target_reference,
             XpertRunRequest(
@@ -5081,8 +5435,16 @@ async def execute_xpert_handoff_target(
                 "source_task_id": task.task_id,
             },
             handoff_depth=source_depth + 1,
+            shared_file_owner_xpert_id=(
+                str(handoff.metadata.get("source_xpert_id") or "").strip() or None
+            ),
+            shared_file_conversation_id=(
+                str(handoff.metadata.get("source_conversation_id") or "").strip()
+                or None
+            ),
+            shared_file_asset_ids=shared_file_asset_ids,
         )
-    except (XpertNotFoundError, ValueError) as exc:
+    except (XpertNotFoundError, XpertContextError, ValueError) as exc:
         raise HandoffPermanentError(str(exc)) from exc
     except XpertStoreError as exc:
         raise RuntimeError(str(exc)) from exc
@@ -5179,6 +5541,15 @@ async def plan_conversation_goal(
         }
         for message in goal.messages[-20:]
     ]
+    shared_file_context = ""
+    if goal.file_asset_ids and goal.source_xpert_id and goal.source_conversation_id:
+        shared_file_context, _ = await asyncio.to_thread(
+            xpert_context_store.build_file_context,
+            goal.source_xpert_id,
+            goal.file_asset_ids,
+            conversation_id=goal.source_conversation_id,
+            include_archived=True,
+        )
     planner_prompt = (
         "Create an executable long-term goal plan. Return one JSON object only, "
         "without markdown. Use only target_xpert_id values from available_xperts. "
@@ -5190,6 +5561,7 @@ async def plan_conversation_goal(
         '"target_xpert_id":"published-id","depends_on":[]}]}\n\n'
         f"objective={json.dumps(goal.objective, ensure_ascii=False)}\n"
         f"conversation={json.dumps(conversation, ensure_ascii=False)}\n"
+        f"shared_files={json.dumps(shared_file_context[:12000], ensure_ascii=False)}\n"
         f"available_xperts={json.dumps(catalog, ensure_ascii=False)}"
     )
     prepared = await prepare_published_xpert_run(
@@ -5262,8 +5634,21 @@ async def run_published_xpert(
 ):
     try:
         prepared = await prepare_published_xpert_run(xpert_id, payload)
+        if payload.conversation_id:
+            await asyncio.to_thread(
+                xpert_context_store.append_message,
+                prepared.xpert.id,
+                payload.conversation_id,
+                role="user",
+                content=payload.message,
+                version=prepared.version.version,
+            )
     except XpertNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except XpertContextNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except XpertContextValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except XpertStoreError as exc:
@@ -6569,16 +6954,47 @@ async def create_conversation_goal(payload: dict[str, Any]):
         content = str(item.get("content") or "").strip()
         if content:
             messages.append({"role": role, "content": content[:20_000]})
+    source_xpert_id = str(payload.get("source_xpert_id") or "").strip() or None
+    source_conversation_id = (
+        str(payload.get("source_conversation_id") or "").strip() or None
+    )
+    file_asset_ids_raw = payload.get("file_asset_ids") or []
+    if not isinstance(file_asset_ids_raw, list):
+        raise HTTPException(status_code=400, detail="Goal file_asset_ids must be a list.")
+    file_asset_ids = list(
+        dict.fromkeys(str(value).strip() for value in file_asset_ids_raw if str(value).strip())
+    )[:5]
     try:
+        if source_conversation_id:
+            if not source_xpert_id:
+                raise ValueError(
+                    "source_xpert_id is required with source_conversation_id."
+                )
+            await asyncio.to_thread(
+                xpert_context_store.get_conversation,
+                source_xpert_id,
+                source_conversation_id,
+            )
+        if file_asset_ids:
+            if not source_xpert_id or not source_conversation_id:
+                raise ValueError(
+                    "Source Xpert and conversation are required for Goal files."
+                )
+            await asyncio.to_thread(
+                xpert_context_store.build_file_context,
+                source_xpert_id,
+                file_asset_ids,
+                conversation_id=source_conversation_id,
+            )
         planner = await resolve_published_xpert(planner_reference)
         goal = await goal_store.create_goal(
             title=title[:200],
             objective=objective[:20_000],
             planner_xpert_id=planner.xpert_id,
             planner_version=planner.version,
-            source_xpert_id=(
-                str(payload.get("source_xpert_id") or "").strip() or None
-            ),
+            source_xpert_id=source_xpert_id,
+            source_conversation_id=source_conversation_id,
+            file_asset_ids=file_asset_ids,
             messages=messages,
             max_parallel=max(1, min(int(payload.get("max_parallel") or 2), 2)),
         )

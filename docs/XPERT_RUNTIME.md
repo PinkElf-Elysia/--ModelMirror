@@ -69,6 +69,18 @@ For Xpert runs, workflow_meta also exposes xpert_id and xpert_version. RunRegist
 
 Checkpoints store titles, event types, status, lengths, IDs, and error summaries. They must not store complete prompts, complete model or tool outputs, API keys, local absolute paths, embeddings, or raw secrets.
 
+## Conversation Files and Memory
+
+`XpertContextStore` uses the existing runtime storage mount and atomic replacement. It owns conversation messages, file metadata, extracted local artifacts, active memories, and model-proposed memory candidates. `XPERT_CONTEXT_STORAGE_DIR` can override its location and otherwise falls back to `AGENT_TASK_STORAGE_DIR`.
+
+Run requests may include a conversation ID and up to five file asset IDs. A `workflow_agent` only receives extracted file context when `enableFileUnderstanding=true`. Each file contributes at most 10,000 characters and the combined injected context is limited to 30,000 characters. Files remain conversation resources and are not automatically added to RAG.
+
+Memory reads are explicit node configuration. `memoryReadScope` is `conversation`, `xpert`, or `both`; automatic recall is bounded to ten records and 8,000 characters. Model writes create pending candidates. Only user approval activates a candidate, while a direct user "remember" action creates an active record immediately.
+
+The `memory_tools` capability exposes `memory_search`, `memory_get`, and `memory_propose_write`. In ReAct-Lite tool mode these tools share the existing middleware, policy, and audit path with MCP tools. Normal streaming mode remains available and only receives bounded automatic recall.
+
+Goal file sharing is opt-in. Explicit file references are carried through AgentTask and Handoff metadata and can be consumed by target Xperts. Conversation-scoped memory is not copied or exposed to another Xpert; a handoff target may only recall its own Xpert-scoped memory.
+
 ## Xpert Handoff Execution
 
 Automatic execution is explicit. Only a Handoff with `execution_mode=xpert_auto` and `target_agent=xpert:<slug-or-id>` is eligible. Other targets remain in the manual MetaAgent Inbox.
@@ -111,5 +123,5 @@ See `docs/XPERT_GOALS.md` for the model, state machine, API, planner contract, a
 - File persistence is local and is not a workspace database.
 - There is no public App/API token, sharing model, organization permission, or collaborative editor.
 - Automatic Handoff execution is limited to a single backend process and explicit `xpert:` targets.
-- Durable memory, file understanding, and knowledge-ingestion jobs are separate future milestones.
+- Knowledge-ingestion jobs and promotion of conversation files into versioned RAG indexes remain a future milestone.
 - A normal /workflow run remains unchanged and continues to use its existing local-draft behavior.

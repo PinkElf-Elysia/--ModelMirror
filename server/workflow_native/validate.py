@@ -892,6 +892,31 @@ def validate_node_configuration(
                 )
             )
 
+        memory_read_scope = str(data.get("memoryReadScope") or "both").strip()
+        if memory_read_scope not in {"conversation", "xpert", "both"}:
+            issues.append(
+                ValidationIssue(
+                    code="invalid_workflow_agent_memory_read_scope",
+                    message=(
+                        "Workflow agent memoryReadScope must be conversation, "
+                        "xpert, or both."
+                    ),
+                    node_id=node.id,
+                )
+            )
+
+        memory_write_target = str(data.get("memoryWriteTarget") or "xpert").strip()
+        if memory_write_target not in {"conversation", "xpert"}:
+            issues.append(
+                ValidationIssue(
+                    code="invalid_workflow_agent_memory_write_target",
+                    message=(
+                        "Workflow agent memoryWriteTarget must be conversation or xpert."
+                    ),
+                    node_id=node.id,
+                )
+            )
+
         max_iterations = str(data.get("maxIterations") or "").strip()
         if max_iterations:
             try:

@@ -98,6 +98,8 @@ export interface WorkflowNodeData extends Record<string, unknown> {
   exceptionHandling?: string;
   outputSchemaMode?: string;
   outputSchemaJson?: string;
+  memoryReadEnabled?: string;
+  memoryReadScope?: string;
   memoryWriteEnabled?: string;
   memoryWriteTarget?: string;
   nodeParametersJson?: string;

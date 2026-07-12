@@ -1,7 +1,11 @@
 import {
   type XpertDefinition,
   type XpertDraft,
+  type XpertConversation,
+  type XpertFileAsset,
   type XpertListResponse,
+  type XpertMemoryCandidate,
+  type XpertMemoryRecord,
   type XpertStatus,
   type XpertValidationResult,
   type XpertVersion,
@@ -98,6 +102,115 @@ export function publishXpert(xpertId: string, releaseNotes: string) {
 
 export function listXpertVersions(xpertId: string) {
   return requestJson<XpertVersion[]>(`/api/xperts/${xpertId}/versions`);
+}
+
+export function createXpertConversation(xpertId: string, title = "") {
+  return requestJson<XpertConversation>(
+    `/api/xperts/${xpertId}/conversations`,
+    jsonRequest("POST", { title }),
+  );
+}
+
+export function listXpertConversations(xpertId: string) {
+  return requestJson<{ items: XpertConversation[]; total: number }>(
+    `/api/xperts/${xpertId}/conversations?limit=50`,
+  );
+}
+
+export function getXpertConversation(xpertId: string, conversationId: string) {
+  return requestJson<XpertConversation>(
+    `/api/xperts/${xpertId}/conversations/${conversationId}`,
+  );
+}
+
+export async function uploadXpertFile(
+  xpertId: string,
+  conversationId: string,
+  file: File,
+) {
+  const body = new FormData();
+  body.append("file", file);
+  return requestJson<XpertFileAsset>(
+    `/api/xperts/${xpertId}/conversations/${conversationId}/files`,
+    { method: "POST", body },
+  );
+}
+
+export function listXpertFiles(
+  xpertId: string,
+  conversationId: string,
+  includeArchived = false,
+) {
+  return requestJson<{ items: XpertFileAsset[]; total: number }>(
+    `/api/xperts/${xpertId}/conversations/${conversationId}/files?include_archived=${includeArchived}`,
+  );
+}
+
+export function archiveXpertFile(
+  xpertId: string,
+  conversationId: string,
+  assetId: string,
+) {
+  return requestJson<XpertFileAsset>(
+    `/api/xperts/${xpertId}/conversations/${conversationId}/files/${assetId}`,
+    { method: "DELETE" },
+  );
+}
+
+export function listXpertMemories(
+  xpertId: string,
+  conversationId?: string,
+) {
+  const query = new URLSearchParams({ scope: "both", limit: "100" });
+  if (conversationId) query.set("conversation_id", conversationId);
+  return requestJson<{ items: XpertMemoryRecord[]; total: number }>(
+    `/api/xperts/${xpertId}/memories?${query.toString()}`,
+  );
+}
+
+export function createXpertMemory(
+  xpertId: string,
+  payload: {
+    content: string;
+    scope: "conversation" | "xpert";
+    conversation_id?: string;
+    source_type?: string;
+    source_id?: string;
+  },
+) {
+  return requestJson<XpertMemoryRecord>(
+    `/api/xperts/${xpertId}/memories`,
+    jsonRequest("POST", payload),
+  );
+}
+
+export function archiveXpertMemory(xpertId: string, memoryId: string) {
+  return requestJson<XpertMemoryRecord>(
+    `/api/xperts/${xpertId}/memories/${memoryId}`,
+    { method: "DELETE" },
+  );
+}
+
+export function listXpertMemoryCandidates(
+  xpertId: string,
+  conversationId?: string,
+) {
+  const query = new URLSearchParams({ status: "pending", limit: "100" });
+  if (conversationId) query.set("conversation_id", conversationId);
+  return requestJson<{ items: XpertMemoryCandidate[]; total: number }>(
+    `/api/xperts/${xpertId}/memory-candidates?${query.toString()}`,
+  );
+}
+
+export function decideXpertMemoryCandidate(
+  xpertId: string,
+  candidateId: string,
+  action: "approve" | "reject",
+) {
+  return requestJson<XpertMemoryCandidate>(
+    `/api/xperts/${xpertId}/memory-candidates/${candidateId}/${action}`,
+    jsonRequest("POST", {}),
+  );
 }
 
 export function toWorkflowDefinition(
