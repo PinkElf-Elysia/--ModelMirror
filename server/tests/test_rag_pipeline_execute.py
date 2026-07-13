@@ -306,6 +306,48 @@ async def test_cancelled_and_failed_jobs_do_not_change_active_version(
     assert retry.json()["status"] == "queued"
 
 
+@pytest.mark.asyncio
+async def test_lexical_index_failure_discards_both_candidate_indexes(
+    pipeline_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, service, executor, _, _ = pipeline_runtime
+    kb_id = await create_kb(client, "dual index atomicity")
+    document_id = await upload_text(
+        client,
+        kb_id,
+        "atomic.txt",
+        "Vector and full-text indexes must become ready together.",
+    )
+    draft = (await client.get(f"/api/rag/pipeline/draft?kb_id={kb_id}")).json()
+    queued = await client.post(
+        f"/api/rag/pipeline/draft/{kb_id}/execute",
+        json={"draft_version": draft["version"], "source_document_ids": [document_id]},
+    )
+    assert queued.status_code == 200, queued.text
+    created = queued.json()
+    job = service.get_pipeline_job(created["job_id"])
+    namespace = str(job["candidate_namespace"])
+
+    def fail_lexical_write(_chunks) -> None:
+        raise RuntimeError("synthetic lexical index failure")
+
+    monkeypatch.setattr(service.lexical_store, "add_chunks", fail_lexical_write)
+    assert await executor.run_once() is True
+
+    failed = service.get_pipeline_job(created["job_id"])
+    assert failed["status"] == "failed"
+    assert "synthetic lexical index failure" in failed["error"]
+    assert service.get_active_pipeline_version(kb_id) is None
+    assert service.lexical_store.count_namespace(namespace) == 0
+    assert all(
+        record.get("kb_id") != namespace
+        for record in service.vector_store._read_records()
+    )
+    versions = service.list_pipeline_versions(kb_id)
+    assert versions == []
+
+
 def test_pipeline_metadata_is_atomic_and_recovers_running_jobs(tmp_path: Path) -> None:
     service = RagService(
         storage_dir=tmp_path / "storage",

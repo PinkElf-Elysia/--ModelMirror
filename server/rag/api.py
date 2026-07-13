@@ -60,17 +60,43 @@ class RagSourcePayload(BaseModel):
     document_name: str
     text: str
     score: float
+    matched_text: str | None = None
+    vector_score: float | None = None
+    fulltext_score: float | None = None
+    fused_score: float | None = None
+    rerank_score: float | None = None
+    parent_chunk_id: str | None = None
+    parent_lifted: bool = False
+    chunk_type: str = "standard"
+    start_char: int = 0
+    end_char: int = 0
+
+
+class RetrievalOptionsPayload(BaseModel):
+    mode: str | None = None
+    vector_weight: float | None = None
+    fulltext_weight: float | None = None
+    top_k: int | None = None
+    score_threshold: float | None = None
+    candidate_multiplier: int | None = None
+    rerank_enabled: bool | None = None
+    rerank_provider: str | None = None
+    rerank_model: str | None = None
+    rerank_top_n: int | None = None
 
 
 class RagQueryRequest(BaseModel):
     kb_id: str = Field(min_length=1, max_length=160)
     question: str = Field(min_length=1, max_length=20_000)
-    top_k: int = Field(default=4, ge=1, le=10)
+    top_k: int | None = Field(default=None, ge=1, le=50)
+    retrieval: RetrievalOptionsPayload | None = None
 
 
 class RagQueryResponse(BaseModel):
     answer: str
     sources: list[RagSourcePayload]
+    warnings: list[str] = Field(default_factory=list)
+    retrieval: dict[str, Any] = Field(default_factory=dict)
 
 
 class FileAssetPayload(BaseModel):
@@ -137,6 +163,9 @@ class PipelineDraftResponse(BaseModel):
     version: int
     updated_at: float
     editable: bool
+    index_schema_version: int = 2
+    embedding_profile: dict[str, Any] = Field(default_factory=dict)
+    retrieval_profile: dict[str, Any] = Field(default_factory=dict)
     stages: list[PipelineDraftStagePayload]
     stage_count: int
 
@@ -147,6 +176,8 @@ class PipelineDraftStageUpdate(BaseModel):
 
 class PipelineDraftUpdateRequest(BaseModel):
     stages: dict[str, PipelineDraftStageUpdate] = Field(default_factory=dict)
+    embedding_profile: dict[str, Any] | None = None
+    retrieval_profile: RetrievalOptionsPayload | None = None
 
 
 class PipelinePreflightStagePayload(BaseModel):
@@ -244,6 +275,11 @@ class PipelineVersionPayload(BaseModel):
     job_id: str
     created_at: float
     activated_at: float | None = None
+    index_schema_version: int = 1
+    embedding_profile: dict[str, Any] = Field(default_factory=dict)
+    retrieval_profile: dict[str, Any] = Field(default_factory=dict)
+    vector_index_ready: bool = True
+    lexical_index_ready: bool = False
 
 
 class PipelineVersionListResponse(BaseModel):
@@ -254,7 +290,8 @@ class PipelineVersionListResponse(BaseModel):
 
 class PipelineVersionQueryRequest(BaseModel):
     question: str = Field(min_length=1, max_length=20_000)
-    top_k: int = Field(default=4, ge=1, le=10)
+    top_k: int | None = Field(default=None, ge=1, le=50)
+    retrieval: RetrievalOptionsPayload | None = None
 
 
 class PipelineVersionQueryResponse(BaseModel):
@@ -262,6 +299,8 @@ class PipelineVersionQueryResponse(BaseModel):
     version: int
     answer: str
     sources: list[RagSourcePayload]
+    warnings: list[str] = Field(default_factory=list)
+    retrieval: dict[str, Any] = Field(default_factory=dict)
 
 
 class CitationAnchorPayload(BaseModel):
@@ -277,7 +316,8 @@ class CitationAnchorPayload(BaseModel):
 class CitationAnchorRequest(BaseModel):
     kb_id: str = Field(min_length=1, max_length=160)
     question: str = Field(min_length=1, max_length=20_000)
-    top_k: int = Field(default=4, ge=1, le=10)
+    top_k: int = Field(default=4, ge=1, le=50)
+    retrieval: RetrievalOptionsPayload | None = None
 
 
 class CitationAnchorResponse(BaseModel):
@@ -324,6 +364,11 @@ def get_pipeline_executor() -> KnowledgePipelineExecutor:
 def set_pipeline_executor_for_tests(executor: KnowledgePipelineExecutor | None) -> None:
     global _pipeline_executor
     _pipeline_executor = executor
+
+
+@router.get("/retrieval-capabilities")
+async def get_retrieval_capabilities() -> dict[str, Any]:
+    return get_rag_service().retrieval_capabilities()
 
 
 @router.post("/knowledge_bases", response_model=KnowledgeBasePayload)
@@ -441,6 +486,9 @@ async def get_pipeline_draft(kb_id: str) -> PipelineDraftResponse:
             version=int(draft["version"]),
             updated_at=float(draft["updated_at"]),
             editable=bool(draft["editable"]),
+            index_schema_version=int(draft.get("index_schema_version", 2)),
+            embedding_profile=dict(draft.get("embedding_profile") or {}),
+            retrieval_profile=dict(draft.get("retrieval_profile") or {}),
             stages=stages,
             stage_count=len(stages),
         )
@@ -460,6 +508,12 @@ async def update_pipeline_draft(
                 stage_id: stage_update.model_dump()
                 for stage_id, stage_update in payload.stages.items()
             },
+            retrieval_profile=(
+                payload.retrieval_profile.model_dump(exclude_none=True)
+                if payload.retrieval_profile
+                else None
+            ),
+            embedding_profile=payload.embedding_profile,
         )
         stages = [
             PipelineDraftStagePayload.model_validate(item)
@@ -471,6 +525,9 @@ async def update_pipeline_draft(
             version=int(draft["version"]),
             updated_at=float(draft["updated_at"]),
             editable=bool(draft["editable"]),
+            index_schema_version=int(draft.get("index_schema_version", 2)),
+            embedding_profile=dict(draft.get("embedding_profile") or {}),
+            retrieval_profile=dict(draft.get("retrieval_profile") or {}),
             stages=stages,
             stage_count=len(stages),
         )
@@ -660,6 +717,11 @@ async def query_pipeline_version(
             version_id,
             payload.question,
             top_k=payload.top_k,
+            retrieval=(
+                payload.retrieval.model_dump(exclude_none=True)
+                if payload.retrieval
+                else None
+            ),
         )
         version = get_rag_service().get_pipeline_version(version_id)
         await get_pipeline_executor().record_job_event(
@@ -700,6 +762,11 @@ async def create_pipeline_citations(payload: CitationAnchorRequest) -> CitationA
             payload.kb_id,
             payload.question,
             top_k=payload.top_k,
+            retrieval=(
+                payload.retrieval.model_dump(exclude_none=True)
+                if payload.retrieval
+                else None
+            ),
         )
         return CitationAnchorResponse(
             kb_id=payload.kb_id,
@@ -719,6 +786,11 @@ async def query_knowledge_base(payload: RagQueryRequest) -> RagQueryResponse:
             payload.kb_id,
             payload.question,
             top_k=payload.top_k,
+            retrieval=(
+                payload.retrieval.model_dump(exclude_none=True)
+                if payload.retrieval
+                else None
+            ),
         )
         return RagQueryResponse.model_validate(result)
     except KnowledgeBaseNotFoundError as exc:

@@ -1,7 +1,19 @@
 # Xpert 对齐总纲
 
-最后更新日期：2026-07-12
+最后更新日期：2026-07-13
 维护人：模镜团队
+
+## 2026-07-13 增量：XPERT-RAG-RETRIEVAL-V2-01
+
+Knowledge Pipeline 已补齐成熟 RAG 基础闭环的第一层：候选版本现在固定 `index_schema_version=2`、分块配置、Embedding profile 与 Retrieval profile，并在同一隔离版本中同时构建 Chroma/本地向量索引和 SQLite FTS5 全文索引。
+
+- 分块支持 `recursive_character` 与 `parent_child`。两种模式均可配置有序分段标识符；父子模式索引子段，命中后返回父段上下文，同时保留子段作为 CitationAnchor。
+- 检索支持 `vector / fulltext / hybrid`，混合模式使用加权归一化 RRF；版本 profile 固定权重、Top-K、score 阈值、候选倍数和 Rerank 策略。
+- Rerank 优先使用专用 API，允许回退到 OpenRouter/newAPI 注册模型的严格 JSON 排序；超时或非法输出 fail-open，保留融合排序并返回 warning。
+- 候选版本只有在向量和全文索引均完成时才可进入 ready。任一写入失败会清理两个候选 namespace，且不会改变 active version。
+- `/api/rag/query`、Citation API、Chat RAG、workflow、Xpert、Goal 与 Xpert App 继续经 `RagService` 统一解析 active version；旧知识库不自动迁移，继续走 vector-only legacy 路径。
+
+下一步固定为 `XPERT-RAG-PROCESSOR-01`，补 paragraph、parent-child、QA、summary index、结构感知清洗和批处理恢复。GraphRAG、知识图谱、实体关系抽取与社区摘要继续暂缓，待基础检索质量和评估闭环稳定后再规划。
 
 ## 2026-07-12 增量：XPERT-KNOWLEDGE-EXECUTE-01
 
@@ -99,7 +111,7 @@ EvoAgentX 只保留为历史参考：此前元智能体曾借鉴其 `goal -> sub
 | Chat Toolset | 部分实现 | `/api/chat` 可选 MCP 工具模式，chat run 与 checkpoint | 默认关闭，不改变普通聊天；无自动 handoff | 补工具偏好、安全提示和观测 UI |
 | Toolset / MCP | 部分实现 | `MCPToolsetProvider`、`run_tool_with_runtime`、tool policy/audit、MCP 管理基础、`/runtime` MCP Runtime 状态细分与只读运维，`/studio` 已提供 MCP 与 Runtime 入口 | 缺 Xpert 式 Toolset 资源模型；Runtime Ops 不执行 MCP start/stop | 后续抽象 Toolset 资源模型 |
 | Plugin / Skill | 部分实现 | `/skills` 与 Skill 安装基础，Docker 已补 git/npm/npx 依赖，`/runtime` 可查看已安装 Skill 摘要 | 尚未形成 Xpert 插件市场/Skill 工作区统一模型；运维页不执行安装/卸载 | 先补市场与安装状态，再抽象资源模型 |
-| Knowledge Pipeline | 部分实现 | FileAsset/Artifact/Chunk/CitationAnchor、四段草稿与预检、持久化 ingestion job、五段执行进度、候选索引预览、手动激活/回滚、`knowledge_citation` 节点 | 本地单进程 worker；旧上传路径仍保留 legacy index；图像理解仍为禁用占位 | 稳定性与数据迁移审计 |
+| Knowledge Pipeline | 部分实现 | FileAsset/Artifact/Chunk/CitationAnchor、版本化 ingestion job、递归与父子分块、向量/FTS5 双索引、全文/向量/混合检索、可选 Rerank、候选预览、激活/回滚、`knowledge_citation` 节点 | 本地单进程 worker；旧上传路径保留 vector-only legacy index；处理器增强与图像理解尚未接入 | `XPERT-RAG-PROCESSOR-01` |
 | Prompt / Slash Command | 下一步 | 仅有提示词资源页雏形和聊天 prompt 使用 | 尚无 Xpert 式工作区提示词/命令配置 | 放在工作空间资源后推进 |
 | Environment / Sandbox | 部分实现 | `/runtime` 已提供脱敏环境与依赖摘要，展示模型网关、OpenRouter、git/node/npm/npx/python 是否就绪 | 不展示密钥值，不编辑环境变量，不提供沙箱实例或文件工作区语义 | 评估 Xpert 式环境变量管理和沙箱资源模型 |
 | Memory / Logs / Monitor | 部分实现 | 会话/Xpert 记忆、候选审批、RunRegistry events/checkpoints/audit 摘要 | 本地确定性召回，尚无向量记忆和组织级审计 | 基于真实使用反馈审计 |

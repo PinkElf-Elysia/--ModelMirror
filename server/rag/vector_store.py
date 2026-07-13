@@ -19,6 +19,11 @@ class VectorChunk:
     text: str
     embedding: list[float]
     chunk_index: int
+    parent_chunk_id: str | None = None
+    parent_text: str | None = None
+    chunk_type: str = "standard"
+    start_char: int = 0
+    end_char: int = 0
 
 
 @dataclass(slots=True)
@@ -29,6 +34,11 @@ class SearchResult:
     document_name: str
     text: str
     score: float
+    parent_chunk_id: str | None = None
+    parent_text: str | None = None
+    chunk_type: str = "standard"
+    start_char: int = 0
+    end_char: int = 0
 
 
 @dataclass(slots=True)
@@ -39,6 +49,10 @@ class StoredVectorChunk:
     document_name: str
     text: str
     chunk_index: int
+    parent_chunk_id: str | None = None
+    chunk_type: str = "standard"
+    start_char: int = 0
+    end_char: int = 0
 
 
 class VectorStore(Protocol):
@@ -90,6 +104,11 @@ class LocalJsonVectorStore:
                     document_name=record["document_name"],
                     text=record["text"],
                     score=score,
+                    parent_chunk_id=record.get("parent_chunk_id"),
+                    parent_text=record.get("parent_text"),
+                    chunk_type=str(record.get("chunk_type", "standard")),
+                    start_char=int(record.get("start_char", 0)),
+                    end_char=int(record.get("end_char", 0)),
                 )
             )
         return sorted(scored, key=lambda item: item.score, reverse=True)[:top_k]
@@ -113,6 +132,10 @@ class LocalJsonVectorStore:
                 document_name=str(record["document_name"]),
                 text=str(record["text"]),
                 chunk_index=int(record.get("chunk_index", 0)),
+                parent_chunk_id=record.get("parent_chunk_id"),
+                chunk_type=str(record.get("chunk_type", "standard")),
+                start_char=int(record.get("start_char", 0)),
+                end_char=int(record.get("end_char", 0)),
             )
             for record in self._read_records()
             if record.get("doc_id") == doc_id
@@ -161,6 +184,11 @@ class ChromaVectorStore:
                     "doc_id": chunk.doc_id,
                     "document_name": chunk.document_name,
                     "chunk_index": chunk.chunk_index,
+                    "parent_chunk_id": chunk.parent_chunk_id or "",
+                    "parent_text": chunk.parent_text or "",
+                    "chunk_type": chunk.chunk_type,
+                    "start_char": chunk.start_char,
+                    "end_char": chunk.end_char,
                     "updated_at": time.time(),
                 }
                 for chunk in chunks
@@ -191,6 +219,11 @@ class ChromaVectorStore:
                     document_name=str(metadata.get("document_name", "")),
                     text=str(documents[index] if index < len(documents) else ""),
                     score=1.0 / (1.0 + max(distance, 0.0)),
+                    parent_chunk_id=str(metadata.get("parent_chunk_id") or "") or None,
+                    parent_text=str(metadata.get("parent_text") or "") or None,
+                    chunk_type=str(metadata.get("chunk_type") or "standard"),
+                    start_char=int(metadata.get("start_char", 0)),
+                    end_char=int(metadata.get("end_char", 0)),
                 )
             )
         return results
@@ -222,6 +255,10 @@ class ChromaVectorStore:
                     document_name=str(metadata.get("document_name", "")),
                     text=str(documents[index] if index < len(documents) else ""),
                     chunk_index=int(metadata.get("chunk_index", index)),
+                    parent_chunk_id=str(metadata.get("parent_chunk_id") or "") or None,
+                    chunk_type=str(metadata.get("chunk_type") or "standard"),
+                    start_char=int(metadata.get("start_char", 0)),
+                    end_char=int(metadata.get("end_char", 0)),
                 )
             )
         return sorted(chunks, key=lambda item: item.chunk_index)
@@ -249,4 +286,9 @@ def _chunk_to_record(chunk: VectorChunk) -> dict[str, Any]:
         "text": chunk.text,
         "embedding": chunk.embedding,
         "chunk_index": chunk.chunk_index,
+        "parent_chunk_id": chunk.parent_chunk_id,
+        "parent_text": chunk.parent_text,
+        "chunk_type": chunk.chunk_type,
+        "start_char": chunk.start_char,
+        "end_char": chunk.end_char,
     }

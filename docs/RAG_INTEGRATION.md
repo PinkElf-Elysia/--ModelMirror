@@ -2,7 +2,50 @@
 
 本文件说明模镜本地 RAG 模块的架构、API、扩展方式和测试方法。该模块位于 `server/rag/`，前端入口为 `/rag`，聊天页可选择知识库进行检索增强问答。
 
-最后更新日期：2026-07-12
+最后更新日期：2026-07-13
+
+## 2026-07-13 增量：Advanced RAG Retrieval V2
+
+候选知识版本现在固定分块、Embedding 与检索 profile，并原子构建向量和 SQLite FTS5 双索引。`/rag` 可以配置递归字符分块或父子分段、有序分段标识符、Embedding 模型、全文/向量/混合检索、权重、Top-K、score 阈值、候选倍数和可选 Rerank。
+
+新增安全能力摘要：
+
+```text
+GET /api/rag/retrieval-capabilities
+```
+
+以下接口接受可选 `retrieval` 对象；未传时使用活动版本固定的 profile：
+
+```text
+POST /api/rag/query
+POST /api/rag/pipeline/citations
+POST /api/rag/pipeline/versions/{version_id}/query
+```
+
+示例：
+
+```json
+{
+  "kb_id": "kb_xxx",
+  "question": "退款政策是什么？",
+  "retrieval": {
+    "mode": "hybrid",
+    "vector_weight": 0.7,
+    "fulltext_weight": 0.3,
+    "top_k": 5,
+    "score_threshold": 0.1,
+    "candidate_multiplier": 4,
+    "rerank_enabled": true,
+    "rerank_provider": "auto"
+  }
+}
+```
+
+混合检索使用加权归一化 RRF；Rerank 按“专用 API → OpenAI-compatible LLM JSON → 融合原排序”降级。响应会增加可选的 `vector_score`、`fulltext_score`、`fused_score`、`rerank_score`、`parent_lifted` 与安全 warnings，原有 CitationAnchor 字段保持兼容。
+
+父子分段只索引子段。召回后回答上下文使用父段，引用仍指向命中子段。向量与全文索引必须同时成功，候选版本才可 ready；任一失败会同时清理两个候选索引，不切换 active version。旧索引不自动迁移，继续使用 vector-only legacy 路径。
+
+本实现对齐 Xpert 的领域配置，并以本地 Dify 1.14.1 验证分块和检索异常行为；未复制 AGPL 或许可证不明确的容器实现。GraphRAG、实体关系、社区摘要与图检索暂缓。
 
 ## 2026-07-12 增量：版本化 Knowledge Pipeline 执行
 
@@ -93,9 +136,11 @@ FastAPI RAG Router
   +--> RagService
         |
         +--> document_parser.py  解析 TXT / Markdown / PDF
-        +--> splitter.py         LangChain RecursiveCharacterTextSplitter，缺失时本地 fallback
+        +--> splitter.py         本地递归字符 / 父子分段与字符偏移
         +--> embedder.py         OpenAI-compatible Embedding API，缺失 key 时 hash fallback
         +--> vector_store.py     ChromaDB 持久化，缺失依赖时 LocalJsonVectorStore fallback
+        +--> lexical_store.py    SQLite FTS5 与中英文规范化词元
+        +--> reranker.py         专用 Rerank API / LLM JSON fail-open
         +--> OpenRouter Chat     生成 RAG 回答，缺失 key 时抽取式 fallback
 ```
 

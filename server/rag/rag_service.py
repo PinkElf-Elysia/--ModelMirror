@@ -15,7 +15,10 @@ import httpx
 
 from .document_parser import DocumentParseError, parse_document, supported_extensions
 from .embedder import EmbeddingClient, EmbeddingError
-from .splitter import TextSplitter
+from .lexical_store import LexicalSearchResult, SqliteLexicalStore
+from .reranker import RerankDocument, RerankService
+from .retrieval import RetrievalCandidate, RetrievalConfig, fuse_rankings
+from .splitter import DEFAULT_SEPARATORS, TextSplitter
 from .vector_store import SearchResult, VectorChunk, VectorStore, create_vector_store
 
 
@@ -77,6 +80,8 @@ class RagService:
         uploads_dir: Path | None = None,
         embedder: EmbeddingClient | None = None,
         vector_store: VectorStore | None = None,
+        lexical_store: SqliteLexicalStore | None = None,
+        reranker: RerankService | None = None,
         splitter: TextSplitter | None = None,
         llm_enabled: bool | None = None,
     ) -> None:
@@ -91,6 +96,10 @@ class RagService:
         self._metadata_lock = threading.RLock()
         self.embedder = embedder or EmbeddingClient()
         self.vector_store = vector_store or create_vector_store(self.storage_dir)
+        self.lexical_store = lexical_store or SqliteLexicalStore(
+            self.storage_dir / "lexical_index.sqlite3"
+        )
+        self.reranker = reranker or RerankService()
         self.splitter = splitter or TextSplitter(
             chunk_size=int(os.getenv("RAG_CHUNK_SIZE", "500")),
             chunk_overlap=int(os.getenv("RAG_CHUNK_OVERLAP", "50")),
@@ -169,9 +178,11 @@ class RagService:
         }
         self._write_metadata(metadata)
         self.vector_store.delete_knowledge_base(kb_id)
+        self.lexical_store.delete_namespace(kb_id)
         for namespace in version_namespaces:
             if namespace:
                 self.vector_store.delete_knowledge_base(namespace)
+                self.lexical_store.delete_namespace(namespace)
         for job_id in job_ids:
             shutil.rmtree(self.pipeline_sources_dir / job_id, ignore_errors=True)
         shutil.rmtree(self.uploads_dir / kb_id, ignore_errors=True)
@@ -297,6 +308,9 @@ class RagService:
             "version": int(draft.get("version", 1)),
             "updated_at": float(draft.get("updated_at", metadata["knowledge_bases"][kb_id]["updated_at"])),
             "editable": True,
+            "index_schema_version": int(draft.get("index_schema_version", 2)),
+            "embedding_profile": json.loads(json.dumps(draft["embedding_profile"])),
+            "retrieval_profile": json.loads(json.dumps(draft["retrieval_profile"])),
             "stages": [
                 {
                     "id": "stage_data_source",
@@ -331,7 +345,9 @@ class RagService:
                     "summary": "当前使用本地文本分块结果作为 KnowledgeChunk。",
                     "metadata": {
                         "chunk_count": chunk_count,
-                        "strategy": "local_recursive_character_chunks",
+                        "strategy": configs["stage_chunker"].get(
+                            "strategy", "recursive_character"
+                        ),
                     },
                 },
                 {
@@ -355,6 +371,9 @@ class RagService:
         self,
         kb_id: str,
         stage_updates: dict[str, Any],
+        *,
+        retrieval_profile: dict[str, Any] | None = None,
+        embedding_profile: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Persist safe editable draft config without changing ingestion behavior."""
 
@@ -365,6 +384,17 @@ class RagService:
             stage_id: dict(config)
             for stage_id, config in draft["stages"].items()
         }
+        try:
+            next_retrieval = RetrievalConfig.from_mapping(
+                retrieval_profile,
+                base=RetrievalConfig.from_mapping(draft.get("retrieval_profile")),
+            ).payload()
+        except ValueError as exc:
+            raise PipelineDraftValidationError(str(exc)) from exc
+        next_embedding = self._validated_embedding_profile(
+            draft.get("embedding_profile"),
+            embedding_profile,
+        )
 
         if not isinstance(stage_updates, dict):
             raise PipelineDraftValidationError("pipeline draft stages must be an object.")
@@ -393,6 +423,9 @@ class RagService:
                 "draft_id": current["draft_id"],
                 "version": int(current.get("version", 1)) + 1,
                 "updated_at": now,
+                "index_schema_version": 2,
+                "embedding_profile": next_embedding,
+                "retrieval_profile": next_retrieval,
                 "stages": configs,
             }
             self._write_metadata_unlocked(latest)
@@ -575,7 +608,12 @@ class RagService:
                 "kb_id": kb_id,
                 "draft_id": str(draft["draft_id"]),
                 "draft_version": int(draft["version"]),
-                "config_snapshot": json.loads(json.dumps(draft["stages"])),
+                "config_snapshot": {
+                    "index_schema_version": int(draft.get("index_schema_version", 2)),
+                    "stages": json.loads(json.dumps(draft["stages"])),
+                    "embedding_profile": json.loads(json.dumps(draft["embedding_profile"])),
+                    "retrieval_profile": json.loads(json.dumps(draft["retrieval_profile"])),
+                },
                 "sources": manifest,
                 "status": "queued",
                 "stages": self._new_pipeline_job_stages(),
@@ -822,6 +860,15 @@ class RagService:
                 "draft_id": str(job["draft_id"]),
                 "draft_version": int(job["draft_version"]),
                 "config_snapshot": json.loads(json.dumps(job["config_snapshot"])),
+                "index_schema_version": int(job["config_snapshot"].get("index_schema_version", 1)),
+                "embedding_profile": json.loads(
+                    json.dumps(job["config_snapshot"].get("embedding_profile", {}))
+                ),
+                "retrieval_profile": json.loads(
+                    json.dumps(job["config_snapshot"].get("retrieval_profile", {}))
+                ),
+                "vector_index_ready": True,
+                "lexical_index_ready": True,
                 "source_summary": [
                     {
                         key: value
@@ -901,14 +948,17 @@ class RagService:
         version_id: str,
         question: str,
         *,
-        top_k: int = 4,
+        top_k: int | None = None,
+        retrieval: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         version = self.get_pipeline_version(version_id)
+        profile = self._retrieval_config_for_version(version, retrieval, top_k=top_k)
         result = await self._query_namespace(
             str(version["kb_id"]),
             str(version["namespace"]),
             question,
-            top_k=top_k,
+            config=profile,
+            lexical_ready=bool(version.get("lexical_index_ready")),
         )
         return {
             "version_id": version_id,
@@ -1003,10 +1053,11 @@ class RagService:
         question: str,
         *,
         top_k: int = 4,
+        retrieval: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         """Return citation anchors using the existing RAG retrieval path."""
 
-        result = await self.query(kb_id, question, top_k=top_k)
+        result = await self.query(kb_id, question, top_k=top_k, retrieval=retrieval)
         citations: list[dict[str, Any]] = []
         for source in result.get("sources", []):
             chunk_id = str(source.get("chunk_id", ""))
@@ -1019,7 +1070,9 @@ class RagService:
                     "document_id": doc_id,
                     "document_name": str(source.get("document_name", "")),
                     "score": float(source.get("score", 0.0)),
-                    "snippet": _preview_text(str(source.get("text", ""))),
+                    "snippet": _preview_text(
+                        str(source.get("matched_text") or source.get("text", ""))
+                    ),
                 }
             )
         return citations
@@ -1035,12 +1088,20 @@ class RagService:
         if stored_path.exists():
             stored_path.unlink()
         self.vector_store.delete_document(doc_id)
+        self.lexical_store.delete_document(doc_id)
         kb_id = document["kb_id"]
         if kb_id in metadata["knowledge_bases"]:
             metadata["knowledge_bases"][kb_id]["updated_at"] = time.time()
         self._write_metadata(metadata)
 
-    async def query(self, kb_id: str, question: str, *, top_k: int = 4) -> dict[str, Any]:
+    async def query(
+        self,
+        kb_id: str,
+        question: str,
+        *,
+        top_k: int | None = 4,
+        retrieval: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Run retrieval and generate an answer from the retrieved context."""
 
         metadata = self._read_metadata()
@@ -1048,11 +1109,20 @@ class RagService:
             raise KnowledgeBaseNotFoundError("Knowledge base not found.")
         active_version_id = metadata["pipeline_active_versions"].get(kb_id)
         namespace = kb_id
+        version: dict[str, Any] | None = None
         if active_version_id:
-            version = metadata["pipeline_versions"].get(active_version_id)
-            if isinstance(version, dict):
+            stored_version = metadata["pipeline_versions"].get(active_version_id)
+            if isinstance(stored_version, dict):
+                version = stored_version
                 namespace = str(version.get("namespace") or kb_id)
-        return await self._query_namespace(kb_id, namespace, question, top_k=top_k)
+        config = self._retrieval_config_for_version(version, retrieval, top_k=top_k)
+        return await self._query_namespace(
+            kb_id,
+            namespace,
+            question,
+            config=config,
+            lexical_ready=bool(version and version.get("lexical_index_ready")),
+        )
 
     async def _query_namespace(
         self,
@@ -1060,7 +1130,8 @@ class RagService:
         namespace: str,
         question: str,
         *,
-        top_k: int,
+        config: RetrievalConfig,
+        lexical_ready: bool,
     ) -> dict[str, Any]:
         """Query one explicit index namespace while preserving public KB identity."""
 
@@ -1071,12 +1142,69 @@ class RagService:
         if kb_id not in metadata["knowledge_bases"]:
             raise KnowledgeBaseNotFoundError("知识库不存在。")
 
-        query_embedding = (await self.embedder.embed_texts([clean_question]))[0]
-        results = self.vector_store.query(namespace, query_embedding, top_k)
+        candidate_count = min(200, config.top_k * config.candidate_multiplier)
+        warnings: list[str] = []
+        vector_results: list[SearchResult] = []
+        lexical_results: list[LexicalSearchResult] = []
+
+        if config.mode in {"vector", "hybrid"}:
+            query_embedding = (await self.embedder.embed_texts([clean_question]))[0]
+            vector_results = self.vector_store.query(namespace, query_embedding, candidate_count)
+        if config.mode in {"fulltext", "hybrid"}:
+            if lexical_ready or self.lexical_store.count_namespace(namespace) > 0:
+                lexical_results = self.lexical_store.query(namespace, clean_question, candidate_count)
+            else:
+                warnings.append("Full-text index is unavailable for this legacy version; vector retrieval was used.")
+
+        vector_candidates = [self._candidate_from_vector(item) for item in vector_results]
+        lexical_candidates = [self._candidate_from_lexical(item) for item in lexical_results]
+        effective_config = config
+        if config.mode == "fulltext" and not lexical_candidates:
+            effective_config = RetrievalConfig.from_mapping(
+                {**config.payload(), "mode": "vector", "rerank_enabled": config.rerank_enabled}
+            )
+            if not vector_candidates:
+                query_embedding = (await self.embedder.embed_texts([clean_question]))[0]
+                vector_results = self.vector_store.query(namespace, query_embedding, candidate_count)
+                vector_candidates = [self._candidate_from_vector(item) for item in vector_results]
+        fused = fuse_rankings(vector_candidates, lexical_candidates, effective_config)
+
+        rerank_provider = "none"
+        if config.rerank_enabled and fused:
+            outcome = await self.reranker.rerank(
+                clean_question,
+                [RerankDocument(chunk_id=item.chunk_id, text=item.matched_text) for item in fused],
+                provider=config.rerank_provider,
+                model=config.rerank_model,
+                top_n=min(config.rerank_top_n, len(fused)),
+            )
+            rerank_provider = outcome.provider
+            if outcome.warning:
+                warnings.append(outcome.warning)
+            by_id = {item.chunk_id: item for item in fused}
+            reranked: list[RetrievalCandidate] = []
+            for ranked in outcome.items:
+                candidate = by_id.pop(ranked.chunk_id, None)
+                if candidate is None:
+                    continue
+                candidate.rerank_score = ranked.score
+                reranked.append(candidate)
+            fused = reranked + sorted(
+                by_id.values(), key=lambda item: (-item.fused_score, item.chunk_id)
+            )
+
+        results = [item for item in fused if item.score >= config.score_threshold][: config.top_k]
         if not results:
             return {
                 "answer": "没有在该知识库中找到相关内容，请尝试换一种问法或上传更多资料。",
                 "sources": [],
+                "warnings": warnings,
+                "retrieval": self._retrieval_diagnostics(
+                    config,
+                    vector_count=len(vector_results),
+                    fulltext_count=len(lexical_results),
+                    rerank_provider=rerank_provider,
+                ),
             }
 
         answer = await self._generate_answer(clean_question, results)
@@ -1087,20 +1215,41 @@ class RagService:
                     "chunk_id": result.chunk_id,
                     "doc_id": result.doc_id,
                     "document_name": result.document_name,
-                    "text": result.text,
+                    "text": result.context_text,
+                    "matched_text": result.matched_text,
                     "score": round(result.score, 4),
+                    "vector_score": _rounded_optional(result.vector_score),
+                    "fulltext_score": _rounded_optional(result.fulltext_score),
+                    "fused_score": round(result.fused_score, 4),
+                    "rerank_score": _rounded_optional(result.rerank_score),
+                    "parent_chunk_id": result.parent_chunk_id,
+                    "parent_lifted": bool(result.parent_chunk_id),
+                    "chunk_type": result.chunk_type,
+                    "start_char": result.start_char,
+                    "end_char": result.end_char,
                 }
                 for result in results
             ],
+            "warnings": warnings,
+            "retrieval": self._retrieval_diagnostics(
+                config,
+                vector_count=len(vector_results),
+                fulltext_count=len(lexical_results),
+                rerank_provider=rerank_provider,
+            ),
         }
 
-    async def _generate_answer(self, question: str, results: list[SearchResult]) -> str:
+    async def _generate_answer(
+        self,
+        question: str,
+        results: list[RetrievalCandidate],
+    ) -> str:
         api_key = os.getenv("OPENROUTER_API_KEY", "").strip()
         if not self.llm_enabled or not api_key:
             return self._extractive_answer(results)
 
         context = "\n\n".join(
-            f"[来源：{result.document_name}]\n{result.text}" for result in results
+            f"[来源：{result.document_name}]\n{result.context_text}" for result in results
         )
         prompt = (
             "请仅依据<context>中的资料回答用户问题。如果资料不足，请明确说明不知道。"
@@ -1149,9 +1298,123 @@ class RagService:
                 return content.strip()
         return self._extractive_answer(results)
 
-    def _extractive_answer(self, results: list[SearchResult]) -> str:
+    def _extractive_answer(self, results: list[RetrievalCandidate]) -> str:
         best = results[0]
-        return f"根据知识库资料：{best.text}"
+        return f"根据知识库资料：{best.context_text}"
+
+    def retrieval_capabilities(self) -> dict[str, Any]:
+        rerank = self.reranker.capabilities()
+        return {
+            "version": "rag-retrieval-capabilities-v2",
+            "index_schema_version": 2,
+            "vector": {
+                "available": True,
+                "backend": self.vector_store.__class__.__name__,
+            },
+            "fulltext": {
+                "available": True,
+                "backend": self.lexical_store.backend,
+            },
+            "embedding": self._default_embedding_profile(),
+            "rerank": rerank,
+            "modes": ["vector", "fulltext", "hybrid"],
+        }
+
+    def _retrieval_config_for_version(
+        self,
+        version: dict[str, Any] | None,
+        override: dict[str, Any] | None,
+        *,
+        top_k: int | None,
+    ) -> RetrievalConfig:
+        if version and int(version.get("index_schema_version", 1)) >= 2:
+            base = RetrievalConfig.from_mapping(version.get("retrieval_profile"))
+        else:
+            base = RetrievalConfig.from_mapping(
+                {
+                    "mode": "vector",
+                    "top_k": 4,
+                    "rerank_enabled": False,
+                    "rerank_provider": "none",
+                }
+            )
+        merged = dict(override or {})
+        if top_k is not None:
+            merged["top_k"] = top_k
+        return RetrievalConfig.from_mapping(merged, base=base)
+
+    def _candidate_from_vector(self, item: SearchResult) -> RetrievalCandidate:
+        return RetrievalCandidate(
+            chunk_id=item.chunk_id,
+            doc_id=item.doc_id,
+            document_name=item.document_name,
+            matched_text=item.text,
+            context_text=item.parent_text or item.text,
+            parent_chunk_id=item.parent_chunk_id,
+            chunk_type=item.chunk_type,
+            start_char=item.start_char,
+            end_char=item.end_char,
+            vector_score=item.score,
+        )
+
+    def _candidate_from_lexical(self, item: LexicalSearchResult) -> RetrievalCandidate:
+        return RetrievalCandidate(
+            chunk_id=item.chunk_id,
+            doc_id=item.doc_id,
+            document_name=item.document_name,
+            matched_text=item.text,
+            context_text=item.parent_text or item.text,
+            parent_chunk_id=item.parent_chunk_id,
+            chunk_type=item.chunk_type,
+            start_char=item.start_char,
+            end_char=item.end_char,
+            fulltext_score=item.score,
+        )
+
+    def _retrieval_diagnostics(
+        self,
+        config: RetrievalConfig,
+        *,
+        vector_count: int,
+        fulltext_count: int,
+        rerank_provider: str,
+    ) -> dict[str, Any]:
+        return {
+            **config.payload(),
+            "vector_candidate_count": vector_count,
+            "fulltext_candidate_count": fulltext_count,
+            "rerank_provider_used": rerank_provider,
+        }
+
+    def _default_embedding_profile(self) -> dict[str, Any]:
+        degraded = self.embedder.embedding_mode == "hash" or not self.embedder.api_key
+        return {
+            "provider": "hash" if degraded else "openai_compatible",
+            "model": self.embedder.model,
+            "dimension": self.embedder.dimension,
+            "degraded": degraded,
+        }
+
+    def _validated_embedding_profile(
+        self,
+        current: dict[str, Any] | None,
+        patch: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        config = {**self._default_embedding_profile(), **dict(current or {})}
+        if patch:
+            unknown = set(patch) - {"model"}
+            if unknown:
+                raise PipelineDraftValidationError(
+                    f"Unsupported embedding profile field: {sorted(unknown)[0]}"
+                )
+            model = str(patch.get("model") or config["model"]).strip()
+            if not model or len(model) > 200:
+                raise PipelineDraftValidationError("embedding_profile.model is invalid.")
+            config["model"] = model
+        config["provider"] = self._default_embedding_profile()["provider"]
+        config["dimension"] = self.embedder.dimension
+        config["degraded"] = self._default_embedding_profile()["degraded"]
+        return config
 
     def _default_pipeline_draft_stages(self) -> dict[str, dict[str, Any]]:
         return {
@@ -1163,9 +1426,16 @@ class RagService:
                 "parser": "local_document_parser",
             },
             "stage_chunker": {
-                "strategy": "local_recursive_character_chunks",
+                "strategy": "recursive_character",
                 "chunk_size": self.splitter.chunk_size,
                 "chunk_overlap": self.splitter.chunk_overlap,
+                "separators": list(DEFAULT_SEPARATORS),
+                "parent_chunk_size": 1500,
+                "parent_chunk_overlap": 100,
+                "child_chunk_size": 400,
+                "child_chunk_overlap": 50,
+                "parent_separators": list(DEFAULT_SEPARATORS),
+                "child_separators": list(DEFAULT_SEPARATORS),
             },
             "stage_image_understanding": {
                 "enabled": False,
@@ -1185,6 +1455,9 @@ class RagService:
                 "draft_id": f"draft_{kb_id}",
                 "version": 1,
                 "updated_at": metadata["knowledge_bases"][kb_id]["updated_at"],
+                "index_schema_version": 2,
+                "embedding_profile": self._default_embedding_profile(),
+                "retrieval_profile": RetrievalConfig().payload(),
                 "stages": defaults,
             }
 
@@ -1211,6 +1484,14 @@ class RagService:
             "draft_id": str(draft.get("draft_id") or f"draft_{kb_id}"),
             "version": int(draft.get("version") or 1),
             "updated_at": float(draft.get("updated_at") or metadata["knowledge_bases"][kb_id]["updated_at"]),
+            "index_schema_version": 2,
+            "embedding_profile": self._validated_embedding_profile(
+                draft.get("embedding_profile") if isinstance(draft.get("embedding_profile"), dict) else None,
+                None,
+            ),
+            "retrieval_profile": RetrievalConfig.from_mapping(
+                draft.get("retrieval_profile") if isinstance(draft.get("retrieval_profile"), dict) else None
+            ).payload(),
             "stages": stages,
         }
 
@@ -1245,12 +1526,14 @@ class RagService:
             strategy = str(
                 patch.get(
                     "strategy",
-                    config.get("strategy", "local_recursive_character_chunks"),
+                    config.get("strategy", "recursive_character"),
                 )
             )
-            if strategy != "local_recursive_character_chunks":
+            if strategy == "local_recursive_character_chunks":
+                strategy = "recursive_character"
+            if strategy not in {"recursive_character", "parent_child"}:
                 raise PipelineDraftValidationError(
-                    "chunker.strategy must be local_recursive_character_chunks."
+                    "chunker.strategy must be recursive_character or parent_child."
                 )
             chunk_size = self._coerce_int(
                 patch.get("chunk_size", config.get("chunk_size", self.splitter.chunk_size)),
@@ -1266,11 +1549,66 @@ class RagService:
                 raise PipelineDraftValidationError(
                     "chunker.chunk_overlap must be non-negative and smaller than chunk_size."
                 )
+            separators = self._validated_separators(
+                patch.get("separators", config.get("separators", DEFAULT_SEPARATORS)),
+                "chunker.separators",
+            )
+            parent_size = self._coerce_int(
+                patch.get("parent_chunk_size", config.get("parent_chunk_size", 1500)),
+                "chunker.parent_chunk_size",
+            )
+            parent_overlap = self._coerce_int(
+                patch.get("parent_chunk_overlap", config.get("parent_chunk_overlap", 100)),
+                "chunker.parent_chunk_overlap",
+            )
+            child_size = self._coerce_int(
+                patch.get("child_chunk_size", config.get("child_chunk_size", 400)),
+                "chunker.child_chunk_size",
+            )
+            child_overlap = self._coerce_int(
+                patch.get("child_chunk_overlap", config.get("child_chunk_overlap", 50)),
+                "chunker.child_chunk_overlap",
+            )
+            if not 200 <= parent_size <= 8000:
+                raise PipelineDraftValidationError(
+                    "chunker.parent_chunk_size must be between 200 and 8000."
+                )
+            if not 100 <= child_size < parent_size:
+                raise PipelineDraftValidationError(
+                    "chunker.child_chunk_size must be between 100 and parent_chunk_size."
+                )
+            if parent_overlap < 0 or parent_overlap >= parent_size:
+                raise PipelineDraftValidationError(
+                    "chunker.parent_chunk_overlap must be smaller than parent_chunk_size."
+                )
+            if child_overlap < 0 or child_overlap >= child_size:
+                raise PipelineDraftValidationError(
+                    "chunker.child_chunk_overlap must be smaller than child_chunk_size."
+                )
             config.update(
                 {
                     "strategy": strategy,
                     "chunk_size": chunk_size,
                     "chunk_overlap": chunk_overlap,
+                    "separators": separators,
+                    "parent_chunk_size": parent_size,
+                    "parent_chunk_overlap": parent_overlap,
+                    "child_chunk_size": child_size,
+                    "child_chunk_overlap": child_overlap,
+                    "parent_separators": self._validated_separators(
+                        patch.get(
+                            "parent_separators",
+                            config.get("parent_separators", DEFAULT_SEPARATORS),
+                        ),
+                        "chunker.parent_separators",
+                    ),
+                    "child_separators": self._validated_separators(
+                        patch.get(
+                            "child_separators",
+                            config.get("child_separators", DEFAULT_SEPARATORS),
+                        ),
+                        "chunker.child_separators",
+                    ),
                 }
             )
             return config
@@ -1294,6 +1632,23 @@ class RagService:
             return int(value)
         except (TypeError, ValueError) as exc:
             raise PipelineDraftValidationError(f"{field_name} must be an integer.") from exc
+
+    def _validated_separators(self, value: Any, field_name: str) -> list[str]:
+        if not isinstance(value, list) or not value or len(value) > 20:
+            raise PipelineDraftValidationError(
+                f"{field_name} must contain between 1 and 20 strings."
+            )
+        result: list[str] = []
+        for item in value:
+            if not isinstance(item, str) or len(item) > 20:
+                raise PipelineDraftValidationError(
+                    f"{field_name} entries must be strings up to 20 characters."
+                )
+            if item not in result:
+                result.append(item)
+        if "" not in result:
+            result.append("")
+        return result
 
     def _empty_metadata(self) -> dict[str, dict[str, Any]]:
         return {
@@ -1412,3 +1767,7 @@ def _preview_text(text: str, limit: int = 240) -> str:
     if len(normalized) <= limit:
         return normalized
     return f"{normalized[:limit].rstrip()}..."
+
+
+def _rounded_optional(value: float | None) -> float | None:
+    return round(value, 4) if value is not None else None

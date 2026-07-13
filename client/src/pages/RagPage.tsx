@@ -75,6 +75,9 @@ interface PipelineDraftResponse {
   version: number;
   updated_at: number;
   editable: boolean;
+  index_schema_version: number;
+  embedding_profile: Record<string, unknown>;
+  retrieval_profile: Record<string, unknown>;
   stages: PipelineDraftStage[];
   stage_count: number;
 }
@@ -101,8 +104,42 @@ interface PipelinePreflightResponse {
 }
 
 interface PipelineDraftEdits {
+  strategy: "recursive_character" | "parent_child";
   chunkSize: string;
   chunkOverlap: string;
+  separators: string;
+  parentChunkSize: string;
+  parentChunkOverlap: string;
+  parentSeparators: string;
+  childChunkSize: string;
+  childChunkOverlap: string;
+  childSeparators: string;
+  embeddingModel: string;
+  retrievalMode: "vector" | "fulltext" | "hybrid";
+  vectorWeight: string;
+  fulltextWeight: string;
+  topK: string;
+  scoreThreshold: string;
+  candidateMultiplier: string;
+  rerankEnabled: boolean;
+  rerankProvider: "none" | "auto" | "api" | "llm";
+  rerankModel: string;
+  rerankTopN: string;
+}
+
+interface RetrievalCapabilities {
+  version: string;
+  index_schema_version: number;
+  modes: string[];
+  vector: { available: boolean; backend: string };
+  fulltext: { available: boolean; backend: string };
+  embedding: { provider: string; model: string; dimension: number; degraded: boolean };
+  rerank: {
+    api_configured: boolean;
+    llm_configured: boolean;
+    api_model: string;
+    llm_model: string;
+  };
 }
 
 interface PipelineJobStage {
@@ -144,6 +181,11 @@ interface PipelineVersion {
   document_count: number;
   chunk_count: number;
   job_id: string;
+  index_schema_version?: number;
+  embedding_profile?: Record<string, unknown>;
+  retrieval_profile?: Record<string, unknown>;
+  vector_index_ready?: boolean;
+  lexical_index_ready?: boolean;
   created_at: number;
   activated_at: number | null;
 }
@@ -158,16 +200,92 @@ interface PipelineVersionQueryResponse {
   version_id: string;
   version: number;
   answer: string;
+  warnings: string[];
+  retrieval: Record<string, unknown>;
   sources: Array<{
     chunk_id: string;
     document_name: string;
     text: string;
     score: number;
+    matched_text?: string | null;
+    vector_score?: number | null;
+    fulltext_score?: number | null;
+    fused_score?: number | null;
+    rerank_score?: number | null;
+    parent_chunk_id?: string | null;
+    parent_lifted?: boolean;
+    chunk_type?: string;
   }>;
 }
 
 const MAX_FILE_BYTES = 10 * 1024 * 1024;
 const SUPPORTED_EXTENSIONS = [".txt", ".md", ".markdown", ".pdf"];
+
+function separatorLabel(value: unknown) {
+  if (value === "\n\n") return "\\n\\n";
+  if (value === "\n") return "\\n";
+  if (value === " ") return "<space>";
+  if (value === "") return "<empty>";
+  return String(value ?? "");
+}
+
+function separatorsToText(value: unknown) {
+  return Array.isArray(value) ? value.map(separatorLabel).join("\n") : "\\n\\n\n\\n\n。\n！\n？\n<space>\n<empty>";
+}
+
+function textToSeparators(value: string) {
+  return value
+    .split(/\r?\n/)
+    .map((item) => {
+      const trimmed = item.trim();
+      if (trimmed === "\\n\\n") return "\n\n";
+      if (trimmed === "\\n") return "\n";
+      if (trimmed === "<space>") return " ";
+      if (trimmed === "<empty>") return "";
+      return trimmed;
+    })
+    .filter((item, index, items) => items.indexOf(item) === index);
+}
+
+function numericProfileValue(profile: Record<string, unknown>, key: string, fallback: number) {
+  const value = Number(profile[key]);
+  return Number.isFinite(value) ? value : fallback;
+}
+
+function draftEditsFromResponse(draft: PipelineDraftResponse): PipelineDraftEdits {
+  const chunker = draft.stages.find((stage) => stage.kind === "chunker")?.config ?? {};
+  const retrieval = draft.retrieval_profile ?? {};
+  const strategy = chunker.strategy === "parent_child" ? "parent_child" : "recursive_character";
+  const retrievalMode = ["vector", "fulltext", "hybrid"].includes(String(retrieval.mode))
+    ? String(retrieval.mode) as PipelineDraftEdits["retrievalMode"]
+    : "hybrid";
+  const provider = ["none", "auto", "api", "llm"].includes(String(retrieval.rerank_provider))
+    ? String(retrieval.rerank_provider) as PipelineDraftEdits["rerankProvider"]
+    : "auto";
+  return {
+    strategy,
+    chunkSize: String(chunker.chunk_size ?? 500),
+    chunkOverlap: String(chunker.chunk_overlap ?? 50),
+    separators: separatorsToText(chunker.separators),
+    parentChunkSize: String(chunker.parent_chunk_size ?? 1500),
+    parentChunkOverlap: String(chunker.parent_chunk_overlap ?? 100),
+    parentSeparators: separatorsToText(chunker.parent_separators),
+    childChunkSize: String(chunker.child_chunk_size ?? 400),
+    childChunkOverlap: String(chunker.child_chunk_overlap ?? 50),
+    childSeparators: separatorsToText(chunker.child_separators),
+    embeddingModel: String(draft.embedding_profile?.model ?? "text-embedding-3-small"),
+    retrievalMode,
+    vectorWeight: String(numericProfileValue(retrieval, "vector_weight", 0.7)),
+    fulltextWeight: String(numericProfileValue(retrieval, "fulltext_weight", 0.3)),
+    topK: String(numericProfileValue(retrieval, "top_k", 5)),
+    scoreThreshold: String(numericProfileValue(retrieval, "score_threshold", 0)),
+    candidateMultiplier: String(numericProfileValue(retrieval, "candidate_multiplier", 4)),
+    rerankEnabled: Boolean(retrieval.rerank_enabled),
+    rerankProvider: provider,
+    rerankModel: String(retrieval.rerank_model ?? ""),
+    rerankTopN: String(numericProfileValue(retrieval, "rerank_top_n", 5)),
+  };
+}
 
 function formatDate(timestamp: number) {
   return new Intl.DateTimeFormat("zh-CN", {
@@ -272,9 +390,30 @@ export default function RagPage() {
   const [pipelineArtifacts, setPipelineArtifacts] = useState<PipelineArtifact[]>([]);
   const [pipelineDraft, setPipelineDraft] = useState<PipelineDraftResponse | null>(null);
   const [pipelineDraftEdits, setPipelineDraftEdits] = useState<PipelineDraftEdits>({
+    strategy: "recursive_character",
     chunkSize: "",
     chunkOverlap: "",
+    separators: "",
+    parentChunkSize: "",
+    parentChunkOverlap: "",
+    parentSeparators: "",
+    childChunkSize: "",
+    childChunkOverlap: "",
+    childSeparators: "",
+    embeddingModel: "",
+    retrievalMode: "hybrid",
+    vectorWeight: "0.7",
+    fulltextWeight: "0.3",
+    topK: "5",
+    scoreThreshold: "0",
+    candidateMultiplier: "4",
+    rerankEnabled: false,
+    rerankProvider: "auto",
+    rerankModel: "",
+    rerankTopN: "5",
   });
+  const [retrievalCapabilities, setRetrievalCapabilities] = useState<RetrievalCapabilities | null>(null);
+  const [retrievalCapabilitiesError, setRetrievalCapabilitiesError] = useState("");
   const [pipelinePreflight, setPipelinePreflight] = useState<PipelinePreflightResponse | null>(null);
   const [isSavingPipelineDraft, setIsSavingPipelineDraft] = useState(false);
   const [isPreflightingPipeline, setIsPreflightingPipeline] = useState(false);
@@ -313,6 +452,7 @@ export default function RagPage() {
   useEffect(() => {
     document.title = "模镜 - 知识库管理";
     void loadKnowledgeBases();
+    void loadRetrievalCapabilities();
   }, []);
 
   useEffect(() => {
@@ -365,6 +505,20 @@ export default function RagPage() {
     }
   }
 
+  async function loadRetrievalCapabilities() {
+    setRetrievalCapabilitiesError("");
+    try {
+      const response = await fetch("/api/rag/retrieval-capabilities");
+      if (!response.ok) throw new Error(await readError(response));
+      setRetrievalCapabilities((await response.json()) as RetrievalCapabilities);
+    } catch (loadError) {
+      setRetrievalCapabilities(null);
+      setRetrievalCapabilitiesError(
+        loadError instanceof Error ? loadError.message : "检索能力状态暂不可用。",
+      );
+    }
+  }
+
   async function loadDocuments(kbId: string) {
     setIsLoadingDocs(true);
     setError("");
@@ -413,11 +567,7 @@ export default function RagPage() {
         if (requestedJobId && jobsData.jobs.some((job) => job.job_id === requestedJobId)) return requestedJobId;
         return jobsData.jobs[0]?.job_id ?? "";
       });
-      const chunkerStage = draftData.stages.find((stage) => stage.kind === "chunker");
-      setPipelineDraftEdits({
-        chunkSize: String(chunkerStage?.config?.chunk_size ?? 500),
-        chunkOverlap: String(chunkerStage?.config?.chunk_overlap ?? 50),
-      });
+      setPipelineDraftEdits(draftEditsFromResponse(draftData));
       setPipelinePreflight(null);
       setPipelineDraftNotice("");
     } catch (loadError) {
@@ -463,6 +613,10 @@ export default function RagPage() {
     try {
       const chunkSize = Number(pipelineDraftEdits.chunkSize);
       const chunkOverlap = Number(pipelineDraftEdits.chunkOverlap);
+      const parentChunkSize = Number(pipelineDraftEdits.parentChunkSize);
+      const parentChunkOverlap = Number(pipelineDraftEdits.parentChunkOverlap);
+      const childChunkSize = Number(pipelineDraftEdits.childChunkSize);
+      const childChunkOverlap = Number(pipelineDraftEdits.childChunkOverlap);
       const response = await fetch(`/api/rag/pipeline/draft/${selectedKbId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -470,23 +624,44 @@ export default function RagPage() {
           stages: {
             stage_chunker: {
               config: {
+                strategy: pipelineDraftEdits.strategy,
                 chunk_size: chunkSize,
                 chunk_overlap: chunkOverlap,
+                separators: textToSeparators(pipelineDraftEdits.separators),
+                parent_chunk_size: parentChunkSize,
+                parent_chunk_overlap: parentChunkOverlap,
+                parent_separators: textToSeparators(pipelineDraftEdits.parentSeparators),
+                child_chunk_size: childChunkSize,
+                child_chunk_overlap: childChunkOverlap,
+                child_separators: textToSeparators(pipelineDraftEdits.childSeparators),
               },
             },
+          },
+          embedding_profile: {
+            model: pipelineDraftEdits.embeddingModel.trim(),
+          },
+          retrieval_profile: {
+            mode: pipelineDraftEdits.retrievalMode,
+            vector_weight: Number(pipelineDraftEdits.vectorWeight),
+            fulltext_weight: Number(pipelineDraftEdits.fulltextWeight),
+            top_k: Number(pipelineDraftEdits.topK),
+            score_threshold: Number(pipelineDraftEdits.scoreThreshold),
+            candidate_multiplier: Number(pipelineDraftEdits.candidateMultiplier),
+            rerank_enabled: pipelineDraftEdits.rerankEnabled,
+            rerank_provider: pipelineDraftEdits.rerankEnabled
+              ? pipelineDraftEdits.rerankProvider
+              : "none",
+            rerank_model: pipelineDraftEdits.rerankModel.trim(),
+            rerank_top_n: Number(pipelineDraftEdits.rerankTopN),
           },
         }),
       });
       if (!response.ok) throw new Error(await readError(response));
       const draftData = (await response.json()) as PipelineDraftResponse;
-      const chunkerStage = draftData.stages.find((stage) => stage.kind === "chunker");
       setPipelineDraft(draftData);
-      setPipelineDraftEdits({
-        chunkSize: String(chunkerStage?.config?.chunk_size ?? chunkSize),
-        chunkOverlap: String(chunkerStage?.config?.chunk_overlap ?? chunkOverlap),
-      });
+      setPipelineDraftEdits(draftEditsFromResponse(draftData));
       setPipelinePreflight(null);
-      setPipelineDraftNotice("流水线草稿已保存；当前不会影响已上传文档、检索结果或聊天 RAG。");
+      setPipelineDraftNotice("高级 RAG 草稿已保存；执行候选版本并手动激活前，不影响现有检索与聊天 RAG。");
     } catch (saveError) {
       setPipelineError(saveError instanceof Error ? saveError.message : "保存流水线草稿失败。");
     } finally {
@@ -581,7 +756,23 @@ export default function RagPage() {
       const response = await fetch(`/api/rag/pipeline/versions/${versionId}/query`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question, top_k: 4 }),
+        body: JSON.stringify({
+          question,
+          retrieval: {
+            mode: pipelineDraftEdits.retrievalMode,
+            vector_weight: Number(pipelineDraftEdits.vectorWeight),
+            fulltext_weight: Number(pipelineDraftEdits.fulltextWeight),
+            top_k: Number(pipelineDraftEdits.topK),
+            score_threshold: Number(pipelineDraftEdits.scoreThreshold),
+            candidate_multiplier: Number(pipelineDraftEdits.candidateMultiplier),
+            rerank_enabled: pipelineDraftEdits.rerankEnabled,
+            rerank_provider: pipelineDraftEdits.rerankEnabled
+              ? pipelineDraftEdits.rerankProvider
+              : "none",
+            rerank_model: pipelineDraftEdits.rerankModel.trim(),
+            rerank_top_n: Number(pipelineDraftEdits.rerankTopN),
+          },
+        }),
       });
       if (!response.ok) throw new Error(await readError(response));
       setPipelinePreview((await response.json()) as PipelineVersionQueryResponse);
@@ -1034,42 +1225,143 @@ export default function RagPage() {
                                 editable
                               </span>
                             </div>
-                            <div className="mt-3 grid gap-3 sm:grid-cols-2">
-                              <label className="block rounded-lg border border-white/10 bg-ink-950/35 p-3">
-                                <span className="text-xs font-semibold text-slate-300">
-                                  分块大小
-                                </span>
-                                <input
-                                  className="mt-2 w-full rounded-lg border border-white/10 bg-white/[0.06] px-3 py-2 text-sm text-white outline-none transition focus:border-hire-300/50 focus:ring-4 focus:ring-hire-300/10"
-                                  max={4000}
-                                  min={100}
-                                  onChange={(event) =>
-                                    setPipelineDraftEdits((current) => ({
+                            <div className="mt-4 border-t border-white/10 pt-4">
+                              <div className="flex items-center justify-between gap-3">
+                                <p className="text-xs font-semibold text-white">分块与分段</p>
+                                <span className="text-[10px] uppercase text-slate-500">schema v{pipelineDraft?.index_schema_version ?? 2}</span>
+                              </div>
+                              <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                                <label className="block">
+                                  <span className="text-xs font-medium text-slate-300">分块策略</span>
+                                  <select
+                                    className="mt-2 w-full rounded-lg border border-white/10 bg-ink-950/70 px-3 py-2 text-sm text-white outline-none focus:border-hire-300/50"
+                                    onChange={(event) => setPipelineDraftEdits((current) => ({
                                       ...current,
-                                      chunkSize: event.target.value,
-                                    }))
-                                  }
-                                  type="number"
-                                  value={pipelineDraftEdits.chunkSize}
-                                />
-                              </label>
-                              <label className="block rounded-lg border border-white/10 bg-ink-950/35 p-3">
-                                <span className="text-xs font-semibold text-slate-300">
-                                  重叠字符
-                                </span>
-                                <input
-                                  className="mt-2 w-full rounded-lg border border-white/10 bg-white/[0.06] px-3 py-2 text-sm text-white outline-none transition focus:border-hire-300/50 focus:ring-4 focus:ring-hire-300/10"
-                                  min={0}
-                                  onChange={(event) =>
-                                    setPipelineDraftEdits((current) => ({
+                                      strategy: event.target.value as PipelineDraftEdits["strategy"],
+                                    }))}
+                                    value={pipelineDraftEdits.strategy}
+                                  >
+                                    <option value="recursive_character">递归字符分块</option>
+                                    <option value="parent_child">父子分段</option>
+                                  </select>
+                                </label>
+                                <label className="block">
+                                  <span className="text-xs font-medium text-slate-300">Embedding 模型</span>
+                                  <input
+                                    className="mt-2 w-full rounded-lg border border-white/10 bg-ink-950/70 px-3 py-2 text-sm text-white outline-none focus:border-hire-300/50"
+                                    onChange={(event) => setPipelineDraftEdits((current) => ({
                                       ...current,
-                                      chunkOverlap: event.target.value,
-                                    }))
-                                  }
-                                  type="number"
-                                  value={pipelineDraftEdits.chunkOverlap}
-                                />
-                              </label>
+                                      embeddingModel: event.target.value,
+                                    }))}
+                                    value={pipelineDraftEdits.embeddingModel}
+                                  />
+                                </label>
+                              </div>
+
+                              {pipelineDraftEdits.strategy === "recursive_character" ? (
+                                <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                                  <label className="block">
+                                    <span className="text-xs font-medium text-slate-300">分块大小</span>
+                                    <input
+                                      className="mt-2 w-full rounded-lg border border-white/10 bg-ink-950/70 px-3 py-2 text-sm text-white outline-none focus:border-hire-300/50"
+                                      max={4000}
+                                      min={100}
+                                      onChange={(event) => setPipelineDraftEdits((current) => ({ ...current, chunkSize: event.target.value }))}
+                                      type="number"
+                                      value={pipelineDraftEdits.chunkSize}
+                                    />
+                                  </label>
+                                  <label className="block">
+                                    <span className="text-xs font-medium text-slate-300">重叠字符</span>
+                                    <input
+                                      className="mt-2 w-full rounded-lg border border-white/10 bg-ink-950/70 px-3 py-2 text-sm text-white outline-none focus:border-hire-300/50"
+                                      min={0}
+                                      onChange={(event) => setPipelineDraftEdits((current) => ({ ...current, chunkOverlap: event.target.value }))}
+                                      type="number"
+                                      value={pipelineDraftEdits.chunkOverlap}
+                                    />
+                                  </label>
+                                  <label className="block sm:col-span-2">
+                                    <span className="text-xs font-medium text-slate-300">分段标识符（每行一个）</span>
+                                    <textarea
+                                      className="mt-2 min-h-28 w-full resize-y rounded-lg border border-white/10 bg-ink-950/70 px-3 py-2 font-mono text-xs leading-5 text-white outline-none focus:border-hire-300/50"
+                                      onChange={(event) => setPipelineDraftEdits((current) => ({ ...current, separators: event.target.value }))}
+                                      value={pipelineDraftEdits.separators}
+                                    />
+                                  </label>
+                                </div>
+                              ) : (
+                                <div className="mt-3 space-y-3">
+                                  <div className="grid gap-3 sm:grid-cols-2">
+                                    <label className="block">
+                                      <span className="text-xs font-medium text-slate-300">父段大小 / 重叠</span>
+                                      <div className="mt-2 grid grid-cols-2 gap-2">
+                                        <input className="w-full rounded-lg border border-white/10 bg-ink-950/70 px-3 py-2 text-sm text-white outline-none focus:border-hire-300/50" min={100} onChange={(event) => setPipelineDraftEdits((current) => ({ ...current, parentChunkSize: event.target.value }))} type="number" value={pipelineDraftEdits.parentChunkSize} />
+                                        <input className="w-full rounded-lg border border-white/10 bg-ink-950/70 px-3 py-2 text-sm text-white outline-none focus:border-hire-300/50" min={0} onChange={(event) => setPipelineDraftEdits((current) => ({ ...current, parentChunkOverlap: event.target.value }))} type="number" value={pipelineDraftEdits.parentChunkOverlap} />
+                                      </div>
+                                    </label>
+                                    <label className="block">
+                                      <span className="text-xs font-medium text-slate-300">子段大小 / 重叠</span>
+                                      <div className="mt-2 grid grid-cols-2 gap-2">
+                                        <input className="w-full rounded-lg border border-white/10 bg-ink-950/70 px-3 py-2 text-sm text-white outline-none focus:border-hire-300/50" min={100} onChange={(event) => setPipelineDraftEdits((current) => ({ ...current, childChunkSize: event.target.value }))} type="number" value={pipelineDraftEdits.childChunkSize} />
+                                        <input className="w-full rounded-lg border border-white/10 bg-ink-950/70 px-3 py-2 text-sm text-white outline-none focus:border-hire-300/50" min={0} onChange={(event) => setPipelineDraftEdits((current) => ({ ...current, childChunkOverlap: event.target.value }))} type="number" value={pipelineDraftEdits.childChunkOverlap} />
+                                      </div>
+                                    </label>
+                                  </div>
+                                  <div className="grid gap-3 sm:grid-cols-2">
+                                    <label className="block">
+                                      <span className="text-xs font-medium text-slate-300">父段标识符</span>
+                                      <textarea className="mt-2 min-h-24 w-full resize-y rounded-lg border border-white/10 bg-ink-950/70 px-3 py-2 font-mono text-xs leading-5 text-white outline-none focus:border-hire-300/50" onChange={(event) => setPipelineDraftEdits((current) => ({ ...current, parentSeparators: event.target.value }))} value={pipelineDraftEdits.parentSeparators} />
+                                    </label>
+                                    <label className="block">
+                                      <span className="text-xs font-medium text-slate-300">子段标识符</span>
+                                      <textarea className="mt-2 min-h-24 w-full resize-y rounded-lg border border-white/10 bg-ink-950/70 px-3 py-2 font-mono text-xs leading-5 text-white outline-none focus:border-hire-300/50" onChange={(event) => setPipelineDraftEdits((current) => ({ ...current, childSeparators: event.target.value }))} value={pipelineDraftEdits.childSeparators} />
+                                    </label>
+                                  </div>
+                                  <p className="text-[11px] leading-5 text-slate-500">子段参与索引；命中后提升并返回父段上下文，同时保留子段作为引用锚点。</p>
+                                </div>
+                              )}
+                            </div>
+
+                            <div className="mt-4 border-t border-white/10 pt-4">
+                              <p className="text-xs font-semibold text-white">检索与 Rerank</p>
+                              <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                                <label className="block">
+                                  <span className="text-xs font-medium text-slate-300">检索模式</span>
+                                  <select className="mt-2 w-full rounded-lg border border-white/10 bg-ink-950/70 px-3 py-2 text-sm text-white outline-none focus:border-hire-300/50" onChange={(event) => setPipelineDraftEdits((current) => ({ ...current, retrievalMode: event.target.value as PipelineDraftEdits["retrievalMode"] }))} value={pipelineDraftEdits.retrievalMode}>
+                                    <option value="hybrid">混合检索</option>
+                                    <option value="vector">向量检索</option>
+                                    <option value="fulltext">全文检索</option>
+                                  </select>
+                                </label>
+                                <div className="grid grid-cols-2 gap-2">
+                                  <label className="block"><span className="text-xs font-medium text-slate-300">Top-K</span><input className="mt-2 w-full rounded-lg border border-white/10 bg-ink-950/70 px-3 py-2 text-sm text-white outline-none focus:border-hire-300/50" min={1} max={50} onChange={(event) => setPipelineDraftEdits((current) => ({ ...current, topK: event.target.value }))} type="number" value={pipelineDraftEdits.topK} /></label>
+                                  <label className="block"><span className="text-xs font-medium text-slate-300">Score 阈值</span><input className="mt-2 w-full rounded-lg border border-white/10 bg-ink-950/70 px-3 py-2 text-sm text-white outline-none focus:border-hire-300/50" min={0} max={1} step={0.05} onChange={(event) => setPipelineDraftEdits((current) => ({ ...current, scoreThreshold: event.target.value }))} type="number" value={pipelineDraftEdits.scoreThreshold} /></label>
+                                </div>
+                              </div>
+                              <div className="mt-3 grid gap-3 sm:grid-cols-3">
+                                <label className="block"><span className="text-xs font-medium text-slate-300">向量权重</span><input className="mt-2 w-full rounded-lg border border-white/10 bg-ink-950/70 px-3 py-2 text-sm text-white outline-none focus:border-hire-300/50" disabled={pipelineDraftEdits.retrievalMode !== "hybrid"} min={0} max={1} step={0.1} onChange={(event) => setPipelineDraftEdits((current) => ({ ...current, vectorWeight: event.target.value }))} type="number" value={pipelineDraftEdits.vectorWeight} /></label>
+                                <label className="block"><span className="text-xs font-medium text-slate-300">全文权重</span><input className="mt-2 w-full rounded-lg border border-white/10 bg-ink-950/70 px-3 py-2 text-sm text-white outline-none focus:border-hire-300/50" disabled={pipelineDraftEdits.retrievalMode !== "hybrid"} min={0} max={1} step={0.1} onChange={(event) => setPipelineDraftEdits((current) => ({ ...current, fulltextWeight: event.target.value }))} type="number" value={pipelineDraftEdits.fulltextWeight} /></label>
+                                <label className="block"><span className="text-xs font-medium text-slate-300">候选倍数</span><input className="mt-2 w-full rounded-lg border border-white/10 bg-ink-950/70 px-3 py-2 text-sm text-white outline-none focus:border-hire-300/50" min={1} max={10} onChange={(event) => setPipelineDraftEdits((current) => ({ ...current, candidateMultiplier: event.target.value }))} type="number" value={pipelineDraftEdits.candidateMultiplier} /></label>
+                              </div>
+                              <div className="mt-3 flex items-center justify-between gap-3 border-y border-white/10 py-3">
+                                <div><p className="text-xs font-medium text-slate-200">启用 Rerank</p><p className="mt-1 text-[11px] text-slate-500">失败时保留混合融合排序，并返回 warning。</p></div>
+                                <input checked={pipelineDraftEdits.rerankEnabled} className="h-4 w-4 accent-hire-300" onChange={(event) => setPipelineDraftEdits((current) => ({ ...current, rerankEnabled: event.target.checked }))} type="checkbox" />
+                              </div>
+                              {pipelineDraftEdits.rerankEnabled ? (
+                                <div className="mt-3 grid gap-3 sm:grid-cols-3">
+                                  <label className="block"><span className="text-xs font-medium text-slate-300">Provider</span><select className="mt-2 w-full rounded-lg border border-white/10 bg-ink-950/70 px-3 py-2 text-sm text-white outline-none focus:border-hire-300/50" onChange={(event) => setPipelineDraftEdits((current) => ({ ...current, rerankProvider: event.target.value as PipelineDraftEdits["rerankProvider"] }))} value={pipelineDraftEdits.rerankProvider}><option value="auto">自动</option><option value="api">专用 API</option><option value="llm">LLM JSON</option></select></label>
+                                  <label className="block"><span className="text-xs font-medium text-slate-300">模型（可选）</span><input className="mt-2 w-full rounded-lg border border-white/10 bg-ink-950/70 px-3 py-2 text-sm text-white outline-none focus:border-hire-300/50" onChange={(event) => setPipelineDraftEdits((current) => ({ ...current, rerankModel: event.target.value }))} value={pipelineDraftEdits.rerankModel} /></label>
+                                  <label className="block"><span className="text-xs font-medium text-slate-300">Rerank Top-N</span><input className="mt-2 w-full rounded-lg border border-white/10 bg-ink-950/70 px-3 py-2 text-sm text-white outline-none focus:border-hire-300/50" min={1} max={50} onChange={(event) => setPipelineDraftEdits((current) => ({ ...current, rerankTopN: event.target.value }))} type="number" value={pipelineDraftEdits.rerankTopN} /></label>
+                                </div>
+                              ) : null}
+                              <div className="mt-3 text-[11px] leading-5 text-slate-500">
+                                {retrievalCapabilities ? (
+                                  <p>向量：{retrievalCapabilities.vector.backend} · 全文：{retrievalCapabilities.fulltext.backend} · Embedding：{retrievalCapabilities.embedding.provider}{retrievalCapabilities.embedding.degraded ? "（降级模式）" : ""} · Rerank API/LLM：{retrievalCapabilities.rerank.api_configured ? "ready" : "off"}/{retrievalCapabilities.rerank.llm_configured ? "ready" : "off"}</p>
+                                ) : (
+                                  <p>{retrievalCapabilitiesError || "正在读取检索能力摘要..."}</p>
+                                )}
+                              </div>
                             </div>
                             <div className="mt-3 grid gap-2 text-xs text-slate-400 sm:grid-cols-2">
                               <div className="rounded-lg border border-white/10 bg-white/[0.03] p-3">
@@ -1287,6 +1579,9 @@ export default function RagPage() {
                                       <p className="mt-1 text-[10px] text-slate-500">
                                         {versionItem.document_count} 文档 · {versionItem.chunk_count} chunks · draft v{versionItem.draft_version}
                                       </p>
+                                      <p className="mt-1 text-[10px] text-slate-500">
+                                        index schema v{versionItem.index_schema_version ?? 1} · vector {versionItem.vector_index_ready === false ? "incomplete" : "ready"} · fulltext {versionItem.lexical_index_ready ? "ready" : "legacy/off"}
+                                      </p>
                                     </div>
                                     <div className="flex gap-1.5">
                                       <button
@@ -1319,11 +1614,33 @@ export default function RagPage() {
 
                             {pipelinePreview ? (
                               <div className="mt-3 rounded-lg border border-sky-300/20 bg-sky-300/[0.07] p-3">
-                                <p className="text-[11px] font-semibold text-sky-100">v{pipelinePreview.version} 预览结果</p>
+                                <div className="flex flex-wrap items-center justify-between gap-2">
+                                  <p className="text-[11px] font-semibold text-sky-100">v{pipelinePreview.version} 预览结果</p>
+                                  <span className="text-[10px] text-slate-400">
+                                    {String(pipelinePreview.retrieval.mode ?? pipelineDraftEdits.retrievalMode)} · Top-{String(pipelinePreview.retrieval.top_k ?? pipelineDraftEdits.topK)}
+                                  </span>
+                                </div>
                                 <p className="mt-2 line-clamp-5 text-xs leading-5 text-slate-200">{pipelinePreview.answer}</p>
-                                <p className="mt-2 text-[10px] text-slate-500">
-                                  {pipelinePreview.sources.length} 个引用来源
-                                </p>
+                                {pipelinePreview.warnings.length > 0 ? (
+                                  <div className="mt-2 rounded-md border border-amber-300/20 bg-amber-300/10 px-2.5 py-2 text-[11px] leading-5 text-amber-100">
+                                    {pipelinePreview.warnings.map((warning) => <p key={warning}>{warning}</p>)}
+                                  </div>
+                                ) : null}
+                                <div className="mt-3 space-y-2">
+                                  {pipelinePreview.sources.map((source, index) => (
+                                    <div className="border-t border-white/10 pt-2" key={`${source.chunk_id}-${index}`}>
+                                      <div className="flex flex-wrap items-center gap-1.5 text-[10px]">
+                                        <span className="font-semibold text-slate-200">{source.document_name}</span>
+                                        {source.vector_score != null ? <span className="rounded border border-white/10 px-1.5 py-0.5 text-slate-400">vector {source.vector_score.toFixed(3)}</span> : null}
+                                        {source.fulltext_score != null ? <span className="rounded border border-white/10 px-1.5 py-0.5 text-slate-400">fts {source.fulltext_score.toFixed(3)}</span> : null}
+                                        {source.fused_score != null ? <span className="rounded border border-sky-300/20 px-1.5 py-0.5 text-sky-100">fused {source.fused_score.toFixed(3)}</span> : null}
+                                        {source.rerank_score != null ? <span className="rounded border border-emerald-300/20 px-1.5 py-0.5 text-emerald-100">rerank {source.rerank_score.toFixed(3)}</span> : null}
+                                        {source.parent_lifted ? <span className="rounded border border-violet-300/20 px-1.5 py-0.5 text-violet-100">父段提升</span> : null}
+                                      </div>
+                                      <p className="mt-1 line-clamp-2 text-[11px] leading-5 text-slate-400">{source.matched_text || source.text}</p>
+                                    </div>
+                                  ))}
+                                </div>
                               </div>
                             ) : null}
                           </section>

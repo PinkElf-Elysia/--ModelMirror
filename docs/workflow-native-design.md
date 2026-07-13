@@ -11,6 +11,8 @@
 
 > 2026-07-12 Knowledge Pipeline execution：`/rag` 已支持持久化 ingestion job、五段 stage 进度、候选索引预览、人工激活和版本回滚。该迭代不新增工作流节点，也不改变 `knowledge_citation` 的输入输出协议；节点通过 `RagService` 自动读取知识库 active version，没有 active version 时继续兼容 legacy index。
 
+> 2026-07-13 Advanced RAG V2：Knowledge Pipeline 候选版本支持递归/父子分块、分段标识符、向量与 FTS5 双索引、全文/向量/混合检索、权重、阈值和可选 Rerank。`knowledge_retrieval` 与 `knowledge_citation` 不新增节点字段，仍通过 `RagService` 自动消费 active version 固定 profile；候选预览参数不会修改版本配置，旧索引继续 vector-only 兼容。
+
 > 2026-07-09 Workflow Agent 运行策略：`workflow_agent` 开始接入 Xpert 式侧栏的第一批真实运行语义：失败重试、备用模型、禁用输出、异常转空输出。该变更不改变节点协议或 SSE wire format，不影响普通 `agent`，也不接文件理解、并行工具调用、记忆写入或输出 schema 强校验。
 
 > 2026-07-10 Runtime Ops 第二版：`/runtime` 已补充 MCP 状态细分、失败 run 摘要、checkpoint severity 统计、禁用的“重试待接入”入口，以及 `GET /api/runtime/environment-summary` 脱敏环境摘要。该变更仍只做运行观测，不触发真实重试、MCP 启停、Skill 安装/卸载或环境变量编辑。
@@ -35,7 +37,7 @@
 
 ### 知识流水线分类
 
-Xpert 知识流水线菜单按数据源、处理器、分块器、图像理解组织。ModelMirror 当前已有 RAG pipeline 只读元数据、`knowledge_citation` 节点，以及 `/api/rag/pipeline/draft` 派生的四段可视化草稿层；该层不迁移向量库、不改变 `/api/rag/query`、不改上传/切分/embedding 主路径。
+Xpert 知识流水线菜单按数据源、处理器、分块器、图像理解组织。ModelMirror 当前已有 RAG pipeline 元数据、`knowledge_citation` 节点、四段草稿、版本化执行，以及 Advanced RAG V2 的递归/父子分块、向量/FTS5 双索引和混合检索。工作流节点不直接保存检索实现细节，而是统一消费知识库 active version 固定 profile；候选失败或回滚不需要修改 workflow definition。
 
 ### 对齐顺序
 
