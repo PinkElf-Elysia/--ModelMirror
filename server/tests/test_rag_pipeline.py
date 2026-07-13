@@ -113,7 +113,10 @@ async def test_rag_pipeline_draft_empty_knowledge_base(client: httpx.AsyncClient
     assert stages["data_source"]["item_count"] == 0
     assert stages["processor"]["item_count"] == 0
     assert stages["chunker"]["item_count"] == 0
-    assert stages["chunker"]["config"]["strategy"] == "local_recursive_character_chunks"
+    assert data["index_schema_version"] == 2
+    assert data["retrieval_profile"]["mode"] == "hybrid"
+    assert data["embedding_profile"]["degraded"] is True
+    assert stages["chunker"]["config"]["strategy"] == "recursive_character"
     assert stages["chunker"]["config"]["chunk_size"] == 500
     assert stages["chunker"]["config"]["chunk_overlap"] == 50
     assert stages["image_understanding"]["status"] == "planned"
@@ -141,7 +144,9 @@ async def test_rag_pipeline_draft_counts_and_safe_fields(client: httpx.AsyncClie
 
     serialized = str(data).lower()
     assert "stored_path" not in serialized
-    assert "embedding" not in serialized
+    assert "stored_path" not in serialized
+    assert "api_key" not in serialized
+    assert "embedding_vector" not in serialized
     assert "modelmirror knowledge pipeline maps uploaded files" not in serialized
 
 
@@ -154,6 +159,18 @@ async def test_rag_pipeline_draft_patch_persists_chunker_config(
     response = await client.patch(
         f"/api/rag/pipeline/draft/{kb_id}",
         json={
+            "embedding_profile": {"model": "text-embedding-3-small"},
+            "retrieval_profile": {
+                "mode": "hybrid",
+                "vector_weight": 0.6,
+                "fulltext_weight": 0.4,
+                "top_k": 8,
+                "score_threshold": 0.2,
+                "candidate_multiplier": 3,
+                "rerank_enabled": False,
+                "rerank_provider": "auto",
+                "rerank_top_n": 8,
+            },
             "stages": {
                 "stage_chunker": {
                     "config": {
@@ -170,6 +187,10 @@ async def test_rag_pipeline_draft_patch_persists_chunker_config(
     chunker = {stage["kind"]: stage for stage in patched["stages"]}["chunker"]
     assert chunker["config"]["chunk_size"] == 800
     assert chunker["config"]["chunk_overlap"] == 120
+    assert patched["retrieval_profile"]["vector_weight"] == 0.6
+    assert patched["retrieval_profile"]["fulltext_weight"] == 0.4
+    assert patched["retrieval_profile"]["top_k"] == 8
+    assert patched["embedding_profile"]["model"] == "text-embedding-3-small"
 
     response = await client.get(f"/api/rag/pipeline/draft?kb_id={kb_id}")
     assert response.status_code == 200, response.text
@@ -178,6 +199,32 @@ async def test_rag_pipeline_draft_patch_persists_chunker_config(
     assert data["version"] == 2
     assert chunker["config"]["chunk_size"] == 800
     assert chunker["config"]["chunk_overlap"] == 120
+    assert data["retrieval_profile"]["score_threshold"] == 0.2
+
+
+@pytest.mark.asyncio
+async def test_rag_retrieval_capabilities_are_safe(client: httpx.AsyncClient) -> None:
+    response = await client.get("/api/rag/retrieval-capabilities")
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["index_schema_version"] == 2
+    assert data["fulltext"]["backend"] == "sqlite_fts5"
+    assert data["modes"] == ["vector", "fulltext", "hybrid"]
+    serialized = str(data).lower()
+    assert "api_key" not in serialized
+    assert "sk-" not in serialized
+
+
+@pytest.mark.asyncio
+async def test_rag_pipeline_draft_rejects_invalid_retrieval_profile(
+    client: httpx.AsyncClient,
+) -> None:
+    kb_id = await create_kb(client, "invalid retrieval draft")
+    response = await client.patch(
+        f"/api/rag/pipeline/draft/{kb_id}",
+        json={"retrieval_profile": {"mode": "graph", "top_k": 51}},
+    )
+    assert response.status_code == 400
 
 
 @pytest.mark.asyncio

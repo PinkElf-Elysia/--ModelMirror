@@ -5,8 +5,10 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from .embedder import EmbeddingClient
+from .lexical_store import LexicalChunk
 from .rag_service import RagService
-from .splitter import TextSplitter
+from .splitter import ParentChildTextSplitter, TextSplitter
 from .vector_store import VectorChunk
 
 
@@ -152,6 +154,7 @@ class KnowledgePipelineExecutor:
                 metadata={"attempt": job["attempt"], "source_count": len(job["sources"])},
             )
             self.service.vector_store.delete_knowledge_base(namespace)
+            self.service.lexical_store.delete_namespace(namespace)
 
             await self._stage(job_id, "load", self._load_sources)
             parsed = await self._stage(job_id, "process", self._parse_sources)
@@ -185,6 +188,7 @@ class KnowledgePipelineExecutor:
                     )
         except PipelineJobCancelled:
             self.service.vector_store.delete_knowledge_base(namespace)
+            self.service.lexical_store.delete_namespace(namespace)
             await self._checkpoint(
                 job_id,
                 event_type="knowledge_pipeline.cancelled",
@@ -205,6 +209,7 @@ class KnowledgePipelineExecutor:
         except Exception as exc:
             logger.exception("Knowledge pipeline job failed job_id=%s", job_id)
             self.service.vector_store.delete_knowledge_base(namespace)
+            self.service.lexical_store.delete_namespace(namespace)
             self.service.fail_pipeline_job(job_id, str(exc))
             await self._checkpoint(
                 job_id,
@@ -261,15 +266,55 @@ class KnowledgePipelineExecutor:
         parsed: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
         job = self.service.get_pipeline_job(job_id)
-        chunker = job["config_snapshot"]["stage_chunker"]
-        splitter = TextSplitter(
-            chunk_size=int(chunker["chunk_size"]),
-            chunk_overlap=int(chunker["chunk_overlap"]),
-        )
+        snapshot = job["config_snapshot"]
+        stages = snapshot.get("stages", snapshot)
+        chunker = stages["stage_chunker"]
+        strategy = str(chunker.get("strategy") or "recursive_character")
+        if strategy == "local_recursive_character_chunks":
+            strategy = "recursive_character"
+        if strategy == "parent_child":
+            splitter: TextSplitter | ParentChildTextSplitter = ParentChildTextSplitter(
+                parent_chunk_size=int(chunker.get("parent_chunk_size", 1500)),
+                parent_chunk_overlap=int(chunker.get("parent_chunk_overlap", 100)),
+                child_chunk_size=int(chunker.get("child_chunk_size", 400)),
+                child_chunk_overlap=int(chunker.get("child_chunk_overlap", 50)),
+                parent_separators=(
+                    list(chunker["parent_separators"])
+                    if chunker.get("parent_separators")
+                    else None
+                ),
+                child_separators=(
+                    list(chunker["child_separators"])
+                    if chunker.get("child_separators")
+                    else None
+                ),
+            )
+        else:
+            splitter = TextSplitter(
+                chunk_size=int(chunker["chunk_size"]),
+                chunk_overlap=int(chunker["chunk_overlap"]),
+                separators=list(chunker["separators"]) if chunker.get("separators") else None,
+            )
         chunks: list[dict[str, Any]] = []
         for source in parsed:
-            for index, text in enumerate(splitter.split_text(str(source["text"]))):
-                chunks.append({"source": source, "index": index, "text": text})
+            for segment in splitter.split_segments(str(source["text"])):
+                parent_id = (
+                    f"{source['source_id']}_{segment.parent_chunk_id}"
+                    if segment.parent_chunk_id
+                    else None
+                )
+                chunks.append(
+                    {
+                        "source": source,
+                        "index": segment.index,
+                        "text": segment.text,
+                        "start_char": segment.start_char,
+                        "end_char": segment.end_char,
+                        "chunk_type": segment.chunk_type,
+                        "parent_chunk_id": parent_id,
+                        "parent_text": segment.parent_text,
+                    }
+                )
         if not chunks:
             raise RuntimeError("No indexable text chunks were produced.")
         return chunks
@@ -279,7 +324,19 @@ class KnowledgePipelineExecutor:
         job_id: str,
         chunks: list[dict[str, Any]],
     ) -> list[list[float]]:
-        return await self.service.embedder.embed_texts([str(item["text"]) for item in chunks])
+        job = self.service.get_pipeline_job(job_id)
+        snapshot = job["config_snapshot"]
+        profile = snapshot.get("embedding_profile", {}) if isinstance(snapshot, dict) else {}
+        model = str(profile.get("model") or self.service.embedder.model)
+        embedder = self.service.embedder
+        if model != self.service.embedder.model:
+            embedder = EmbeddingClient(
+                api_base=self.service.embedder.api_base,
+                api_key=self.service.embedder.api_key,
+                model=model,
+                dimension=self.service.embedder.dimension,
+            )
+        return await embedder.embed_texts([str(item["text"]) for item in chunks])
 
     async def _store_chunks(
         self,
@@ -291,19 +348,43 @@ class KnowledgePipelineExecutor:
         version_id = str(job["candidate_version_id"])
         namespace = str(job["candidate_namespace"])
         vector_chunks: list[VectorChunk] = []
+        lexical_chunks: list[LexicalChunk] = []
         for position, item in enumerate(chunks):
             source = item["source"]
             source_id = str(source["source_id"])
             doc_id = f"{version_id}_{source_id}"
+            chunk_id = f"{doc_id}_chunk_{item['index']}"
+            common = {
+                "parent_chunk_id": item.get("parent_chunk_id"),
+                "parent_text": item.get("parent_text"),
+                "chunk_type": str(item.get("chunk_type") or "standard"),
+                "start_char": int(item.get("start_char", 0)),
+                "end_char": int(item.get("end_char", 0)),
+            }
             vector_chunks.append(
                 VectorChunk(
-                    id=f"{doc_id}_chunk_{item['index']}",
+                    id=chunk_id,
                     kb_id=namespace,
                     doc_id=doc_id,
                     document_name=str(source["filename"]),
                     text=str(item["text"]),
                     embedding=embeddings[position],
                     chunk_index=int(item["index"]),
+                    **common,
+                )
+            )
+            lexical_chunks.append(
+                LexicalChunk(
+                    chunk_id=chunk_id,
+                    namespace=namespace,
+                    doc_id=doc_id,
+                    document_name=str(source["filename"]),
+                    text=str(item["text"]),
+                    chunk_index=int(item["index"]),
+                    **common,
                 )
             )
         self.service.vector_store.add_chunks(vector_chunks)
+        self.service.lexical_store.add_chunks(lexical_chunks)
+        if self.service.lexical_store.count_namespace(namespace) != len(lexical_chunks):
+            raise RuntimeError("Full-text index count does not match the vector candidate index.")

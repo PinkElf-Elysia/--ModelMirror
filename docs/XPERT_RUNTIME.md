@@ -130,6 +130,16 @@ Pipeline jobs and versions survive process restarts. Running jobs are returned t
 
 The executor is intentionally limited to one local worker and one concurrent job. Cancellation is cooperative between stages. Failed or cancelled attempts delete their candidate namespace and cannot change the active version. See `docs/XPERT_KNOWLEDGE.md` for APIs, states, and operational checks.
 
+## Advanced RAG Retrieval V2
+
+An index schema v2 candidate pins its chunking, embedding, and retrieval profiles. It supports recursive-character chunks or parent-child chunks with ordered separators. Parent-child candidates index the child chunks; retrieval returns bounded parent context while retaining the matched child and offsets as the citation anchor.
+
+Each v2 candidate owns two coordinated indexes: the existing vector namespace and a SQLite FTS5 namespace with normalized Latin tokens plus CJK unigram/bigram tokens. A candidate is marked ready only when both indexes contain the expected chunks. Any load, parse, chunk, embedding, vector, or lexical failure removes both candidate indexes and leaves the active-version pointer unchanged.
+
+Retrieval modes are `vector`, `fulltext`, and `hybrid`. Hybrid retrieval over-fetches bounded candidate sets, deduplicates by chunk ID, and applies weighted normalized reciprocal-rank fusion. Optional reranking prefers a dedicated rerank provider and can fall back to an OpenAI-compatible LLM strict-JSON ranking response. Provider timeout or invalid output is fail-open: the fused order is returned with a warning.
+
+Normal RAG, Chat RAG, workflow knowledge nodes, published Xperts, Goals, and Xpert Apps resolve the active version through `RagService`; clients cannot silently select a candidate. Legacy indexes remain vector-only and are not migrated automatically. Retrieval checkpoints and diagnostics may contain mode, counts, scores, model labels, and warnings, but never the full question, chunk body, embedding, local path, or credential.
+
 ## Current Limits
 
 - File persistence is local and is not a workspace database.
