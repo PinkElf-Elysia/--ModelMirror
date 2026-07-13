@@ -7,7 +7,8 @@ import pytest
 import pytest_asyncio
 
 from server.main import app
-from server.rag.api import set_rag_service_for_tests
+from server.rag.api import get_rag_service, set_rag_service_for_tests
+from server.rag.document_parser import DocumentParseError
 from server.rag.embedder import EmbeddingClient
 from server.rag.rag_service import RagService
 from server.rag.vector_store import LocalJsonVectorStore
@@ -213,6 +214,83 @@ async def test_rag_retrieval_capabilities_are_safe(client: httpx.AsyncClient) ->
     serialized = str(data).lower()
     assert "api_key" not in serialized
     assert "sk-" not in serialized
+
+
+@pytest.mark.asyncio
+async def test_rag_processor_capabilities_and_preview_are_safe(
+    client: httpx.AsyncClient,
+) -> None:
+    kb_id = await create_kb(client, "processor preview")
+    document = await upload_pipeline_document(client, kb_id)
+
+    capabilities = await client.get("/api/rag/processor-capabilities")
+    assert capabilities.status_code == 200, capabilities.text
+    capability_data = capabilities.json()
+    assert capability_data["modes"] == ["general", "qa", "summary"]
+    assert "table" in capability_data["block_types"]
+    assert isinstance(capability_data["llm_configured"], bool)
+
+    preview = await client.post(
+        f"/api/rag/pipeline/draft/{kb_id}/processor-preview",
+        json={
+            "document_id": document["id"],
+            "processor": {"mode": "general", "extract_title": True},
+        },
+    )
+    assert preview.status_code == 200, preview.text
+    data = preview.json()
+    assert data["document_id"] == document["id"]
+    assert data["block_count"] >= 1
+    assert data["generated_count"] == 0
+    assert data["blocks"][0]["kind"] == "paragraph"
+    serialized = str(data).lower()
+    assert "stored_path" not in serialized
+    assert "api_key" not in serialized
+    assert "embedding" not in serialized
+
+
+@pytest.mark.asyncio
+async def test_rag_processor_preview_maps_parse_failure_to_validation_error(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kb_id = await create_kb(client, "processor preview failure")
+    document = await upload_pipeline_document(client, kb_id)
+
+    def fail_parse(*args, **kwargs):
+        raise DocumentParseError("preview parser failed")
+
+    monkeypatch.setattr(get_rag_service().document_processor, "process", fail_parse)
+    response = await client.post(
+        f"/api/rag/pipeline/draft/{kb_id}/processor-preview",
+        json={"document_id": document["id"], "processor": {"mode": "general"}},
+    )
+
+    assert response.status_code == 400
+    assert "preview parser failed" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "processor",
+    [
+        {"mode": "unknown"},
+        {"failure_policy": "ignore"},
+        {"max_generated_items": 0},
+        {"max_generated_items": 51},
+        {"preserve_tables": "true"},
+    ],
+)
+async def test_rag_pipeline_draft_rejects_invalid_processor_config(
+    client: httpx.AsyncClient,
+    processor: dict,
+) -> None:
+    kb_id = await create_kb(client, "invalid processor")
+    response = await client.patch(
+        f"/api/rag/pipeline/draft/{kb_id}",
+        json={"stages": {"stage_processor": {"config": processor}}},
+    )
+    assert response.status_code == 400
 
 
 @pytest.mark.asyncio

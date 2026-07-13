@@ -140,6 +140,16 @@ Retrieval modes are `vector`, `fulltext`, and `hybrid`. Hybrid retrieval over-fe
 
 Normal RAG, Chat RAG, workflow knowledge nodes, published Xperts, Goals, and Xpert Apps resolve the active version through `RagService`; clients cannot silently select a candidate. Legacy indexes remain vector-only and are not migrated automatically. Retrieval checkpoints and diagnostics may contain mode, counts, scores, model labels, and warnings, but never the full question, chunk body, embedding, local path, or credential.
 
+## Structured Processor And Generated Indexes
+
+Each pipeline job pins a `processor_profile` before execution. `StructuredDocumentProcessor` converts TXT, Markdown, PDF, and extracted Xpert files into stable blocks. Markdown preserves heading paths, tables, lists, and fenced code; PDF blocks retain page numbers and can remove repeated page headers and footers. Normalization removes control characters and collapses redundant blank lines without flattening table or code content.
+
+Processor modes are `general`, `qa`, and `summary`. General blocks continue into the configured recursive or parent-child splitter. QA batches structural blocks through the existing OpenAI-compatible gateway, indexes the generated question, and stores the grounded answer plus source block as lifted context. Summary indexes document/section summaries and returns the corresponding original blocks. Generated JSON is validated strictly and retried at most twice per batch.
+
+The job owns a private processed artifact per source. Public payloads expose only status, attempts, counts, duration, warning, and safe error summaries. A retry reuses an artifact only when both source content hash and processor config hash still match. Failed sources are rerun, then both candidate indexes are rebuilt from the complete successful artifact set. `continue_on_error` can produce a warned candidate when at least one source succeeded; `strict` blocks candidate readiness after any source failure.
+
+`GET /api/rag/processor-capabilities` returns safe parser/model readiness labels. Processor preview accepts one document and an optional config override, returns at most 20 truncated blocks or generated items, and never persists output. Active-version resolution for Chat, workflow, Xpert, Goal, and App remains unchanged.
+
 ## Current Limits
 
 - File persistence is local and is not a workspace database.

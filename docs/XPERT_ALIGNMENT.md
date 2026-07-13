@@ -3,6 +3,19 @@
 最后更新日期：2026-07-13
 维护人：模镜团队
 
+## 2026-07-13 增量：XPERT-RAG-PROCESSOR-01
+
+Advanced RAG V2 已补齐索引前的成熟文档处理闭环：候选 Job 现在先把 TXT、Markdown 与 PDF 解析为稳定的 `ProcessedDocument / DocumentBlock`，再按固定 `processor_profile` 进入 General、QA 或 Summary 索引，最后重建同一候选版本的向量与 FTS5 双索引。
+
+- 结构块覆盖标题、段落、列表、表格、代码块与 PDF 页面，保留标题路径、页码、字符偏移和稳定 block ID；PDF 可移除重复页眉页脚。
+- `general` 保留结构正文并继续复用递归/父子分块；`qa` 索引模型生成的问题，召回时返回答案与来源段；`summary` 索引文档/章节摘要，召回时提升对应原文。
+- Processor 模型继续复用 newAPI/OpenRouter 注册模型，不新增供应商 SDK；每个生成批次最多尝试两次，严格 JSON 无效、超时或网关失败都进入逐文档错误。
+- Job 持久化 source hash、处理状态、尝试次数和私有处理产物。重试复用配置与内容均未变化的完成文档，只重跑失败文档；索引阶段仍从全部成功产物原子重建。
+- `continue_on_error` 允许至少一个文档成功时生成带 warning 的候选；`strict` 任一失败均阻断候选 ready。所有文档失败不会创建版本。
+- `/rag` 已提供处理模式、模型、失败策略、清洗选项、文档预览、逐文档 Job 结果和固定 Processor profile 展示。Preview 与 API 不返回本地路径、正文全集、prompt、embedding 或密钥。
+
+下一步进入 `XPERT-KNOWLEDGE-CANVAS-01`：把数据源、处理器、分块器、Embedding 与索引配置编译为现有 Knowledge Pipeline Job，而不是新建第二套执行器。OCR/VLM、检索评估、知识读写 Agent 按既定顺序后续推进；GraphRAG 继续暂缓。
+
 ## 2026-07-13 增量：XPERT-RAG-RETRIEVAL-V2-01
 
 Knowledge Pipeline 已补齐成熟 RAG 基础闭环的第一层：候选版本现在固定 `index_schema_version=2`、分块配置、Embedding profile 与 Retrieval profile，并在同一隔离版本中同时构建 Chroma/本地向量索引和 SQLite FTS5 全文索引。
@@ -111,7 +124,7 @@ EvoAgentX 只保留为历史参考：此前元智能体曾借鉴其 `goal -> sub
 | Chat Toolset | 部分实现 | `/api/chat` 可选 MCP 工具模式，chat run 与 checkpoint | 默认关闭，不改变普通聊天；无自动 handoff | 补工具偏好、安全提示和观测 UI |
 | Toolset / MCP | 部分实现 | `MCPToolsetProvider`、`run_tool_with_runtime`、tool policy/audit、MCP 管理基础、`/runtime` MCP Runtime 状态细分与只读运维，`/studio` 已提供 MCP 与 Runtime 入口 | 缺 Xpert 式 Toolset 资源模型；Runtime Ops 不执行 MCP start/stop | 后续抽象 Toolset 资源模型 |
 | Plugin / Skill | 部分实现 | `/skills` 与 Skill 安装基础，Docker 已补 git/npm/npx 依赖，`/runtime` 可查看已安装 Skill 摘要 | 尚未形成 Xpert 插件市场/Skill 工作区统一模型；运维页不执行安装/卸载 | 先补市场与安装状态，再抽象资源模型 |
-| Knowledge Pipeline | 部分实现 | FileAsset/Artifact/Chunk/CitationAnchor、版本化 ingestion job、递归与父子分块、向量/FTS5 双索引、全文/向量/混合检索、可选 Rerank、候选预览、激活/回滚、`knowledge_citation` 节点 | 本地单进程 worker；旧上传路径保留 vector-only legacy index；处理器增强与图像理解尚未接入 | `XPERT-RAG-PROCESSOR-01` |
+| Knowledge Pipeline | 部分实现 | FileAsset/Artifact/Chunk/CitationAnchor、结构感知 Processor、General/QA/Summary 索引、逐文档恢复、版本化 ingestion job、递归与父子分块、向量/FTS5 双索引、混合检索、Rerank、预览、激活/回滚 | 本地单进程 worker；旧上传路径保留 vector-only legacy index；知识画布、OCR/VLM 与检索评估尚未接入 | `XPERT-KNOWLEDGE-CANVAS-01` |
 | Prompt / Slash Command | 下一步 | 仅有提示词资源页雏形和聊天 prompt 使用 | 尚无 Xpert 式工作区提示词/命令配置 | 放在工作空间资源后推进 |
 | Environment / Sandbox | 部分实现 | `/runtime` 已提供脱敏环境与依赖摘要，展示模型网关、OpenRouter、git/node/npm/npx/python 是否就绪 | 不展示密钥值，不编辑环境变量，不提供沙箱实例或文件工作区语义 | 评估 Xpert 式环境变量管理和沙箱资源模型 |
 | Memory / Logs / Monitor | 部分实现 | 会话/Xpert 记忆、候选审批、RunRegistry events/checkpoints/audit 摘要 | 本地确定性召回，尚无向量记忆和组织级审计 | 基于真实使用反馈审计 |

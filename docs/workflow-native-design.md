@@ -13,6 +13,8 @@
 
 > 2026-07-13 Advanced RAG V2：Knowledge Pipeline 候选版本支持递归/父子分块、分段标识符、向量与 FTS5 双索引、全文/向量/混合检索、权重、阈值和可选 Rerank。`knowledge_retrieval` 与 `knowledge_citation` 不新增节点字段，仍通过 `RagService` 自动消费 active version 固定 profile；候选预览参数不会修改版本配置，旧索引继续 vector-only 兼容。
 
+> 2026-07-13 RAG Processor：Knowledge Pipeline 新增结构感知 TXT/Markdown/PDF 处理、General/QA/Summary 索引、逐文档失败与恢复。`knowledge_retrieval`、`knowledge_citation`、Chat、Xpert、Goal 与 App 的协议均不变，它们继续统一消费 active version；候选 Processor profile 和处理产物不会写入 workflow definition。
+
 > 2026-07-09 Workflow Agent 运行策略：`workflow_agent` 开始接入 Xpert 式侧栏的第一批真实运行语义：失败重试、备用模型、禁用输出、异常转空输出。该变更不改变节点协议或 SSE wire format，不影响普通 `agent`，也不接文件理解、并行工具调用、记忆写入或输出 schema 强校验。
 
 > 2026-07-10 Runtime Ops 第二版：`/runtime` 已补充 MCP 状态细分、失败 run 摘要、checkpoint severity 统计、禁用的“重试待接入”入口，以及 `GET /api/runtime/environment-summary` 脱敏环境摘要。该变更仍只做运行观测，不触发真实重试、MCP 启停、Skill 安装/卸载或环境变量编辑。

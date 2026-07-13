@@ -258,7 +258,39 @@ class KnowledgePipelineExecutor:
         self,
         job_id: str,
     ) -> list[dict[str, Any]]:
-        return await asyncio.to_thread(self.service.parse_pipeline_job_sources, job_id)
+        processed = await self.service.process_pipeline_job_sources(job_id)
+        job = self.service.get_pipeline_job(job_id)
+        for result in job.get("document_results", []):
+            if not isinstance(result, dict):
+                continue
+            status = str(result.get("status") or "pending")
+            if status not in {"completed", "failed"}:
+                continue
+            await self._checkpoint(
+                job_id,
+                event_type=f"knowledge_pipeline.document.{status}",
+                title=(
+                    "Document processing completed"
+                    if status == "completed"
+                    else "Document processing failed"
+                ),
+                summary=str(result.get("error") or ""),
+                severity="error" if status == "failed" else "info",
+                metadata={
+                    "source_id": result.get("source_id"),
+                    "mode": job.get("config_snapshot", {})
+                    .get("processor_profile", {})
+                    .get("mode", "general"),
+                    "attempt": result.get("attempt", 0),
+                    "block_count": result.get("block_count", 0),
+                    "generated_count": result.get("generated_count", 0),
+                    "duration_ms": result.get("duration_ms"),
+                },
+            )
+        gate_error = self.service.processor_gate_error(job_id)
+        if gate_error:
+            raise RuntimeError(gate_error)
+        return processed
 
     async def _chunk_sources(
         self,
@@ -296,27 +328,98 @@ class KnowledgePipelineExecutor:
                 separators=list(chunker["separators"]) if chunker.get("separators") else None,
             )
         chunks: list[dict[str, Any]] = []
+        per_source_counts: dict[str, int] = {}
         for source in parsed:
-            for segment in splitter.split_segments(str(source["text"])):
-                parent_id = (
-                    f"{source['source_id']}_{segment.parent_chunk_id}"
-                    if segment.parent_chunk_id
-                    else None
-                )
-                chunks.append(
-                    {
-                        "source": source,
-                        "index": segment.index,
-                        "text": segment.text,
-                        "start_char": segment.start_char,
-                        "end_char": segment.end_char,
-                        "chunk_type": segment.chunk_type,
-                        "parent_chunk_id": parent_id,
-                        "parent_text": segment.parent_text,
-                    }
-                )
+            source_id = str(source["source_id"])
+            generated_items = source.get("generated_items")
+            if isinstance(generated_items, list) and generated_items:
+                blocks = {
+                    str(block.get("block_id")): block
+                    for block in source.get("processed_document", {}).get("blocks", [])
+                    if isinstance(block, dict)
+                }
+                for generated in generated_items:
+                    if not isinstance(generated, dict):
+                        continue
+                    source_blocks = [
+                        blocks[str(block_id)]
+                        for block_id in generated.get("source_block_ids", [])
+                        if str(block_id) in blocks
+                    ]
+                    start_char = min(
+                        (int(block.get("start_char", 0)) for block in source_blocks),
+                        default=0,
+                    )
+                    end_char = max(
+                        (int(block.get("end_char", 0)) for block in source_blocks),
+                        default=0,
+                    )
+                    index = per_source_counts.get(source_id, 0)
+                    per_source_counts[source_id] = index + 1
+                    chunks.append(
+                        {
+                            "source": source,
+                            "index": index,
+                            "index_text": str(generated.get("index_text") or ""),
+                            "context_text": str(generated.get("context_text") or ""),
+                            "start_char": start_char,
+                            "end_char": end_char,
+                            "chunk_type": str(generated.get("item_type") or "generated"),
+                            "parent_chunk_id": (
+                                f"{source_id}_{generated.get('item_id', index)}"
+                            ),
+                        }
+                    )
+                continue
+
+            document = source.get("processed_document")
+            raw_blocks = document.get("blocks", []) if isinstance(document, dict) else []
+            for block in raw_blocks:
+                if not isinstance(block, dict):
+                    continue
+                block_text = str(block.get("text") or "").strip()
+                if not block_text:
+                    continue
+                heading_path = [
+                    str(item).strip()
+                    for item in block.get("heading_path", [])
+                    if str(item).strip()
+                ]
+                for segment in splitter.split_segments(block_text):
+                    index = per_source_counts.get(source_id, 0)
+                    per_source_counts[source_id] = index + 1
+                    heading_prefix = " > ".join(heading_path)
+                    index_text = (
+                        f"{heading_prefix}\n{segment.text}"
+                        if heading_prefix and heading_prefix not in segment.text
+                        else segment.text
+                    )
+                    parent_id = (
+                        f"{source_id}_{block.get('block_id')}_{segment.parent_chunk_id}"
+                        if segment.parent_chunk_id
+                        else None
+                    )
+                    chunks.append(
+                        {
+                            "source": source,
+                            "index": index,
+                            "index_text": index_text,
+                            "context_text": segment.parent_text or segment.text,
+                            "start_char": int(block.get("start_char", 0))
+                            + segment.start_char,
+                            "end_char": int(block.get("start_char", 0))
+                            + segment.end_char,
+                            "chunk_type": (
+                                segment.chunk_type
+                                if segment.chunk_type != "standard"
+                                else str(block.get("kind") or "standard")
+                            ),
+                            "parent_chunk_id": parent_id,
+                        }
+                    )
         if not chunks:
             raise RuntimeError("No indexable text chunks were produced.")
+        self.service.update_pipeline_document_chunk_counts(job_id, per_source_counts)
         return chunks
 
     async def _embed_chunks(
@@ -336,7 +439,9 @@ class KnowledgePipelineExecutor:
                 model=model,
                 dimension=self.service.embedder.dimension,
             )
-        return await embedder.embed_texts([str(item["text"]) for item in chunks])
+        return await embedder.embed_texts(
+            [str(item.get("index_text") or "") for item in chunks]
+        )
 
     async def _store_chunks(
         self,
@@ -356,7 +461,11 @@ class KnowledgePipelineExecutor:
             chunk_id = f"{doc_id}_chunk_{item['index']}"
             common = {
                 "parent_chunk_id": item.get("parent_chunk_id"),
-                "parent_text": item.get("parent_text"),
+                "parent_text": (
+                    str(item.get("context_text") or "")
+                    if item.get("parent_chunk_id")
+                    else None
+                ),
                 "chunk_type": str(item.get("chunk_type") or "standard"),
                 "start_char": int(item.get("start_char", 0)),
                 "end_char": int(item.get("end_char", 0)),
@@ -367,7 +476,7 @@ class KnowledgePipelineExecutor:
                     kb_id=namespace,
                     doc_id=doc_id,
                     document_name=str(source["filename"]),
-                    text=str(item["text"]),
+                    text=str(item.get("index_text") or ""),
                     embedding=embeddings[position],
                     chunk_index=int(item["index"]),
                     **common,
@@ -379,7 +488,7 @@ class KnowledgePipelineExecutor:
                     namespace=namespace,
                     doc_id=doc_id,
                     document_name=str(source["filename"]),
-                    text=str(item["text"]),
+                    text=str(item.get("index_text") or ""),
                     chunk_index=int(item["index"]),
                     **common,
                 )

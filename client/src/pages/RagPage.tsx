@@ -104,6 +104,14 @@ interface PipelinePreflightResponse {
 }
 
 interface PipelineDraftEdits {
+  processorMode: "general" | "qa" | "summary";
+  processorModelId: string;
+  processorFailurePolicy: "continue_on_error" | "strict";
+  extractTitle: boolean;
+  preserveTables: boolean;
+  preserveCodeBlocks: boolean;
+  removeRepeatedHeadersFooters: boolean;
+  maxGeneratedItems: string;
   strategy: "recursive_character" | "parent_child";
   chunkSize: string;
   chunkOverlap: string;
@@ -125,6 +133,33 @@ interface PipelineDraftEdits {
   rerankProvider: "none" | "auto" | "api" | "llm";
   rerankModel: string;
   rerankTopN: string;
+}
+
+interface ProcessorCapabilities {
+  version: string;
+  modes: string[];
+  failure_policies: string[];
+  supported_extensions: string[];
+  block_types: string[];
+  llm_configured: boolean;
+  model_label: string;
+  generation_targets: string[];
+  limits: { max_generated_items: number; preview_items: number; preview_text_characters: number };
+}
+
+interface ProcessorPreview {
+  kb_id: string;
+  document_id: string;
+  filename: string;
+  title: string;
+  config: Record<string, unknown>;
+  character_count: number;
+  block_count: number;
+  block_counts: Record<string, number>;
+  generated_count: number;
+  warnings: string[];
+  blocks: Array<{ block_id: string; kind: string; text: string; page_number?: number | null; truncated?: boolean }>;
+  generated_items: Array<{ item_id: string; item_type: string; index_text: string; context_text: string; truncated?: boolean }>;
 }
 
 interface RetrievalCapabilities {
@@ -162,6 +197,18 @@ interface PipelineJob {
   candidate_version: number;
   attempt: number;
   error: string | null;
+  warnings: string[];
+  document_results: Array<{
+    source_id: string;
+    filename: string;
+    status: string;
+    attempt: number;
+    block_count: number;
+    generated_count: number;
+    chunk_count: number;
+    error: string | null;
+    duration_ms: number | null;
+  }>;
   created_at: number;
   updated_at: number;
 }
@@ -180,6 +227,11 @@ interface PipelineVersion {
   draft_version: number;
   document_count: number;
   chunk_count: number;
+  block_count?: number;
+  qa_count?: number;
+  summary_count?: number;
+  processor_profile?: Record<string, unknown>;
+  warnings?: string[];
   job_id: string;
   index_schema_version?: number;
   embedding_profile?: Record<string, unknown>;
@@ -253,6 +305,7 @@ function numericProfileValue(profile: Record<string, unknown>, key: string, fall
 }
 
 function draftEditsFromResponse(draft: PipelineDraftResponse): PipelineDraftEdits {
+  const processor = draft.stages.find((stage) => stage.kind === "processor")?.config ?? {};
   const chunker = draft.stages.find((stage) => stage.kind === "chunker")?.config ?? {};
   const retrieval = draft.retrieval_profile ?? {};
   const strategy = chunker.strategy === "parent_child" ? "parent_child" : "recursive_character";
@@ -263,6 +316,16 @@ function draftEditsFromResponse(draft: PipelineDraftResponse): PipelineDraftEdit
     ? String(retrieval.rerank_provider) as PipelineDraftEdits["rerankProvider"]
     : "auto";
   return {
+    processorMode: ["qa", "summary"].includes(String(processor.mode))
+      ? String(processor.mode) as PipelineDraftEdits["processorMode"]
+      : "general",
+    processorModelId: String(processor.model_id ?? ""),
+    processorFailurePolicy: processor.failure_policy === "strict" ? "strict" : "continue_on_error",
+    extractTitle: processor.extract_title !== false,
+    preserveTables: processor.preserve_tables !== false,
+    preserveCodeBlocks: processor.preserve_code_blocks !== false,
+    removeRepeatedHeadersFooters: processor.remove_repeated_headers_footers !== false,
+    maxGeneratedItems: String(processor.max_generated_items ?? 20),
     strategy,
     chunkSize: String(chunker.chunk_size ?? 500),
     chunkOverlap: String(chunker.chunk_overlap ?? 50),
@@ -284,6 +347,20 @@ function draftEditsFromResponse(draft: PipelineDraftResponse): PipelineDraftEdit
     rerankProvider: provider,
     rerankModel: String(retrieval.rerank_model ?? ""),
     rerankTopN: String(numericProfileValue(retrieval, "rerank_top_n", 5)),
+  };
+}
+
+function processorConfigFromEdits(edits: PipelineDraftEdits) {
+  return {
+    parser: "structured_local_parser",
+    mode: edits.processorMode,
+    model_id: edits.processorModelId.trim(),
+    failure_policy: edits.processorFailurePolicy,
+    extract_title: edits.extractTitle,
+    preserve_tables: edits.preserveTables,
+    preserve_code_blocks: edits.preserveCodeBlocks,
+    remove_repeated_headers_footers: edits.removeRepeatedHeadersFooters,
+    max_generated_items: Number(edits.maxGeneratedItems),
   };
 }
 
@@ -390,6 +467,14 @@ export default function RagPage() {
   const [pipelineArtifacts, setPipelineArtifacts] = useState<PipelineArtifact[]>([]);
   const [pipelineDraft, setPipelineDraft] = useState<PipelineDraftResponse | null>(null);
   const [pipelineDraftEdits, setPipelineDraftEdits] = useState<PipelineDraftEdits>({
+    processorMode: "general",
+    processorModelId: "",
+    processorFailurePolicy: "continue_on_error",
+    extractTitle: true,
+    preserveTables: true,
+    preserveCodeBlocks: true,
+    removeRepeatedHeadersFooters: true,
+    maxGeneratedItems: "20",
     strategy: "recursive_character",
     chunkSize: "",
     chunkOverlap: "",
@@ -414,6 +499,11 @@ export default function RagPage() {
   });
   const [retrievalCapabilities, setRetrievalCapabilities] = useState<RetrievalCapabilities | null>(null);
   const [retrievalCapabilitiesError, setRetrievalCapabilitiesError] = useState("");
+  const [processorCapabilities, setProcessorCapabilities] = useState<ProcessorCapabilities | null>(null);
+  const [processorCapabilitiesError, setProcessorCapabilitiesError] = useState("");
+  const [processorPreviewDocumentId, setProcessorPreviewDocumentId] = useState("");
+  const [processorPreview, setProcessorPreview] = useState<ProcessorPreview | null>(null);
+  const [isPreviewingProcessor, setIsPreviewingProcessor] = useState(false);
   const [pipelinePreflight, setPipelinePreflight] = useState<PipelinePreflightResponse | null>(null);
   const [isSavingPipelineDraft, setIsSavingPipelineDraft] = useState(false);
   const [isPreflightingPipeline, setIsPreflightingPipeline] = useState(false);
@@ -453,6 +543,7 @@ export default function RagPage() {
     document.title = "模镜 - 知识库管理";
     void loadKnowledgeBases();
     void loadRetrievalCapabilities();
+    void loadProcessorCapabilities();
   }, []);
 
   useEffect(() => {
@@ -461,6 +552,8 @@ export default function RagPage() {
       setPipelineAssets([]);
       setPipelineArtifacts([]);
       setPipelineDraft(null);
+      setProcessorPreview(null);
+      setProcessorPreviewDocumentId("");
       setPipelinePreflight(null);
       setPipelineJobs([]);
       setPipelineVersions([]);
@@ -519,6 +612,20 @@ export default function RagPage() {
     }
   }
 
+  async function loadProcessorCapabilities() {
+    setProcessorCapabilitiesError("");
+    try {
+      const response = await fetch("/api/rag/processor-capabilities");
+      if (!response.ok) throw new Error(await readError(response));
+      setProcessorCapabilities((await response.json()) as ProcessorCapabilities);
+    } catch (loadError) {
+      setProcessorCapabilities(null);
+      setProcessorCapabilitiesError(
+        loadError instanceof Error ? loadError.message : "处理器能力状态暂不可用。",
+      );
+    }
+  }
+
   async function loadDocuments(kbId: string) {
     setIsLoadingDocs(true);
     setError("");
@@ -527,6 +634,11 @@ export default function RagPage() {
       if (!response.ok) throw new Error(await readError(response));
       const data = (await response.json()) as DocumentListResponse;
       setDocuments(data.documents);
+      setProcessorPreviewDocumentId((current) => (
+        current && data.documents.some((item) => item.id === current)
+          ? current
+          : data.documents[0]?.id ?? ""
+      ));
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "文档列表加载失败。");
     } finally {
@@ -569,6 +681,7 @@ export default function RagPage() {
       });
       setPipelineDraftEdits(draftEditsFromResponse(draftData));
       setPipelinePreflight(null);
+      setProcessorPreview(null);
       setPipelineDraftNotice("");
     } catch (loadError) {
       setPipelineError(
@@ -622,6 +735,9 @@ export default function RagPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           stages: {
+            stage_processor: {
+              config: processorConfigFromEdits(pipelineDraftEdits),
+            },
             stage_chunker: {
               config: {
                 strategy: pipelineDraftEdits.strategy,
@@ -666,6 +782,34 @@ export default function RagPage() {
       setPipelineError(saveError instanceof Error ? saveError.message : "保存流水线草稿失败。");
     } finally {
       setIsSavingPipelineDraft(false);
+    }
+  }
+
+  async function previewProcessor() {
+    if (!selectedKbId || !processorPreviewDocumentId || isPreviewingProcessor) return;
+    setIsPreviewingProcessor(true);
+    setPipelineError("");
+    setProcessorPreview(null);
+    try {
+      const response = await fetch(
+        `/api/rag/pipeline/draft/${selectedKbId}/processor-preview`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            document_id: processorPreviewDocumentId,
+            processor: processorConfigFromEdits(pipelineDraftEdits),
+          }),
+        },
+      );
+      if (!response.ok) throw new Error(await readError(response));
+      setProcessorPreview((await response.json()) as ProcessorPreview);
+    } catch (previewError) {
+      setPipelineError(
+        previewError instanceof Error ? previewError.message : "文档处理预览失败。",
+      );
+    } finally {
+      setIsPreviewingProcessor(false);
     }
   }
 
@@ -1218,12 +1362,156 @@ export default function RagPage() {
                               <div>
                                 <p className="text-sm font-semibold text-white">草稿配置</p>
                                 <p className="mt-1 text-xs leading-5 text-slate-400">
-                                  仅保存未来配置，不会重跑当前上传、切分或向量化流程。
+                                  执行草稿时固定处理器、分块、Embedding 与检索配置；保存本身不切换活动索引。
                                 </p>
                               </div>
                               <span className="rounded-full border border-white/10 bg-white/[0.06] px-2 py-0.5 text-[11px] font-semibold text-slate-300">
                                 editable
                               </span>
+                            </div>
+                            <div className="mt-4 border-t border-white/10 pt-4">
+                              <div className="flex flex-wrap items-center justify-between gap-2">
+                                <div>
+                                  <p className="text-xs font-semibold text-white">文档处理与生成式索引</p>
+                                  <p className="mt-1 text-[11px] leading-5 text-slate-500">
+                                    General 保留结构正文；QA 索引问题并返回答案原文；Summary 索引摘要并提升来源块。
+                                  </p>
+                                </div>
+                                <span className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold ${
+                                  pipelineDraftEdits.processorMode === "general" || processorCapabilities?.llm_configured
+                                    ? "border-emerald-300/25 bg-emerald-300/10 text-emerald-100"
+                                    : "border-amber-300/25 bg-amber-300/10 text-amber-100"
+                                }`}>
+                                  {pipelineDraftEdits.processorMode === "general"
+                                    ? "本地结构解析"
+                                    : processorCapabilities?.llm_configured ? "模型已就绪" : "模型未配置"}
+                                </span>
+                              </div>
+                              <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                                <label className="block">
+                                  <span className="text-xs font-medium text-slate-300">处理模式</span>
+                                  <select
+                                    className="mt-2 w-full rounded-lg border border-white/10 bg-ink-950/70 px-3 py-2 text-sm text-white outline-none focus:border-hire-300/50"
+                                    onChange={(event) => setPipelineDraftEdits((current) => ({
+                                      ...current,
+                                      processorMode: event.target.value as PipelineDraftEdits["processorMode"],
+                                    }))}
+                                    value={pipelineDraftEdits.processorMode}
+                                  >
+                                    <option value="general">General 结构正文</option>
+                                    <option value="qa">QA 问答索引</option>
+                                    <option value="summary">Summary 摘要索引</option>
+                                  </select>
+                                </label>
+                                <label className="block">
+                                  <span className="text-xs font-medium text-slate-300">失败策略</span>
+                                  <select
+                                    className="mt-2 w-full rounded-lg border border-white/10 bg-ink-950/70 px-3 py-2 text-sm text-white outline-none focus:border-hire-300/50"
+                                    onChange={(event) => setPipelineDraftEdits((current) => ({
+                                      ...current,
+                                      processorFailurePolicy: event.target.value as PipelineDraftEdits["processorFailurePolicy"],
+                                    }))}
+                                    value={pipelineDraftEdits.processorFailurePolicy}
+                                  >
+                                    <option value="continue_on_error">部分成功可生成候选</option>
+                                    <option value="strict">任一失败阻断候选</option>
+                                  </select>
+                                </label>
+                                {pipelineDraftEdits.processorMode !== "general" ? (
+                                  <label className="block">
+                                    <span className="text-xs font-medium text-slate-300">生成模型</span>
+                                    <input
+                                      className="mt-2 w-full rounded-lg border border-white/10 bg-ink-950/70 px-3 py-2 text-sm text-white outline-none focus:border-hire-300/50"
+                                      onChange={(event) => setPipelineDraftEdits((current) => ({ ...current, processorModelId: event.target.value }))}
+                                      placeholder={processorCapabilities?.model_label || "OpenRouter / newAPI 模型 ID"}
+                                      value={pipelineDraftEdits.processorModelId}
+                                    />
+                                  </label>
+                                ) : null}
+                                <label className="block">
+                                  <span className="text-xs font-medium text-slate-300">每文档最多生成项</span>
+                                  <input
+                                    className="mt-2 w-full rounded-lg border border-white/10 bg-ink-950/70 px-3 py-2 text-sm text-white outline-none focus:border-hire-300/50"
+                                    max={50}
+                                    min={1}
+                                    onChange={(event) => setPipelineDraftEdits((current) => ({ ...current, maxGeneratedItems: event.target.value }))}
+                                    type="number"
+                                    value={pipelineDraftEdits.maxGeneratedItems}
+                                  />
+                                </label>
+                              </div>
+                              <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                                {[
+                                  ["extractTitle", "提取标题"],
+                                  ["preserveTables", "保留表格结构"],
+                                  ["preserveCodeBlocks", "保留代码块"],
+                                  ["removeRepeatedHeadersFooters", "移除 PDF 重复页眉页脚"],
+                                ].map(([field, label]) => (
+                                  <label className="flex items-center justify-between gap-3 rounded-md border border-white/10 bg-white/[0.025] px-3 py-2" key={field}>
+                                    <span className="text-[11px] text-slate-300">{label}</span>
+                                    <input
+                                      checked={Boolean(pipelineDraftEdits[field as keyof PipelineDraftEdits])}
+                                      className="h-4 w-4 accent-hire-300"
+                                      onChange={(event) => setPipelineDraftEdits((current) => ({ ...current, [field]: event.target.checked }))}
+                                      type="checkbox"
+                                    />
+                                  </label>
+                                ))}
+                              </div>
+                              <div className="mt-3 text-[11px] leading-5 text-slate-500">
+                                {processorCapabilities ? (
+                                  <p>
+                                    结构块：{processorCapabilities.block_types.join(" / ")} · 生成目标：{processorCapabilities.generation_targets.join(" / ") || "未配置"}
+                                  </p>
+                                ) : (
+                                  <p>{processorCapabilitiesError || "正在读取处理器能力摘要..."}</p>
+                                )}
+                              </div>
+                              <div className="mt-3 flex flex-col gap-2 border-t border-white/10 pt-3 sm:flex-row sm:items-end">
+                                <label className="min-w-0 flex-1">
+                                  <span className="text-xs font-medium text-slate-300">处理预览文档</span>
+                                  <select
+                                    className="mt-2 w-full rounded-lg border border-white/10 bg-ink-950/70 px-3 py-2 text-sm text-white outline-none focus:border-hire-300/50"
+                                    onChange={(event) => setProcessorPreviewDocumentId(event.target.value)}
+                                    value={processorPreviewDocumentId}
+                                  >
+                                    {documents.map((document) => <option key={document.id} value={document.id}>{document.filename}</option>)}
+                                  </select>
+                                </label>
+                                <button
+                                  className="shrink-0 rounded-lg border border-white/10 bg-white/[0.06] px-3 py-2 text-xs font-semibold text-slate-200 transition hover:bg-white/[0.1] disabled:cursor-not-allowed disabled:opacity-50"
+                                  disabled={!processorPreviewDocumentId || isPreviewingProcessor}
+                                  onClick={() => void previewProcessor()}
+                                  type="button"
+                                >
+                                  {isPreviewingProcessor ? "生成预览中..." : "预览处理结果"}
+                                </button>
+                              </div>
+                              {processorPreview ? (
+                                <div className="mt-3 overflow-hidden rounded-lg border border-sky-300/20 bg-sky-300/[0.05]">
+                                  <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/10 px-3 py-2">
+                                    <div>
+                                      <p className="text-xs font-semibold text-white">{processorPreview.title}</p>
+                                      <p className="mt-0.5 text-[10px] text-slate-400">
+                                        {processorPreview.block_count} blocks · {processorPreview.generated_count} generated · {processorPreview.character_count} chars
+                                      </p>
+                                    </div>
+                                    <span className="text-[10px] text-sky-100">只读预览，不写入索引</span>
+                                  </div>
+                                  <div className="max-h-64 space-y-2 overflow-y-auto p-3">
+                                    {(processorPreview.generated_items.length > 0
+                                      ? processorPreview.generated_items.map((item) => ({ id: item.item_id, kind: item.item_type, text: item.index_text, detail: item.context_text }))
+                                      : processorPreview.blocks.map((block) => ({ id: block.block_id, kind: block.page_number ? `${block.kind} · p${block.page_number}` : block.kind, text: block.text, detail: "" }))
+                                    ).map((item) => (
+                                      <div className="border-b border-white/10 pb-2 last:border-0 last:pb-0" key={item.id}>
+                                        <span className="rounded border border-white/10 px-1.5 py-0.5 text-[10px] text-slate-400">{item.kind}</span>
+                                        <p className="mt-1 text-[11px] leading-5 text-slate-200">{item.text}</p>
+                                        {item.detail ? <p className="mt-1 line-clamp-2 text-[10px] leading-4 text-slate-500">{item.detail}</p> : null}
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
+                              ) : null}
                             </div>
                             <div className="mt-4 border-t border-white/10 pt-4">
                               <div className="flex items-center justify-between gap-3">
@@ -1368,7 +1656,7 @@ export default function RagPage() {
                                 数据源锁定为 uploaded_files
                               </div>
                               <div className="rounded-lg border border-white/10 bg-white/[0.03] p-3">
-                                处理器锁定为 local_document_parser
+                                处理器：{pipelineDraftEdits.processorMode} · {pipelineDraftEdits.processorFailurePolicy === "strict" ? "严格阻断" : "逐文档容错"}
                               </div>
                               <div className="rounded-lg border border-white/10 bg-white/[0.03] p-3 sm:col-span-2">
                                 图像理解仍为 planned/disabled，占位展示但不可启用。
@@ -1511,6 +1799,36 @@ export default function RagPage() {
                                   </p>
                                 ) : null}
 
+                                {selectedPipelineJob.warnings?.length > 0 ? (
+                                  <div className="mt-3 rounded-md border border-amber-300/20 bg-amber-300/10 px-3 py-2 text-[11px] leading-5 text-amber-100">
+                                    {selectedPipelineJob.warnings.map((warning) => <p key={warning}>{warning}</p>)}
+                                  </div>
+                                ) : null}
+
+                                {selectedPipelineJob.document_results?.length > 0 ? (
+                                  <div className="mt-3 divide-y divide-white/10 overflow-hidden rounded-md border border-white/10">
+                                    {selectedPipelineJob.document_results.map((result) => (
+                                      <div className="bg-ink-950/25 px-3 py-2" key={result.source_id}>
+                                        <div className="flex flex-wrap items-center justify-between gap-2">
+                                          <span className="min-w-0 truncate text-[11px] font-medium text-slate-200">{result.filename}</span>
+                                          <span className={`rounded border px-1.5 py-0.5 text-[10px] ${
+                                            result.status === "completed"
+                                              ? "border-emerald-300/20 text-emerald-100"
+                                              : result.status === "failed"
+                                                ? "border-rose-300/20 text-rose-100"
+                                                : "border-white/10 text-slate-400"
+                                          }`}>{result.status}</span>
+                                        </div>
+                                        <p className="mt-1 text-[10px] text-slate-500">
+                                          attempt {result.attempt} · {result.block_count} blocks · {result.generated_count} generated · {result.chunk_count} chunks
+                                          {result.duration_ms != null ? ` · ${Math.round(result.duration_ms)} ms` : ""}
+                                        </p>
+                                        {result.error ? <p className="mt-1 text-[10px] leading-4 text-rose-200">{result.error}</p> : null}
+                                      </div>
+                                    ))}
+                                  </div>
+                                ) : null}
+
                                 <div className="mt-3 flex justify-end gap-2">
                                   {selectedPipelineJob.status === "queued" || selectedPipelineJob.status === "running" ? (
                                     <button
@@ -1578,6 +1896,9 @@ export default function RagPage() {
                                       </div>
                                       <p className="mt-1 text-[10px] text-slate-500">
                                         {versionItem.document_count} 文档 · {versionItem.chunk_count} chunks · draft v{versionItem.draft_version}
+                                      </p>
+                                      <p className="mt-1 text-[10px] text-slate-500">
+                                        processor {String(versionItem.processor_profile?.mode ?? "general")} · {versionItem.block_count ?? 0} blocks · QA {versionItem.qa_count ?? 0} · Summary {versionItem.summary_count ?? 0}
                                       </p>
                                       <p className="mt-1 text-[10px] text-slate-500">
                                         index schema v{versionItem.index_schema_version ?? 1} · vector {versionItem.vector_index_ready === false ? "incomplete" : "ready"} · fulltext {versionItem.lexical_index_ready ? "ready" : "legacy/off"}

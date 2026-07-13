@@ -16,6 +16,7 @@ from .rag_service import (
     UnsupportedDocumentError,
 )
 from .pipeline_executor import KnowledgePipelineExecutor
+from .processor_generator import ProcessorGenerationError
 
 
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
@@ -180,6 +181,26 @@ class PipelineDraftUpdateRequest(BaseModel):
     retrieval_profile: RetrievalOptionsPayload | None = None
 
 
+class ProcessorPreviewRequest(BaseModel):
+    document_id: str = Field(min_length=1, max_length=200)
+    processor: dict[str, Any] | None = None
+
+
+class ProcessorPreviewResponse(BaseModel):
+    kb_id: str
+    document_id: str
+    filename: str
+    title: str
+    config: dict[str, Any]
+    character_count: int
+    block_count: int
+    block_counts: dict[str, int]
+    generated_count: int
+    warnings: list[str]
+    blocks: list[dict[str, Any]]
+    generated_items: list[dict[str, Any]]
+
+
 class PipelinePreflightStagePayload(BaseModel):
     id: str
     kind: str
@@ -235,6 +256,21 @@ class PipelineJobSourcePayload(BaseModel):
     asset_id: str | None = None
 
 
+class PipelineDocumentResultPayload(BaseModel):
+    source_id: str
+    filename: str
+    status: str
+    attempt: int = 0
+    block_count: int = 0
+    generated_count: int = 0
+    chunk_count: int = 0
+    qa_count: int = 0
+    summary_count: int = 0
+    warnings: list[str] = Field(default_factory=list)
+    error: str | None = None
+    duration_ms: float | None = None
+
+
 class PipelineJobPayload(BaseModel):
     job_id: str
     kb_id: str
@@ -243,6 +279,7 @@ class PipelineJobPayload(BaseModel):
     status: str
     stages: list[PipelineJobStagePayload]
     sources: list[PipelineJobSourcePayload]
+    document_results: list[PipelineDocumentResultPayload] = Field(default_factory=list)
     source_count: int
     candidate_version_id: str
     candidate_version: int
@@ -250,6 +287,7 @@ class PipelineJobPayload(BaseModel):
     attempt: int
     cancel_requested: bool
     error: str | None = None
+    warnings: list[str] = Field(default_factory=list)
     created_at: float
     updated_at: float
     started_at: float | None = None
@@ -272,6 +310,12 @@ class PipelineVersionPayload(BaseModel):
     source_summary: list[PipelineJobSourcePayload]
     document_count: int
     chunk_count: int
+    block_count: int = 0
+    qa_count: int = 0
+    summary_count: int = 0
+    processor_profile: dict[str, Any] = Field(default_factory=dict)
+    document_results: list[PipelineDocumentResultPayload] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
     job_id: str
     created_at: float
     activated_at: float | None = None
@@ -369,6 +413,11 @@ def set_pipeline_executor_for_tests(executor: KnowledgePipelineExecutor | None) 
 @router.get("/retrieval-capabilities")
 async def get_retrieval_capabilities() -> dict[str, Any]:
     return get_rag_service().retrieval_capabilities()
+
+
+@router.get("/processor-capabilities")
+async def get_processor_capabilities() -> dict[str, Any]:
+    return get_rag_service().processor_capabilities()
 
 
 @router.post("/knowledge_bases", response_model=KnowledgeBasePayload)
@@ -534,6 +583,27 @@ async def update_pipeline_draft(
     except KnowledgeBaseNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except PipelineDraftValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post(
+    "/pipeline/draft/{kb_id}/processor-preview",
+    response_model=ProcessorPreviewResponse,
+)
+async def preview_pipeline_processor(
+    kb_id: str,
+    payload: ProcessorPreviewRequest,
+) -> ProcessorPreviewResponse:
+    try:
+        result = await get_rag_service().preview_pipeline_processor(
+            kb_id,
+            payload.document_id,
+            payload.processor,
+        )
+        return ProcessorPreviewResponse.model_validate(result)
+    except (KnowledgeBaseNotFoundError, DocumentNotFoundError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (PipelineDraftValidationError, ProcessorGenerationError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 

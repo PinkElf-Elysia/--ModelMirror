@@ -4,6 +4,40 @@
 
 最后更新日期：2026-07-13
 
+## 2026-07-13 增量：成熟文档处理与生成式索引
+
+Advanced RAG V2 的候选构建现在先执行结构感知 Processor，再进入分块和向量/FTS5 双索引。TXT、Markdown 和 PDF 统一转换为 `ProcessedDocument / DocumentBlock`；块保留稳定 ID、字符偏移、标题路径和页码。Markdown 表格与代码围栏保持原结构，PDF 可移除跨页重复页眉页脚。
+
+Processor profile 固定进 draft、Job 和 candidate version，核心字段如下：
+
+```json
+{
+  "mode": "general",
+  "model_id": "deepseek/deepseek-chat",
+  "failure_policy": "continue_on_error",
+  "extract_title": true,
+  "preserve_tables": true,
+  "preserve_code_blocks": true,
+  "remove_repeated_headers_footers": true,
+  "max_generated_items": 20
+}
+```
+
+- `general`：结构块进入现有 recursive 或 parent-child 分块。
+- `qa`：严格 JSON 生成问答，索引问题，命中后返回答案与来源段。
+- `summary`：索引文档/章节摘要，命中后返回对应原文上下文。
+
+新增安全 API：
+
+```text
+GET  /api/rag/processor-capabilities
+POST /api/rag/pipeline/draft/{kb_id}/processor-preview
+```
+
+Preview 最多返回 20 个截断结构块或生成项，不写草稿、Job 或索引。Job 按文档保存 `pending / processing / completed / failed`、尝试次数和安全计数。重试只复用 source hash 与 processor profile 均匹配的完成产物，并只重跑失败文档；随后仍从完整成功产物原子重建两类索引。
+
+`continue_on_error` 在至少一个文档成功时允许产生带 warning 的候选；`strict` 遇到任一文档失败都阻止 ready；所有文档失败不会产生候选版本。公开响应、日志和 checkpoint 不包含正文全集、问答全文、prompt、本地路径、embedding 或密钥。
+
 ## 2026-07-13 增量：Advanced RAG Retrieval V2
 
 候选知识版本现在固定分块、Embedding 与检索 profile，并原子构建向量和 SQLite FTS5 双索引。`/rag` 可以配置递归字符分块或父子分段、有序分段标识符、Embedding 模型、全文/向量/混合检索、权重、Top-K、score 阈值、候选倍数和可选 Rerank。
