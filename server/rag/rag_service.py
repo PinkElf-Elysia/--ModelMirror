@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import json
 import mimetypes
 import os
@@ -14,10 +16,12 @@ from typing import Any
 import httpx
 
 from .document_parser import DocumentParseError, parse_document, supported_extensions
+from .document_processor import ProcessedDocument, StructuredDocumentProcessor
 from .embedder import EmbeddingClient, EmbeddingError
 from .lexical_store import LexicalSearchResult, SqliteLexicalStore
 from .reranker import RerankDocument, RerankService
 from .retrieval import RetrievalCandidate, RetrievalConfig, fuse_rankings
+from .processor_generator import ProcessorGenerationService
 from .splitter import DEFAULT_SEPARATORS, TextSplitter
 from .vector_store import SearchResult, VectorChunk, VectorStore, create_vector_store
 
@@ -83,6 +87,8 @@ class RagService:
         lexical_store: SqliteLexicalStore | None = None,
         reranker: RerankService | None = None,
         splitter: TextSplitter | None = None,
+        document_processor: StructuredDocumentProcessor | None = None,
+        processor_generator: ProcessorGenerationService | None = None,
         llm_enabled: bool | None = None,
     ) -> None:
         root = Path(__file__).resolve().parent
@@ -93,6 +99,8 @@ class RagService:
         self.metadata_path = self.storage_dir / "metadata.json"
         self.pipeline_sources_dir = self.storage_dir / "pipeline_sources"
         self.pipeline_sources_dir.mkdir(parents=True, exist_ok=True)
+        self.pipeline_processed_dir = self.storage_dir / "pipeline_processed"
+        self.pipeline_processed_dir.mkdir(parents=True, exist_ok=True)
         self._metadata_lock = threading.RLock()
         self.embedder = embedder or EmbeddingClient()
         self.vector_store = vector_store or create_vector_store(self.storage_dir)
@@ -100,6 +108,8 @@ class RagService:
             self.storage_dir / "lexical_index.sqlite3"
         )
         self.reranker = reranker or RerankService()
+        self.document_processor = document_processor or StructuredDocumentProcessor()
+        self.processor_generator = processor_generator or ProcessorGenerationService()
         self.splitter = splitter or TextSplitter(
             chunk_size=int(os.getenv("RAG_CHUNK_SIZE", "500")),
             chunk_overlap=int(os.getenv("RAG_CHUNK_OVERLAP", "50")),
@@ -185,6 +195,7 @@ class RagService:
                 self.lexical_store.delete_namespace(namespace)
         for job_id in job_ids:
             shutil.rmtree(self.pipeline_sources_dir / job_id, ignore_errors=True)
+            shutil.rmtree(self.pipeline_processed_dir / job_id, ignore_errors=True)
         shutil.rmtree(self.uploads_dir / kb_id, ignore_errors=True)
 
     async def upload_document(self, kb_id: str, filename: str, content: bytes) -> dict[str, Any]:
@@ -333,7 +344,10 @@ class RagService:
                     "summary": "本地解析器已将文档映射为 Artifact。",
                     "metadata": {
                         "artifact_count": len(artifacts),
-                        "parser": "local_document_parser",
+                        "parser": configs["stage_processor"].get(
+                            "parser", "structured_local_parser"
+                        ),
+                        "mode": configs["stage_processor"].get("mode", "general"),
                     },
                 },
                 {
@@ -442,6 +456,9 @@ class RagService:
         document_count = int(stages["stage_data_source"]["metadata"].get("document_count", 0))
         artifact_count = int(stages["stage_processor"]["metadata"].get("artifact_count", 0))
         chunk_count = int(stages["stage_chunker"]["metadata"].get("chunk_count", 0))
+        processor_config = dict(stages["stage_processor"].get("config") or {})
+        processor_mode = str(processor_config.get("mode") or "general")
+        processor_capabilities = self.processor_generator.capabilities()
 
         if document_count == 0:
             warnings.append("当前知识库还没有上传文档，流水线只能预检配置。")
@@ -449,6 +466,10 @@ class RagService:
             warnings.append("当前没有可检索 Artifact，上传文档后处理器才会产生结果。")
         if chunk_count == 0:
             warnings.append("当前没有 KnowledgeChunk，RAG 检索不会返回引用片段。")
+        if processor_mode in {"qa", "summary"} and not processor_capabilities.get(
+            "llm_configured"
+        ):
+            warnings.append("生成式处理模式需要先配置可用的模型网关。")
 
         for stage in draft["stages"]:
             severity = "info"
@@ -462,6 +483,14 @@ class RagService:
                 severity = "warning"
                 status = "empty"
                 summary = "处理器配置有效，但当前没有解析产物。"
+            elif (
+                stage["id"] == "stage_processor"
+                and processor_mode in {"qa", "summary"}
+                and not processor_capabilities.get("llm_configured")
+            ):
+                severity = "warning"
+                status = "blocked"
+                summary = "生成式处理器配置有效，但当前没有可用模型网关。"
             elif stage["id"] == "stage_chunker" and chunk_count == 0:
                 severity = "warning"
                 status = "empty"
@@ -494,6 +523,88 @@ class RagService:
             "document_count": document_count,
             "artifact_count": artifact_count,
             "chunk_count": chunk_count,
+        }
+
+    def processor_capabilities(self) -> dict[str, Any]:
+        generation = self.processor_generator.capabilities()
+        return {
+            "version": "rag-processor-capabilities-v1",
+            "parser": "structured_local_parser",
+            "modes": ["general", "qa", "summary"],
+            "failure_policies": ["continue_on_error", "strict"],
+            "supported_extensions": sorted(supported_extensions()),
+            "block_types": [
+                "heading",
+                "paragraph",
+                "list",
+                "table",
+                "code",
+                "page",
+            ],
+            "llm_configured": bool(generation.get("llm_configured")),
+            "model_label": str(generation.get("model") or ""),
+            "generation_targets": list(generation.get("targets") or []),
+            "limits": {
+                "max_generated_items": 50,
+                "preview_items": 20,
+                "preview_text_characters": 600,
+            },
+        }
+
+    async def preview_pipeline_processor(
+        self,
+        kb_id: str,
+        document_id: str,
+        processor_override: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        metadata = self._read_metadata()
+        self._ensure_kb_exists(metadata, kb_id)
+        document_record = metadata["documents"].get(document_id)
+        if not isinstance(document_record, dict) or document_record.get("kb_id") != kb_id:
+            raise DocumentNotFoundError("文档不存在。")
+        draft = self._pipeline_draft_record(metadata, kb_id)
+        current = dict(draft["stages"]["stage_processor"])
+        config = self._validated_pipeline_stage_config(
+            "stage_processor",
+            current,
+            dict(processor_override or {}),
+        )
+        path = Path(str(document_record.get("stored_path") or ""))
+        if not path.is_file():
+            raise DocumentNotFoundError("文档源文件不可用。")
+        try:
+            processed = await asyncio.to_thread(
+                self.document_processor.process,
+                path,
+                filename=str(document_record["filename"]),
+                source_id=str(document_record["id"]),
+                config=config,
+            )
+        except (DocumentParseError, OSError, UnicodeError) as exc:
+            raise PipelineDraftValidationError(self._safe_pipeline_error(exc)) from exc
+        generated = await self.processor_generator.generate(
+            processed,
+            mode=str(config.get("mode") or "general"),
+            model_id=str(config.get("model_id") or ""),
+            max_items=min(20, int(config.get("max_generated_items", 20))),
+        )
+        return {
+            "kb_id": kb_id,
+            "document_id": document_id,
+            "filename": str(document_record["filename"]),
+            "title": processed.title,
+            "config": config,
+            "character_count": len(processed.text),
+            "block_count": len(processed.blocks),
+            "block_counts": processed.block_counts,
+            "generated_count": len(generated),
+            "warnings": list(processed.warnings),
+            "blocks": [
+                block.payload(max_text=600) for block in processed.blocks[:20]
+            ],
+            "generated_items": [
+                item.payload(max_text=600) for item in generated[:20]
+            ],
         }
 
     def create_pipeline_job(
@@ -551,6 +662,7 @@ class RagService:
                             "filename": str(document["filename"]),
                             "size": int(document.get("size", snapshot.stat().st_size)),
                             "snapshot_key": snapshot.relative_to(self.storage_dir).as_posix(),
+                            "content_hash": self._file_sha256(snapshot),
                             "content_mode": "document",
                         }
                     )
@@ -577,6 +689,7 @@ class RagService:
                             "filename": str(source.get("filename") or f"attachment_{index}.txt"),
                             "size": len(text.encode("utf-8")),
                             "snapshot_key": snapshot.relative_to(self.storage_dir).as_posix(),
+                            "content_hash": self._file_sha256(snapshot),
                             "content_mode": "extracted_text",
                             "xpert_id": key[0],
                             "conversation_id": key[1],
@@ -603,6 +716,34 @@ class RagService:
             candidate_version = max(reserved_numbers, default=0) + 1
             candidate_version_id = f"kpv_{uuid.uuid4().hex}"
             now = time.time()
+            processor_profile = json.loads(
+                json.dumps(draft["stages"]["stage_processor"])
+            )
+            processor_config_hash = self._mapping_sha256(processor_profile)
+            document_results = [
+                {
+                    "source_id": str(source["source_id"]),
+                    "filename": str(source["filename"]),
+                    "status": "pending",
+                    "content_hash": str(source["content_hash"]),
+                    "processor_config_hash": processor_config_hash,
+                    "attempt": 0,
+                    "block_count": 0,
+                    "generated_count": 0,
+                    "chunk_count": 0,
+                    "qa_count": 0,
+                    "summary_count": 0,
+                    "warnings": [],
+                    "error": None,
+                    "duration_ms": None,
+                    "artifact_key": (
+                        self.pipeline_processed_dir
+                        / job_id
+                        / f"source_{index}.json"
+                    ).relative_to(self.storage_dir).as_posix(),
+                }
+                for index, source in enumerate(manifest)
+            ]
             job = {
                 "job_id": job_id,
                 "kb_id": kb_id,
@@ -611,10 +752,12 @@ class RagService:
                 "config_snapshot": {
                     "index_schema_version": int(draft.get("index_schema_version", 2)),
                     "stages": json.loads(json.dumps(draft["stages"])),
+                    "processor_profile": processor_profile,
                     "embedding_profile": json.loads(json.dumps(draft["embedding_profile"])),
                     "retrieval_profile": json.loads(json.dumps(draft["retrieval_profile"])),
                 },
                 "sources": manifest,
+                "document_results": document_results,
                 "status": "queued",
                 "stages": self._new_pipeline_job_stages(),
                 "candidate_version_id": candidate_version_id,
@@ -624,6 +767,8 @@ class RagService:
                 "attempt": 0,
                 "cancel_requested": False,
                 "error": None,
+                "warnings": [],
+                "processor_error": None,
                 "created_at": now,
                 "updated_at": now,
                 "started_at": None,
@@ -662,17 +807,39 @@ class RagService:
             {
                 key: value
                 for key, value in source.items()
-                if key not in {"snapshot_key"}
+                if key not in {"snapshot_key", "content_hash"}
             }
             for source in job.get("sources", [])
+        ]
+        document_results = [
+            {
+                key: json.loads(json.dumps(value))
+                for key, value in result.items()
+                if key
+                not in {
+                    "artifact_key",
+                    "content_hash",
+                    "processor_config_hash",
+                }
+            }
+            for result in job.get("document_results", [])
+            if isinstance(result, dict)
         ]
         return {
             key: json.loads(json.dumps(value))
             for key, value in job.items()
-            if key not in {"candidate_namespace", "config_snapshot", "sources"}
+            if key
+            not in {
+                "candidate_namespace",
+                "config_snapshot",
+                "sources",
+                "document_results",
+                "processor_error",
+            }
         } | {
             "sources": sources,
             "source_count": len(sources),
+            "document_results": document_results,
         }
 
     def claim_next_pipeline_job(self) -> dict[str, Any] | None:
@@ -704,11 +871,18 @@ class RagService:
             for job in metadata["pipeline_jobs"].values():
                 if job.get("status") != "running":
                     continue
-                self.vector_store.delete_knowledge_base(str(job.get("candidate_namespace") or ""))
+                namespace = str(job.get("candidate_namespace") or "")
+                self.vector_store.delete_knowledge_base(namespace)
+                self.lexical_store.delete_namespace(namespace)
                 job["status"] = "queued"
                 job["error"] = "Recovered after process restart."
                 job["updated_at"] = time.time()
                 job["stages"] = self._new_pipeline_job_stages()
+                for result in job.get("document_results", []):
+                    if isinstance(result, dict) and result.get("status") == "processing":
+                        result["status"] = "pending"
+                        result["error"] = "Recovered after process restart."
+                job["processor_error"] = None
                 recovered += 1
             if recovered:
                 self._write_metadata_unlocked(metadata)
@@ -780,6 +954,156 @@ class RagService:
             raise PipelineJobStateError("No pipeline sources produced readable text.")
         return parsed
 
+    async def process_pipeline_job_sources(self, job_id: str) -> list[dict[str, Any]]:
+        """Process each immutable source independently and reuse completed artifacts."""
+
+        job = self.get_pipeline_job(job_id)
+        snapshot = job.get("config_snapshot", {})
+        profile = dict(
+            snapshot.get("processor_profile")
+            or snapshot.get("stages", {}).get("stage_processor")
+            or self._default_pipeline_draft_stages()["stage_processor"]
+        )
+        config_hash = self._mapping_sha256(profile)
+        results_by_source = {
+            str(item.get("source_id")): item
+            for item in job.get("document_results", [])
+            if isinstance(item, dict)
+        }
+        completed: list[dict[str, Any]] = []
+        failed: list[dict[str, Any]] = []
+
+        for source in job.get("sources", []):
+            source_id = str(source["source_id"])
+            result = results_by_source.get(source_id)
+            if result is None:
+                raise PipelineJobStateError(
+                    f"Processor result state is missing for source: {source_id}"
+                )
+            artifact_path = self._pipeline_processed_path(str(result["artifact_key"]))
+            reusable = (
+                result.get("status") == "completed"
+                and result.get("content_hash") == source.get("content_hash")
+                and result.get("processor_config_hash") == config_hash
+                and artifact_path.is_file()
+            )
+            if reusable:
+                try:
+                    artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+                    completed.append({**source, **artifact, "reused": True})
+                    continue
+                except (OSError, json.JSONDecodeError):
+                    reusable = False
+
+            started = time.perf_counter()
+            self._update_pipeline_document_result(
+                job_id,
+                source_id,
+                {
+                    "status": "processing",
+                    "attempt_increment": True,
+                    "error": None,
+                    "warnings": [],
+                },
+            )
+            try:
+                source_path = self._pipeline_snapshot_path(str(source["snapshot_key"]))
+                extracted_text = (
+                    source_path.read_text(encoding="utf-8")
+                    if source.get("content_mode") == "extracted_text"
+                    else None
+                )
+                document = await asyncio.to_thread(
+                    self.document_processor.process,
+                    source_path,
+                    filename=str(source["filename"]),
+                    source_id=source_id,
+                    config=profile,
+                    extracted_text=extracted_text,
+                )
+                if not isinstance(document, ProcessedDocument):
+                    raise PipelineJobStateError(
+                        "Structured processor returned an unsupported document payload."
+                    )
+                mode = str(profile.get("mode") or "general")
+                generated = await self.processor_generator.generate(
+                    document,
+                    mode=mode,
+                    model_id=str(profile.get("model_id") or ""),
+                    max_items=int(profile.get("max_generated_items", 20)),
+                )
+                artifact = {
+                    "processed_document": document.payload(
+                        include_text=True,
+                        max_block_text=None,
+                    ),
+                    "generated_items": [item.payload(max_text=None) for item in generated],
+                }
+                artifact_path.parent.mkdir(parents=True, exist_ok=True)
+                temporary = artifact_path.with_suffix(artifact_path.suffix + ".tmp")
+                temporary.write_text(
+                    json.dumps(artifact, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+                os.replace(temporary, artifact_path)
+                duration_ms = round((time.perf_counter() - started) * 1000, 2)
+                generated_count = len(generated)
+                result_values = {
+                    "status": "completed",
+                    "content_hash": str(source.get("content_hash") or ""),
+                    "processor_config_hash": config_hash,
+                    "block_count": len(document.blocks),
+                    "generated_count": generated_count,
+                    "qa_count": generated_count if mode == "qa" else 0,
+                    "summary_count": generated_count if mode == "summary" else 0,
+                    "warnings": list(document.warnings),
+                    "error": None,
+                    "duration_ms": duration_ms,
+                }
+                self._update_pipeline_document_result(
+                    job_id,
+                    source_id,
+                    result_values,
+                )
+                completed.append({**source, **artifact, "reused": False})
+            except Exception as exc:
+                error = self._safe_pipeline_error(exc)
+                duration_ms = round((time.perf_counter() - started) * 1000, 2)
+                self._update_pipeline_document_result(
+                    job_id,
+                    source_id,
+                    {
+                        "status": "failed",
+                        "error": error,
+                        "duration_ms": duration_ms,
+                    },
+                )
+                failed.append({"source_id": source_id, "error": error})
+
+        failure_policy = str(profile.get("failure_policy") or "continue_on_error")
+        processor_error: str | None = None
+        if not completed:
+            processor_error = "All source documents failed during processing."
+        elif failed and failure_policy == "strict":
+            processor_error = (
+                f"Strict processor policy blocked the candidate after {len(failed)} "
+                "document failure(s)."
+            )
+        warnings = [
+            f"{len(failed)} document(s) failed and were excluded from this candidate."
+        ] if failed and processor_error is None else []
+
+        def finish(job_record: dict[str, Any]) -> None:
+            job_record["processor_error"] = processor_error
+            job_record["warnings"] = warnings
+
+        self._update_pipeline_job(job_id, finish)
+        return completed
+
+    def processor_gate_error(self, job_id: str) -> str | None:
+        value = self.get_pipeline_job(job_id).get("processor_error")
+        return str(value) if value else None
+
     def pipeline_job_cancel_requested(self, job_id: str) -> bool:
         return bool(self.get_pipeline_job(job_id).get("cancel_requested"))
 
@@ -820,8 +1144,21 @@ class RagService:
                     "error": None,
                     "started_at": None,
                     "completed_at": None,
+                    "processor_error": None,
+                    "warnings": [],
                 }
             )
+            for result in job.get("document_results", []):
+                if not isinstance(result, dict):
+                    continue
+                if result.get("status") != "completed":
+                    result.update(
+                        {
+                            "status": "pending",
+                            "error": None,
+                            "duration_ms": None,
+                        }
+                    )
 
         job = self._update_pipeline_job(job_id, update)
         return self.pipeline_job_payload(job)
@@ -851,6 +1188,28 @@ class RagService:
 
         def update(metadata: dict[str, Any], job: dict[str, Any]) -> None:
             now = time.time()
+            processor_profile = json.loads(
+                json.dumps(
+                    job["config_snapshot"].get("processor_profile")
+                    or job["config_snapshot"].get("stages", {}).get(
+                        "stage_processor", {}
+                    )
+                )
+            )
+            document_results = [
+                {
+                    key: json.loads(json.dumps(value))
+                    for key, value in result.items()
+                    if key
+                    not in {
+                        "artifact_key",
+                        "content_hash",
+                        "processor_config_hash",
+                    }
+                }
+                for result in job.get("document_results", [])
+                if isinstance(result, dict)
+            ]
             version = {
                 "version_id": str(job["candidate_version_id"]),
                 "kb_id": str(job["kb_id"]),
@@ -873,12 +1232,24 @@ class RagService:
                     {
                         key: value
                         for key, value in source.items()
-                        if key not in {"snapshot_key"}
+                        if key not in {"snapshot_key", "content_hash"}
                     }
                     for source in job["sources"]
                 ],
+                "processor_profile": processor_profile,
+                "document_results": document_results,
                 "document_count": document_count,
                 "chunk_count": chunk_count,
+                "block_count": sum(
+                    int(item.get("block_count", 0)) for item in document_results
+                ),
+                "qa_count": sum(
+                    int(item.get("qa_count", 0)) for item in document_results
+                ),
+                "summary_count": sum(
+                    int(item.get("summary_count", 0)) for item in document_results
+                ),
+                "warnings": list(job.get("warnings") or []),
                 "job_id": job_id,
                 "created_at": now,
                 "activated_at": None,
@@ -1028,6 +1399,84 @@ class RagService:
         if path != root and root not in path.parents:
             raise PipelineJobStateError("Invalid pipeline source snapshot path.")
         return path
+
+    def _pipeline_processed_path(self, artifact_key: str) -> Path:
+        path = (self.storage_dir / artifact_key).resolve()
+        root = self.pipeline_processed_dir.resolve()
+        if path != root and root not in path.parents:
+            raise PipelineJobStateError("Invalid pipeline processor artifact path.")
+        return path
+
+    def _update_pipeline_document_result(
+        self,
+        job_id: str,
+        source_id: str,
+        values: dict[str, Any],
+    ) -> None:
+        def update(job: dict[str, Any]) -> None:
+            result = next(
+                (
+                    item
+                    for item in job.get("document_results", [])
+                    if isinstance(item, dict) and str(item.get("source_id")) == source_id
+                ),
+                None,
+            )
+            if result is None:
+                raise PipelineJobStateError(
+                    f"Processor result state is missing for source: {source_id}"
+                )
+            attempt_increment = bool(values.get("attempt_increment"))
+            result.update(
+                {
+                    key: value
+                    for key, value in values.items()
+                    if key != "attempt_increment"
+                }
+            )
+            if attempt_increment:
+                result["attempt"] = int(result.get("attempt", 0)) + 1
+
+        self._update_pipeline_job(job_id, update)
+
+    def update_pipeline_document_chunk_counts(
+        self,
+        job_id: str,
+        counts: dict[str, int],
+    ) -> None:
+        def update(job: dict[str, Any]) -> None:
+            for result in job.get("document_results", []):
+                if not isinstance(result, dict):
+                    continue
+                source_id = str(result.get("source_id") or "")
+                if source_id in counts:
+                    result["chunk_count"] = int(counts[source_id])
+
+        self._update_pipeline_job(job_id, update)
+
+    def _file_sha256(self, path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def _mapping_sha256(self, value: dict[str, Any]) -> str:
+        encoded = json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    def _safe_pipeline_error(self, exc: Exception) -> str:
+        value = str(exc).strip() or exc.__class__.__name__
+        for root in (self.storage_dir, self.uploads_dir):
+            value = value.replace(str(root), "[local-path]")
+            value = value.replace(str(root.resolve()), "[local-path]")
+        value = re.sub(r"(?i)(bearer\s+|api[_-]?key[=:]\s*)\S+", r"\1[redacted]", value)
+        return value[:500]
 
     def list_pipeline_artifact_chunks(self, artifact_id: str) -> list[dict[str, Any]]:
         """Return chunk metadata for one artifact without exposing embeddings."""
@@ -1423,7 +1872,15 @@ class RagService:
                 "allowed_extensions": sorted(supported_extensions()),
             },
             "stage_processor": {
-                "parser": "local_document_parser",
+                "parser": "structured_local_parser",
+                "mode": "general",
+                "model_id": self.processor_generator.default_model(),
+                "failure_policy": "continue_on_error",
+                "extract_title": True,
+                "preserve_tables": True,
+                "preserve_code_blocks": True,
+                "remove_repeated_headers_footers": True,
+                "max_generated_items": 20,
             },
             "stage_chunker": {
                 "strategy": "recursive_character",
@@ -1516,10 +1973,74 @@ class RagService:
             return config
 
         if stage_id == "stage_processor":
-            parser = str(patch.get("parser", config.get("parser", "local_document_parser")))
-            if parser != "local_document_parser":
-                raise PipelineDraftValidationError("processor.parser must be local_document_parser.")
-            config["parser"] = parser
+            parser = str(
+                patch.get("parser", config.get("parser", "structured_local_parser"))
+            )
+            if parser == "local_document_parser":
+                parser = "structured_local_parser"
+            if parser != "structured_local_parser":
+                raise PipelineDraftValidationError(
+                    "processor.parser must be structured_local_parser."
+                )
+            mode = str(patch.get("mode", config.get("mode", "general"))).strip()
+            if mode not in {"general", "qa", "summary"}:
+                raise PipelineDraftValidationError(
+                    "processor.mode must be general, qa, or summary."
+                )
+            failure_policy = str(
+                patch.get(
+                    "failure_policy",
+                    config.get("failure_policy", "continue_on_error"),
+                )
+            ).strip()
+            if failure_policy not in {"continue_on_error", "strict"}:
+                raise PipelineDraftValidationError(
+                    "processor.failure_policy must be continue_on_error or strict."
+                )
+            model_id = str(
+                patch.get(
+                    "model_id",
+                    config.get("model_id", self.processor_generator.default_model()),
+                )
+                or ""
+            ).strip()
+            if len(model_id) > 200 or (mode in {"qa", "summary"} and not model_id):
+                raise PipelineDraftValidationError("processor.model_id is invalid.")
+            max_generated_items = self._coerce_int(
+                patch.get(
+                    "max_generated_items",
+                    config.get("max_generated_items", 20),
+                ),
+                "processor.max_generated_items",
+            )
+            if not 1 <= max_generated_items <= 50:
+                raise PipelineDraftValidationError(
+                    "processor.max_generated_items must be between 1 and 50."
+                )
+            bool_fields = (
+                "extract_title",
+                "preserve_tables",
+                "preserve_code_blocks",
+                "remove_repeated_headers_footers",
+            )
+            bool_values: dict[str, bool] = {}
+            for field_name in bool_fields:
+                value = patch.get(field_name, config.get(field_name, True))
+                if not isinstance(value, bool):
+                    raise PipelineDraftValidationError(
+                        f"processor.{field_name} must be a boolean."
+                    )
+                bool_values[field_name] = value
+            config.update(
+                {
+                    "parser": parser,
+                    "mode": mode,
+                    "model_id": model_id,
+                    "failure_policy": failure_policy,
+                    "max_generated_items": max_generated_items,
+                    **bool_values,
+                }
+            )
             return config
 
         if stage_id == "stage_chunker":
