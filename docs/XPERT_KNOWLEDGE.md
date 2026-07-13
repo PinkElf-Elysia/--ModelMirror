@@ -1,0 +1,68 @@
+# Xpert Knowledge Pipeline Runtime
+
+最后更新日期：2026-07-12
+
+## 目标
+
+Knowledge Pipeline 把安全草稿配置推进为可恢复的本地索引构建任务，同时保持现有上传和查询入口兼容。核心契约是：**构建候选、隔离预览、人工激活、随时回滚**。
+
+## 数据模型
+
+- Pipeline Draft：知识库级可编辑配置，包含递增 `version`、分块大小和重叠量。
+- Pipeline Job：固定 draft version、源快照、五段执行状态、尝试次数、错误摘要和 candidate version。
+- Pipeline Version：不可变候选索引摘要，记录版本号、来源、文档数、chunk 数和激活时间。
+- Active Version Pointer：每个知识库最多一个 active version ID；切换指针不重写历史候选。
+
+Job 状态为 `queued / running / succeeded / failed / cancelled`。Stage 固定为 `load / process / chunk / embed / store`。
+
+## 数据源契约
+
+执行请求可以包含知识库 document IDs 和最多 5 个 Xpert 文件引用。`source_document_ids=null` 表示使用当前知识库全部文档，空数组表示不选择知识库文档。Xpert 文件必须携带所属 Xpert、conversation 和 asset ID，并且只能由对应 `XpertContextStore` 解析。
+
+创建 Job 时立即完成去重和私有快照。后续源文件归档不会破坏已创建 Job；跨 Xpert 伪造引用会被拒绝。公开响应只返回文件名、来源类型、大小和 ID，不返回快照路径或正文。
+
+## 执行与恢复
+
+`KnowledgePipelineExecutor` 在 FastAPI 启动时运行，单进程内一次只处理一个 Job。服务重启时，遗留 `running` Job 回到 `queued`。每个阶段开始和完成都会更新持久化 metadata，并写入 `knowledge_pipeline` RunRegistry checkpoint。
+
+RunRegistry 是内存态。若持久化 Job 中的旧 `run_id` 在新进程不存在，executor 会创建 recovery run，并记录 `recovery_of_run_id`。失败或取消会删除候选 namespace；active version 不受影响。
+
+## 预览、激活与回滚
+
+1. 执行成功后产生 `ready` candidate version。
+2. 使用版本 query API 对候选 namespace 做隔离检索。
+3. 用户确认后调用 activate API，原子切换 active pointer。
+4. 激活任意历史 ready version 即完成回滚。
+
+普通 `/api/rag/query`、Chat RAG、`knowledge_retrieval` 和 `knowledge_citation` 都由 `RagService` 解析 active version。旧知识库尚未激活候选时继续查询 legacy namespace。
+
+## API
+
+- `POST /api/rag/pipeline/draft/{kb_id}/execute`
+- `GET /api/rag/pipeline/jobs`
+- `GET /api/rag/pipeline/jobs/{job_id}`
+- `POST /api/rag/pipeline/jobs/{job_id}/cancel`
+- `POST /api/rag/pipeline/jobs/{job_id}/retry`
+- `GET /api/rag/pipeline/versions`
+- `GET /api/rag/pipeline/versions/{version_id}`
+- `POST /api/rag/pipeline/versions/{version_id}/query`
+- `POST /api/rag/pipeline/versions/{version_id}/activate`
+
+## 安全边界
+
+- 不自动激活候选索引。
+- 不返回本地绝对路径、vector namespace、embedding、完整 chunk/附件正文、prompt、工具输出或密钥。
+- Checkpoint 只记录 ID、状态、数量、长度和错误摘要。
+- 图像理解仍为 disabled/planned，不执行视觉模型。
+- 当前只保证单后端进程内一致性，不承诺多进程或分布式任务领取。
+
+## 验收
+
+```bash
+python -m pytest server/tests/test_rag_pipeline.py -q
+python -m pytest server/tests/test_rag_pipeline_execute.py -q
+python -m pytest server/tests/test_rag_integration.py -q
+python -m pytest server/tests/test_workflow_knowledge_citation_node.py -q
+```
+
+人工验收必须覆盖候选预览、首次激活、第二版本切换、历史版本回滚、失败/取消不污染 active index，以及容器重启后的 Job/Version 恢复。

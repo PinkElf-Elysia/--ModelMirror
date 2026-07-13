@@ -29,9 +29,19 @@ except ModuleNotFoundError:
     from api.dify_proxy import router as dify_router
 
 try:
-    from server.rag.api import get_rag_service, router as rag_router
+    from server.rag.api import (
+        configure_pipeline_executor,
+        get_pipeline_executor,
+        get_rag_service,
+        router as rag_router,
+    )
 except ModuleNotFoundError:
-    from rag.api import get_rag_service, router as rag_router
+    from rag.api import (
+        configure_pipeline_executor,
+        get_pipeline_executor,
+        get_rag_service,
+        router as rag_router,
+    )
 
 try:
     from server.skills.api import router as skills_router
@@ -360,6 +370,7 @@ agent_task_store = AgentTaskStore(
 )
 goal_store = GoalStore(storage_dir=AGENT_TASK_STORAGE_DIR or None)
 run_registry = RunRegistry()
+knowledge_pipeline_executor = configure_pipeline_executor(run_registry=run_registry)
 handoff_executor: HandoffExecutor | None = None
 goal_coordinator: GoalCoordinator | None = None
 runtime_capabilities.register(
@@ -5908,6 +5919,7 @@ async def list_runtime_runs(
         "agent_handoff",
         "chat",
         "knowledge_citation",
+        "knowledge_pipeline",
     }
     valid_statuses = {"pending", "running", "completed", "failed", "cancelled"}
     if run_type is not None and run_type not in valid_run_types:
@@ -6392,12 +6404,14 @@ async def team_chat(payload: TeamChatRequest, request: Request):
 @app.on_event("startup")
 async def start_mcp_ttl_cleanup() -> None:
     mcp_manager.start_ttl_cleanup(on_cleanup=tool_registry.unregister_sessions)
+    get_pipeline_executor().start()
     get_handoff_executor().start()
     get_goal_coordinator().start()
 
 
 @app.on_event("shutdown")
 async def shutdown_mcp_sessions() -> None:
+    await get_pipeline_executor().stop()
     if goal_coordinator is not None:
         await goal_coordinator.stop()
     if handoff_executor is not None:

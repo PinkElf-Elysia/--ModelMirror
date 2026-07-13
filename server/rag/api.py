@@ -9,15 +9,20 @@ from .rag_service import (
     DocumentNotFoundError,
     KnowledgeBaseNotFoundError,
     PipelineDraftValidationError,
+    PipelineJobNotFoundError,
+    PipelineJobStateError,
+    PipelineVersionNotFoundError,
     RagService,
     UnsupportedDocumentError,
 )
+from .pipeline_executor import KnowledgePipelineExecutor
 
 
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 
 router = APIRouter(prefix="/api/rag", tags=["rag"])
 _rag_service: RagService | None = None
+_pipeline_executor: KnowledgePipelineExecutor | None = None
 
 
 class KnowledgeBaseCreateRequest(BaseModel):
@@ -165,6 +170,100 @@ class PipelineDraftPreflightResponse(BaseModel):
     chunk_count: int
 
 
+class XpertFileReference(BaseModel):
+    xpert_id: str = Field(min_length=1, max_length=200)
+    conversation_id: str = Field(min_length=1, max_length=200)
+    asset_id: str = Field(min_length=1, max_length=200)
+
+
+class PipelineExecuteRequest(BaseModel):
+    draft_version: int = Field(ge=1)
+    source_document_ids: list[str] | None = None
+    xpert_file_refs: list[XpertFileReference] = Field(default_factory=list, max_length=5)
+
+
+class PipelineJobStagePayload(BaseModel):
+    id: str
+    title: str
+    status: str
+    progress: int
+    item_count: int | None = None
+    started_at: float | None = None
+    completed_at: float | None = None
+    error: str | None = None
+
+
+class PipelineJobSourcePayload(BaseModel):
+    source_id: str
+    source_kind: str
+    filename: str
+    size: int
+    content_mode: str
+    xpert_id: str | None = None
+    conversation_id: str | None = None
+    asset_id: str | None = None
+
+
+class PipelineJobPayload(BaseModel):
+    job_id: str
+    kb_id: str
+    draft_id: str
+    draft_version: int
+    status: str
+    stages: list[PipelineJobStagePayload]
+    sources: list[PipelineJobSourcePayload]
+    source_count: int
+    candidate_version_id: str
+    candidate_version: int
+    run_id: str | None = None
+    attempt: int
+    cancel_requested: bool
+    error: str | None = None
+    created_at: float
+    updated_at: float
+    started_at: float | None = None
+    completed_at: float | None = None
+
+
+class PipelineJobListResponse(BaseModel):
+    jobs: list[PipelineJobPayload]
+    job_count: int
+
+
+class PipelineVersionPayload(BaseModel):
+    version_id: str
+    kb_id: str
+    version: int
+    status: str
+    active: bool
+    draft_id: str
+    draft_version: int
+    source_summary: list[PipelineJobSourcePayload]
+    document_count: int
+    chunk_count: int
+    job_id: str
+    created_at: float
+    activated_at: float | None = None
+
+
+class PipelineVersionListResponse(BaseModel):
+    versions: list[PipelineVersionPayload]
+    version_count: int
+    active_version_id: str | None = None
+
+
+class PipelineVersionQueryRequest(BaseModel):
+    question: str = Field(min_length=1, max_length=20_000)
+    top_k: int = Field(default=4, ge=1, le=10)
+
+
+class PipelineVersionQueryResponse(BaseModel):
+    version_id: str
+    version: int
+    answer: str
+    sources: list[RagSourcePayload]
+
+
 class CitationAnchorPayload(BaseModel):
     citation_id: str
     chunk_id: str
@@ -199,8 +298,32 @@ def get_rag_service() -> RagService:
 def set_rag_service_for_tests(service: RagService | None) -> None:
     """Replace the global RAG service in tests."""
 
-    global _rag_service
+    global _rag_service, _pipeline_executor
     _rag_service = service
+    _pipeline_executor = None
+
+
+def configure_pipeline_executor(*, run_registry: Any | None = None) -> KnowledgePipelineExecutor:
+    """Configure the process-wide pipeline executor after shared runtime setup."""
+
+    global _pipeline_executor
+    _pipeline_executor = KnowledgePipelineExecutor(
+        get_rag_service(),
+        run_registry=run_registry,
+    )
+    return _pipeline_executor
+
+
+def get_pipeline_executor() -> KnowledgePipelineExecutor:
+    global _pipeline_executor
+    if _pipeline_executor is None:
+        _pipeline_executor = KnowledgePipelineExecutor(get_rag_service())
+    return _pipeline_executor
+
+
+def set_pipeline_executor_for_tests(executor: KnowledgePipelineExecutor | None) -> None:
+    global _pipeline_executor
+    _pipeline_executor = executor
 
 
 @router.post("/knowledge_bases", response_model=KnowledgeBasePayload)
@@ -375,6 +498,198 @@ async def preflight_pipeline_draft(kb_id: str) -> PipelineDraftPreflightResponse
             chunk_count=int(preflight["chunk_count"]),
         )
     except KnowledgeBaseNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/pipeline/draft/{kb_id}/execute", response_model=PipelineJobPayload)
+async def execute_pipeline_draft(
+    kb_id: str,
+    payload: PipelineExecuteRequest,
+) -> PipelineJobPayload:
+    xpert_sources: list[dict[str, Any]] = []
+    try:
+        if payload.xpert_file_refs:
+            try:
+                from server.xperts import get_xpert_context_store
+            except ModuleNotFoundError:
+                from xperts import get_xpert_context_store
+
+            context_store = get_xpert_context_store()
+            seen: set[tuple[str, str, str]] = set()
+            for reference in payload.xpert_file_refs:
+                key = (reference.xpert_id, reference.conversation_id, reference.asset_id)
+                if key in seen:
+                    continue
+                seen.add(key)
+                asset = context_store.get_file(
+                    reference.xpert_id,
+                    reference.asset_id,
+                    conversation_id=reference.conversation_id,
+                    include_archived=True,
+                )
+                xpert_sources.append(
+                    {
+                        "xpert_id": reference.xpert_id,
+                        "conversation_id": reference.conversation_id,
+                        "asset_id": reference.asset_id,
+                        "filename": asset.filename,
+                        "text": context_store.read_file_text(asset),
+                    }
+                )
+
+        job = get_rag_service().create_pipeline_job(
+            kb_id,
+            draft_version=payload.draft_version,
+            source_document_ids=payload.source_document_ids,
+            xpert_sources=xpert_sources,
+        )
+        get_pipeline_executor().notify()
+        return PipelineJobPayload.model_validate(job)
+    except KnowledgeBaseNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except DocumentNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PipelineJobStateError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except PipelineDraftValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        if exc.__class__.__name__ in {
+            "XpertContextNotFoundError",
+            "XpertContextValidationError",
+        }:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise
+
+
+@router.get("/pipeline/jobs", response_model=PipelineJobListResponse)
+async def list_pipeline_jobs(
+    kb_id: str | None = None,
+    status: str | None = None,
+    limit: int = 50,
+) -> PipelineJobListResponse:
+    valid_statuses = {"queued", "running", "succeeded", "failed", "cancelled"}
+    if status is not None and status not in valid_statuses:
+        raise HTTPException(status_code=400, detail="Invalid pipeline job status.")
+    try:
+        jobs = get_rag_service().list_pipeline_jobs(
+            kb_id=kb_id,
+            status=status,
+            limit=limit,
+        )
+        return PipelineJobListResponse(
+            jobs=[PipelineJobPayload.model_validate(item) for item in jobs],
+            job_count=len(jobs),
+        )
+    except KnowledgeBaseNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/pipeline/jobs/{job_id}", response_model=PipelineJobPayload)
+async def get_pipeline_job(job_id: str) -> PipelineJobPayload:
+    try:
+        job = get_rag_service().get_pipeline_job(job_id)
+        return PipelineJobPayload.model_validate(get_rag_service().pipeline_job_payload(job))
+    except PipelineJobNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/pipeline/jobs/{job_id}/cancel", response_model=PipelineJobPayload)
+async def cancel_pipeline_job(job_id: str) -> PipelineJobPayload:
+    try:
+        job = get_rag_service().request_pipeline_job_cancel(job_id)
+        get_pipeline_executor().notify()
+        return PipelineJobPayload.model_validate(job)
+    except PipelineJobNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PipelineJobStateError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/pipeline/jobs/{job_id}/retry", response_model=PipelineJobPayload)
+async def retry_pipeline_job(job_id: str) -> PipelineJobPayload:
+    try:
+        job = get_rag_service().retry_pipeline_job(job_id)
+        get_pipeline_executor().notify()
+        return PipelineJobPayload.model_validate(job)
+    except PipelineJobNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PipelineJobStateError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.get("/pipeline/versions", response_model=PipelineVersionListResponse)
+async def list_pipeline_versions(kb_id: str) -> PipelineVersionListResponse:
+    try:
+        versions = get_rag_service().list_pipeline_versions(kb_id)
+        active = next((item["version_id"] for item in versions if item["active"]), None)
+        return PipelineVersionListResponse(
+            versions=[PipelineVersionPayload.model_validate(item) for item in versions],
+            version_count=len(versions),
+            active_version_id=active,
+        )
+    except KnowledgeBaseNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/pipeline/versions/{version_id}", response_model=PipelineVersionPayload)
+async def get_pipeline_version(version_id: str) -> PipelineVersionPayload:
+    try:
+        version = get_rag_service().get_pipeline_version(version_id)
+        active = get_rag_service().get_active_pipeline_version(str(version["kb_id"]))
+        return PipelineVersionPayload.model_validate(
+            get_rag_service().pipeline_version_payload(
+                version,
+                active_id=active["version_id"] if active else None,
+            )
+        )
+    except PipelineVersionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post(
+    "/pipeline/versions/{version_id}/query",
+    response_model=PipelineVersionQueryResponse,
+)
+async def query_pipeline_version(
+    version_id: str,
+    payload: PipelineVersionQueryRequest,
+) -> PipelineVersionQueryResponse:
+    try:
+        result = await get_rag_service().query_pipeline_version(
+            version_id,
+            payload.question,
+            top_k=payload.top_k,
+        )
+        version = get_rag_service().get_pipeline_version(version_id)
+        await get_pipeline_executor().record_job_event(
+            str(version["job_id"]),
+            event_type="knowledge_pipeline.version_previewed",
+            title="Candidate index previewed",
+            summary=f"Preview returned {len(result.get('sources', []))} sources.",
+            metadata={"version_id": version_id, "source_count": len(result.get("sources", []))},
+        )
+        return PipelineVersionQueryResponse.model_validate(result)
+    except PipelineVersionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/pipeline/versions/{version_id}/activate", response_model=PipelineVersionPayload)
+async def activate_pipeline_version(version_id: str) -> PipelineVersionPayload:
+    try:
+        version = get_rag_service().activate_pipeline_version(version_id)
+        stored = get_rag_service().get_pipeline_version(version_id)
+        await get_pipeline_executor().record_job_event(
+            str(stored["job_id"]),
+            event_type="knowledge_pipeline.version_activated",
+            title="Knowledge index activated",
+            summary=f"Version v{version['version']} is now active.",
+            metadata={"version_id": version_id, "version": version["version"]},
+        )
+        return PipelineVersionPayload.model_validate(version)
+    except PipelineVersionNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
