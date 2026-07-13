@@ -9,6 +9,7 @@ from typing import Any, Literal
 RuntimeRunType = Literal[
     "workflow",
     "xpert",
+    "xpert_app",
     "goal",
     "workflow_agent",
     "agent_task",

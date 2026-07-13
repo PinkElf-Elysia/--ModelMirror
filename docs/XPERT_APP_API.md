@@ -1,0 +1,56 @@
+# Xpert App 与兼容 API
+
+最后更新日期：2026-07-13
+
+## 能力边界
+
+已发布 Xpert 可以创建一个未列出 App，并显式部署任意不可变 `XpertVersion`。App 固定运行部署版本；编辑草稿或发布新版本不会改变线上行为，重新部署历史版本即完成回滚。
+
+公开 App 不允许客户端替换 workflow、模型或版本，也不开放附件、Goal 和记忆候选写入。工具、Handoff 与 Xpert 记忆默认关闭，必须由管理端显式开启。工具调用还要求工作流包含并先执行 `tool_policy`；策略未加载时默认拒绝。
+
+## 访问凭据
+
+- 分享链接格式：`/apps/{slug}#access={share_token}`。Fragment 不进入 HTTP 请求日志，前端读取后立即从地址栏移除，并通过 `X-ModelMirror-App-Token` 发送。
+- 机器调用使用 `Authorization: Bearer <api_key>`。
+- 分享 token 与 API key 仅在创建或轮换时显示一次。服务端只持久化 SHA-256 哈希、前缀和状态，比较使用恒定时间函数。
+- API key 可以命名、设置过期时间和撤销。分享 token 轮换后旧链接立即失效。
+
+默认限额为 30 RPM、每日 1000 次、最大并发 2。每日计数持久化；RPM 与并发计数属于单进程内存状态。超限返回 `429`、OpenAI 风格 error 对象和 `Retry-After`。
+
+## 管理接口
+
+```text
+POST   /api/xperts/{xpert_id}/app
+GET    /api/xperts/{xpert_id}/app
+PATCH  /api/xpert-apps/{app_id}
+POST   /api/xpert-apps/{app_id}/deploy
+GET    /api/xpert-apps/{app_id}/deployments
+POST   /api/xpert-apps/{app_id}/disable
+POST   /api/xpert-apps/{app_id}/share-token/rotate
+GET    /api/xpert-apps/{app_id}/keys
+POST   /api/xpert-apps/{app_id}/keys
+DELETE /api/xpert-apps/{app_id}/keys/{key_id}
+```
+
+管理接口属于当前可信本地管理面。外网部署必须由反向代理保护 `/api/xperts` 与 `/api/xpert-apps`。
+
+## 公开接口
+
+```text
+GET  /api/apps/{app_slug}/manifest
+POST /api/v1/xpert-apps/{app_slug}/chat/completions
+```
+
+`chat/completions` 接受最多 20 条 `system/user/assistant` 消息。最后一条必须是 `user`；历史正文最多 40,000 字符，当前输入最多 20,000 字符。客户端 `system` 内容只作为不可信历史上下文，不能覆盖已发布 Xpert 的角色提示词。
+
+非流式响应使用 `choices[0].message.content`。流式响应使用 `choices[0].delta.content`、结束 chunk 与 `[DONE]`。公开响应只转发最终输出，不暴露内部变量、工具结果、节点 trace 或完整 checkpoint。
+
+## 运行观测
+
+每次调用创建 `run_type=xpert_app` 的 RunRegistry 记录，metadata 仅保存 App ID、slug、固定版本、deployment revision、访问类型和凭据前缀。节点子 run 与安全 checkpoint 保持可观测，但不得保存完整 prompt、工具输出、密钥、本地路径或 embedding。
+
+## 回退
+
+1. 在 Studio 中重新部署历史版本。
+2. 如需立即停止访问，停用 App 或轮换分享 token、撤销 API key。
+3. 代码回退后重新构建容器，确认 Xpert Store 与 App Store 挂载仍存在。

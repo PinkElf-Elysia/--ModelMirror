@@ -2,7 +2,7 @@
 
 模镜是一个 AI 资源浏览与协作平台，面向模型、智能体、MCP、Skill、提示词、工作流、RAG 和聊天场景。项目主题是“AI 牛马招聘会”：把模型与智能体看成候选人，把工具和能力看成岗位技能，让用户可以快速发现、比较、调用和组合 AI 能力。
 
-最后更新日期：2026-06-17
+最后更新日期：2026-07-13
 维护人：模镜团队
 
 ## 当前能力
@@ -15,6 +15,8 @@
 - Skill：Skill 安装、管理和聊天注入。
 - 工作流：`/workflow` 使用经典自研 React Flow 画布；`/workflow-native` 保留实验线。
 - RAG：`/rag` 使用本地 RAG 资料库，支持文档上传、切分、向量检索和聊天引用。
+- Xpert Studio：创建草稿、发布不可变版本，并通过 Goal、Handoff、文件、记忆与 Knowledge Pipeline 组合执行。
+- Xpert App/API：把已发布版本固定部署为未列出分享 App，并提供带密钥、配额和回滚的 OpenAI 兼容接口。
 - newAPI：`/settings` 以内嵌 iframe 接入 newAPI 控制台，后端可优先走 OpenAI 兼容网关。
 
 ## 技术栈
@@ -56,6 +58,8 @@ docker compose -p modelmirror up -d --build
 http://localhost:5173/models
 http://localhost:5173/chat/recraft%2Frecraft-v3
 http://localhost:5173/workflow
+http://localhost:5173/agents/studio
+http://localhost:5173/agents/goals
 http://localhost:5173/rag
 http://localhost:5173/settings
 http://localhost:3000

@@ -2,7 +2,7 @@
 
 这里是 ModelMirror 的工程文档入口。文档目标是让新成员、人类开发者和其他大模型在不依赖聊天上下文的情况下理解项目结构、运行方式和关键约束。
 
-最后更新日期：2026-06-17
+最后更新日期：2026-07-13
 维护人：模镜团队
 
 ## 文档目录
@@ -17,6 +17,8 @@
 | [DEPLOYMENT.md](./DEPLOYMENT.md) | 开发、生产、Docker、日志和运维建议。 |
 | [MCP_INTEGRATION.md](./MCP_INTEGRATION.md) | MCP stdio 集成、REST API、前端交互和测试指南。 |
 | [RAG_INTEGRATION.md](./RAG_INTEGRATION.md) | 本地 RAG 资料库、文档上传、向量检索、聊天引用和测试指南。 |
+| [XPERT_RUNTIME.md](./XPERT_RUNTIME.md) | Xpert 发布、Goal、Handoff、文件记忆、Knowledge Execute 与运行契约。 |
+| [XPERT_APP_API.md](./XPERT_APP_API.md) | Xpert App 部署、分享、兼容 API、凭据、配额和回滚。 |
 | [SKILL_INTEGRATION.md](./SKILL_INTEGRATION.md) | Skill 扩展包安装、管理、聊天注入和测试指南。 |
 | [workflow-native-design.md](./workflow-native-design.md) | 自研工作流 native 实验线的设计、API 契约和回退方案。 |
 | [THEME.md](./THEME.md) | “AI 牛马招聘会”主题、设计 token 和 UI 规范。 |

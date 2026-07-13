@@ -1,5 +1,9 @@
 import {
   type XpertDefinition,
+  type XpertAppApiKey,
+  type XpertAppDefinition,
+  type XpertAppLimits,
+  type XpertAppPolicy,
   type XpertDraft,
   type XpertConversation,
   type XpertFileAsset,
@@ -16,21 +20,7 @@ import { type WorkflowDefinition } from "../types/workflow";
 async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, init);
   if (!response.ok) {
-    let message = `请求失败：${response.status}`;
-    try {
-      const payload = (await response.json()) as {
-        detail?: string | { message?: string };
-        error?: string;
-      };
-      if (typeof payload.detail === "string") message = payload.detail;
-      if (typeof payload.detail === "object" && payload.detail?.message) {
-        message = payload.detail.message;
-      }
-      if (payload.error) message = payload.error;
-    } catch {
-      // Keep the status-based fallback when the response is not JSON.
-    }
-    throw new Error(message);
+    throw new Error(await readResponseError(response));
   }
   return response.json() as Promise<T>;
 }
@@ -102,6 +92,100 @@ export function publishXpert(xpertId: string, releaseNotes: string) {
 
 export function listXpertVersions(xpertId: string) {
   return requestJson<XpertVersion[]>(`/api/xperts/${xpertId}/versions`);
+}
+
+export async function getXpertApp(xpertId: string) {
+  const response = await fetch(`/api/xperts/${xpertId}/app`);
+  if (response.status === 404) return null;
+  if (!response.ok) throw new Error(await readResponseError(response));
+  const payload = await response.json() as { app: XpertAppDefinition };
+  return payload.app;
+}
+
+export function createXpertApp(
+  xpertId: string,
+  payload: { slug?: string; name?: string; description?: string; starters?: string[] },
+) {
+  return requestJson<{ app: XpertAppDefinition; share_token: string; share_url: string }>(
+    `/api/xperts/${xpertId}/app`,
+    jsonRequest("POST", payload),
+  );
+}
+
+export function updateXpertApp(
+  appId: string,
+  payload: {
+    name?: string;
+    description?: string;
+    starters?: string[];
+    policy?: XpertAppPolicy;
+    limits?: XpertAppLimits;
+  },
+) {
+  return requestJson<{ app: XpertAppDefinition }>(
+    `/api/xpert-apps/${appId}`,
+    jsonRequest("PATCH", payload),
+  );
+}
+
+export function deployXpertApp(
+  appId: string,
+  payload: { version: number; release_notes?: string },
+) {
+  return requestJson<{ app: XpertAppDefinition; preflight: { warnings: Array<{ code: string; message: string }> } }>(
+    `/api/xpert-apps/${appId}/deploy`,
+    jsonRequest("POST", payload),
+  );
+}
+
+export function disableXpertApp(appId: string) {
+  return requestJson<{ app: XpertAppDefinition }>(
+    `/api/xpert-apps/${appId}/disable`,
+    jsonRequest("POST", {}),
+  );
+}
+
+export function rotateXpertAppShareToken(appId: string) {
+  return requestJson<{ app: XpertAppDefinition; share_token: string; share_url: string }>(
+    `/api/xpert-apps/${appId}/share-token/rotate`,
+    jsonRequest("POST", {}),
+  );
+}
+
+export function createXpertAppApiKey(
+  appId: string,
+  payload: { name: string; limits?: XpertAppLimits; expires_at?: number },
+) {
+  return requestJson<{ app: XpertAppDefinition; key: XpertAppApiKey; api_key: string }>(
+    `/api/xpert-apps/${appId}/keys`,
+    jsonRequest("POST", payload),
+  );
+}
+
+export function revokeXpertAppApiKey(appId: string, keyId: string) {
+  return requestJson<{ key: XpertAppApiKey }>(
+    `/api/xpert-apps/${appId}/keys/${keyId}`,
+    { method: "DELETE" },
+  );
+}
+
+async function readResponseError(response: Response) {
+  try {
+    const payload = await response.json() as {
+      detail?: string | { message?: string; issues?: Array<{ message: string }> };
+      error?: string | { message?: string };
+    };
+    if (typeof payload.detail === "string") return payload.detail;
+    if (payload.detail?.issues?.length) {
+      return payload.detail.issues.map((item) => item.message).join("；");
+    }
+    if (payload.detail?.message) return payload.detail.message;
+    if (typeof payload.error === "string") return payload.error;
+    if (payload.error?.message) return payload.error.message;
+  } catch {
+    // Fall through to the status-based message.
+  }
+  return `请求失败：${response.status}`;
 }
 
 export function createXpertConversation(xpertId: string, title = "") {
