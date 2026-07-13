@@ -54,3 +54,8 @@ server/workflow_sandboxes/
 .tmp-*/
 .tmp-*
 artifacts/
+
+# Root-level local packaging artifacts
+/package.json
+/package-lock.json
+/*.apk
