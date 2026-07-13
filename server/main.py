@@ -29,9 +29,19 @@ except ModuleNotFoundError:
     from api.dify_proxy import router as dify_router
 
 try:
-    from server.rag.api import get_rag_service, router as rag_router
+    from server.rag.api import (
+        configure_pipeline_executor,
+        get_pipeline_executor,
+        get_rag_service,
+        router as rag_router,
+    )
 except ModuleNotFoundError:
-    from rag.api import get_rag_service, router as rag_router
+    from rag.api import (
+        configure_pipeline_executor,
+        get_pipeline_executor,
+        get_rag_service,
+        router as rag_router,
+    )
 
 try:
     from server.skills.api import router as skills_router
@@ -40,6 +50,8 @@ except ModuleNotFoundError:
 
 try:
     from server.xperts import (
+        XpertAppAccessGrant,
+        XpertAppDefinition,
         XpertDefinition,
         XpertContextError,
         XpertContextNotFoundError,
@@ -48,12 +60,16 @@ try:
         XpertRunRequest,
         XpertStoreError,
         XpertVersion,
+        configure_xpert_app_runtime,
         get_xpert_context_store,
         get_xpert_store,
         router as xperts_router,
+        xpert_apps_router,
     )
 except ModuleNotFoundError:
     from xperts import (
+        XpertAppAccessGrant,
+        XpertAppDefinition,
         XpertDefinition,
         XpertContextError,
         XpertContextNotFoundError,
@@ -62,9 +78,11 @@ except ModuleNotFoundError:
         XpertRunRequest,
         XpertStoreError,
         XpertVersion,
+        configure_xpert_app_runtime,
         get_xpert_context_store,
         get_xpert_store,
         router as xperts_router,
+        xpert_apps_router,
     )
 
 try:
@@ -339,6 +357,7 @@ app.include_router(dify_router)
 app.include_router(rag_router)
 app.include_router(skills_router)
 app.include_router(xperts_router)
+app.include_router(xpert_apps_router)
 app.include_router(workflow_native_router)
 
 request_windows: dict[str, deque[float]] = defaultdict(deque)
@@ -360,6 +379,7 @@ agent_task_store = AgentTaskStore(
 )
 goal_store = GoalStore(storage_dir=AGENT_TASK_STORAGE_DIR or None)
 run_registry = RunRegistry()
+knowledge_pipeline_executor = configure_pipeline_executor(run_registry=run_registry)
 handoff_executor: HandoffExecutor | None = None
 goal_coordinator: GoalCoordinator | None = None
 runtime_capabilities.register(
@@ -2209,10 +2229,13 @@ async def prepare_published_xpert_run(
     shared_file_owner_xpert_id: str | None = None,
     shared_file_conversation_id: str | None = None,
     shared_file_asset_ids: list[str] | None = None,
+    require_published: bool = True,
+    include_xpert_memory: bool = True,
+    allow_memory_write: bool = True,
 ) -> PreparedXpertRun:
     store = get_xpert_store()
     xpert = await asyncio.to_thread(store.resolve_xpert, reference)
-    if xpert.status != "published":
+    if require_published and xpert.status != "published":
         raise ValueError("Xpert must be published before it can run.")
     version = await asyncio.to_thread(store.get_version, xpert.id, payload.version)
 
@@ -2270,13 +2293,15 @@ async def prepare_published_xpert_run(
             used += len(line)
         return "\n\n".join(sections)
 
-    xpert_memories = await asyncio.to_thread(
-        xpert_context_store.search_memories,
-        xpert.id,
-        payload.message,
-        scope="xpert",
-        limit=10,
-    )
+    xpert_memories = []
+    if include_xpert_memory:
+        xpert_memories = await asyncio.to_thread(
+            xpert_context_store.search_memories,
+            xpert.id,
+            payload.message,
+            scope="xpert",
+            limit=10,
+        )
     conversation_memories: list[Any] = []
     if conversation_id:
         conversation_memories = await asyncio.to_thread(
@@ -2338,9 +2363,8 @@ async def prepare_published_xpert_run(
             "file_count": len(selected_files),
             "xpert_memory_count": len(xpert_memories),
             "conversation_memory_count": len(conversation_memories),
-            "memory_write_enabled": configured_bool(
-                (output_agent_data or {}).get("memoryWriteEnabled")
-            ),
+            "memory_write_enabled": allow_memory_write
+            and configured_bool((output_agent_data or {}).get("memoryWriteEnabled")),
             "memory_write_target": str(
                 (output_agent_data or {}).get("memoryWriteTarget") or "xpert"
             ),
@@ -2522,10 +2546,27 @@ async def _run_workflow_response(
             "override_system_prompt": False,
             "active_middlewares": [],
             "tool_policy": None,
+            "app_policy": (
+                dict(run_metadata.get("app_policy") or {})
+                if runtime_run_type == "xpert_app"
+                else {}
+            ),
         }
 
+        def app_capability_allowed(name: str) -> bool:
+            if runtime_run_type != "xpert_app":
+                return True
+            return bool(workflow_runtime_context["app_policy"].get(name, False))
+
         def selected_workflow_tool_policy() -> ToolPermissionPolicy:
+            if not app_capability_allowed("allow_tools"):
+                return ToolPermissionPolicy(allow_by_default=False)
             policy = workflow_runtime_context.get("tool_policy")
+            if runtime_run_type == "xpert_app" and not isinstance(
+                policy,
+                ToolPermissionPolicy,
+            ):
+                return ToolPermissionPolicy(allow_by_default=False)
             return policy if isinstance(policy, ToolPermissionPolicy) else workflow_tool_policy
 
         def selected_workflow_tool_audit_store() -> InMemoryToolAuditStore:
@@ -2607,6 +2648,14 @@ async def _run_workflow_response(
             if not matched_tool:
                 matched_tool = await workflow_memory_provider.find_tool(tool_name)
                 capability_name = "memory_tools"
+            if capability_name == "mcp_tools" and not app_capability_allowed(
+                "allow_tools"
+            ):
+                raise PermissionError("Xpert App tool access is disabled.")
+            if capability_name == "memory_tools" and not app_capability_allowed(
+                "allow_xpert_memory"
+            ):
+                raise PermissionError("Xpert App memory access is disabled.")
             if not matched_tool:
                 raise ValueError(f"MCP 工具未注册：{tool_name}")
             run_context = task_state.get("runtime_metadata") or {}
@@ -2664,7 +2713,11 @@ async def _run_workflow_response(
             include_memory_read: bool = False,
             include_memory_write: bool = False,
         ) -> list[Any]:
-            tools = await workflow_mcp_provider.list_tools()
+            tools = (
+                await workflow_mcp_provider.list_tools()
+                if app_capability_allowed("allow_tools")
+                else []
+            )
             requested_tool_names = {
                 item.strip()
                 for item in str(tool_names_raw or "").split(",")
@@ -2672,7 +2725,11 @@ async def _run_workflow_response(
             }
             if requested_tool_names:
                 tools = [tool for tool in tools if tool.name in requested_tool_names]
-            memory_tools = await workflow_memory_provider.list_tools()
+            memory_tools = (
+                await workflow_memory_provider.list_tools()
+                if app_capability_allowed("allow_xpert_memory")
+                else []
+            )
             if include_memory_read:
                 tools.extend(
                     tool
@@ -2933,7 +2990,7 @@ async def _run_workflow_response(
                 "run_id": workflow_run.run_id,
                 "ttl_seconds": WORKFLOW_TASK_TTL_SECONDS,
             }
-            if runtime_run_type == "xpert":
+            if runtime_run_type in {"xpert", "xpert_app"}:
                 meta_event.update(
                     {
                         "xpert_id": run_metadata.get("xpert_id"),
@@ -4574,6 +4631,8 @@ async def _run_workflow_response(
                     execution_mode = "manual"
                     wait_for_completion = False
                     try:
+                        if not app_capability_allowed("allow_handoffs"):
+                            raise PermissionError("Xpert App Handoff access is disabled.")
                         task_id_variable = str(
                             node.data.get("taskIdVariable") or "agent_task_id"
                         ).strip()
@@ -4740,6 +4799,8 @@ async def _run_workflow_response(
                     execution_mode = "manual"
                     wait_for_completion = False
                     try:
+                        if not app_capability_allowed("allow_handoffs"):
+                            raise PermissionError("Xpert App Handoff access is disabled.")
                         source_variable = str(
                             node.data.get("sourceVariable") or "agent_output"
                         ).strip()
@@ -4972,6 +5033,8 @@ async def _run_workflow_response(
                 elif kind == "mcp_tool":
                     output_variable = str(node.data.get("outputVariable") or "mcp_output")
                     try:
+                        if not app_capability_allowed("allow_tools"):
+                            raise PermissionError("Xpert App tool access is disabled.")
                         tool_name = str(node.data.get("toolName") or "").strip()
                         if not WORKFLOW_MCP_TOOL_ENABLED or not tool_name:
                             output = ""
@@ -5020,10 +5083,7 @@ async def _run_workflow_response(
                                         "workflow": True,
                                     },
                                 ),
-                                policy=(
-                                    workflow_runtime_context.get("tool_policy")
-                                    or workflow_tool_policy
-                                ),
+                                policy=selected_workflow_tool_policy(),
                                 audit_store=(
                                     task_state.get("tool_audit_store")
                                     or workflow_tool_audit_store
@@ -5347,7 +5407,12 @@ async def _run_workflow_response(
     return StreamingResponse(
         workflow_stream(),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-ModelMirror-Runtime-Run-Id": workflow_run.run_id,
+            "X-ModelMirror-Runtime-Task-Id": task_id,
+        },
     )
 
 
@@ -5662,6 +5727,47 @@ async def run_published_xpert(
     )
 
 
+async def run_deployed_xpert_app(
+    app: XpertAppDefinition,
+    version: XpertVersion,
+    payload: XpertRunRequest,
+    request: Request,
+    grant: XpertAppAccessGrant,
+):
+    if app.status != "active" or app.pinned_version != version.version:
+        raise ValueError("Xpert App deployment is not active.")
+    prepared = await prepare_published_xpert_run(
+        app.xpert_id,
+        payload,
+        require_published=False,
+        include_xpert_memory=app.policy.allow_xpert_memory,
+        allow_memory_write=False,
+    )
+    return await _run_workflow_response(
+        prepared.request,
+        None,
+        runtime_run_type="xpert_app",
+        runtime_source_id=app.app_id,
+        runtime_metadata={
+            **prepared.runtime_metadata,
+            "app_id": app.app_id,
+            "app_slug": app.slug,
+            "app_version": version.version,
+            "deployment_revision": app.deployment_revision,
+            "access_type": grant.access_type,
+            "credential_prefix": grant.credential_prefix,
+            "app_policy": app.policy.model_dump(mode="json"),
+            "conversation_id": None,
+            "file_asset_ids": [],
+            "file_count": 0,
+            "memory_write_enabled": False,
+        },
+    )
+
+
+configure_xpert_app_runtime(run_deployed_xpert_app)
+
+
 @app.post("/api/workflow/run/{task_id}/resume")
 async def resume_workflow_task(
     task_id: str,
@@ -5902,12 +6008,14 @@ async def list_runtime_runs(
     valid_run_types = {
         "workflow",
         "xpert",
+        "xpert_app",
         "goal",
         "workflow_agent",
         "agent_task",
         "agent_handoff",
         "chat",
         "knowledge_citation",
+        "knowledge_pipeline",
     }
     valid_statuses = {"pending", "running", "completed", "failed", "cancelled"}
     if run_type is not None and run_type not in valid_run_types:
@@ -6392,12 +6500,14 @@ async def team_chat(payload: TeamChatRequest, request: Request):
 @app.on_event("startup")
 async def start_mcp_ttl_cleanup() -> None:
     mcp_manager.start_ttl_cleanup(on_cleanup=tool_registry.unregister_sessions)
+    get_pipeline_executor().start()
     get_handoff_executor().start()
     get_goal_coordinator().start()
 
 
 @app.on_event("shutdown")
 async def shutdown_mcp_sessions() -> None:
+    await get_pipeline_executor().stop()
     if goal_coordinator is not None:
         await goal_coordinator.stop()
     if handoff_executor is not None:

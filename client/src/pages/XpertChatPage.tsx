@@ -78,6 +78,12 @@ interface TraceBundle {
   audits: ToolAuditRecord[];
 }
 
+interface KnowledgeBaseSummary {
+  id: string;
+  name: string;
+  document_count: number;
+}
+
 async function responseError(response: Response) {
   try {
     const payload = (await response.json()) as { detail?: string; error?: string };
@@ -128,6 +134,9 @@ export default function XpertChatPage() {
   const [contextLoading, setContextLoading] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [showContext, setShowContext] = useState(false);
+  const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBaseSummary[]>([]);
+  const [knowledgeTargetId, setKnowledgeTargetId] = useState("");
+  const [promotingFiles, setPromotingFiles] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
@@ -154,6 +163,19 @@ export default function XpertChatPage() {
     listXperts({ status: "published", limit: 200 })
       .then((payload) => setPublishedXperts(payload.items))
       .catch(() => setPublishedXperts([]));
+  }, []);
+
+  useEffect(() => {
+    fetch("/api/rag/knowledge_bases")
+      .then(async (response) => {
+        if (!response.ok) throw new Error(await responseError(response));
+        return response.json() as Promise<{ knowledge_bases: KnowledgeBaseSummary[] }>;
+      })
+      .then((payload) => {
+        setKnowledgeBases(payload.knowledge_bases);
+        setKnowledgeTargetId((current) => current || payload.knowledge_bases[0]?.id || "");
+      })
+      .catch(() => setKnowledgeBases([]));
   }, []);
 
   useEffect(() => {
@@ -245,6 +267,41 @@ export default function XpertChatPage() {
     } finally {
       setUploading(false);
       if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  }
+
+  async function promoteSelectedFilesToKnowledge() {
+    if (!xpert || !conversationId || !knowledgeTargetId || selectedFileIds.length === 0) return;
+    setPromotingFiles(true);
+    setError("");
+    try {
+      const draftResponse = await fetch(
+        `/api/rag/pipeline/draft?kb_id=${encodeURIComponent(knowledgeTargetId)}`,
+      );
+      if (!draftResponse.ok) throw new Error(await responseError(draftResponse));
+      const draft = (await draftResponse.json()) as { version: number };
+      const response = await fetch(`/api/rag/pipeline/draft/${knowledgeTargetId}/execute`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          draft_version: draft.version,
+          source_document_ids: [],
+          xpert_file_refs: selectedFileIds.map((assetId) => ({
+            xpert_id: xpert.id,
+            conversation_id: conversationId,
+            asset_id: assetId,
+          })),
+        }),
+      });
+      if (!response.ok) throw new Error(await responseError(response));
+      const job = (await response.json()) as { job_id: string };
+      navigate(
+        `/rag?kb_id=${encodeURIComponent(knowledgeTargetId)}&job_id=${encodeURIComponent(job.job_id)}`,
+      );
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "附件加入知识库失败");
+    } finally {
+      setPromotingFiles(false);
     }
   }
 
@@ -653,6 +710,35 @@ export default function XpertChatPage() {
                       <button className="text-[10px] text-rose-200" onClick={() => xpert && void archiveXpertFile(xpert.id, conversationId, file.asset_id).then(refreshContext)} type="button">{"\u5f52\u6863"}</button>
                     </div>
                   )) : <p className="rounded-lg border border-dashed border-white/10 p-3 text-center text-xs text-slate-500">{"\u5c1a\u672a\u4e0a\u4f20\u9644\u4ef6"}</p>}
+                </div>
+                <div className="mt-3 border-t border-white/10 pt-3">
+                  <div className="text-[11px] font-semibold text-white">加入知识库</div>
+                  <p className="mt-1 text-[10px] leading-4 text-slate-500">
+                    仅发送当前勾选附件，生成候选索引后到知识库页面预览并人工激活。
+                  </p>
+                  <div className="mt-2 flex gap-2">
+                    <select
+                      className="min-w-0 flex-1 rounded-md border border-white/10 bg-ink-950/60 px-2 py-1.5 text-[11px] text-white outline-none"
+                      onChange={(event) => setKnowledgeTargetId(event.target.value)}
+                      value={knowledgeTargetId}
+                    >
+                      {knowledgeBases.length === 0 ? (
+                        <option value="">暂无知识库</option>
+                      ) : knowledgeBases.map((kb) => (
+                        <option className="bg-ink-950" key={kb.id} value={kb.id}>
+                          {kb.name} · {kb.document_count} 文档
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      className="inline-flex shrink-0 items-center gap-1.5 rounded-md bg-hire-300 px-2.5 py-1.5 text-[11px] font-semibold text-ink-950 transition hover:bg-hire-200 disabled:cursor-not-allowed disabled:opacity-50"
+                      disabled={promotingFiles || selectedFileIds.length === 0 || !knowledgeTargetId}
+                      onClick={() => void promoteSelectedFilesToKnowledge()}
+                      type="button"
+                    >
+                      {promotingFiles ? "提交中..." : "创建候选"}
+                    </button>
+                  </div>
                 </div>
               </section>
 

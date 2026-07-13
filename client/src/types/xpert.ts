@@ -155,3 +155,69 @@ export interface XpertMemoryCandidate {
   decided_at: number | null;
   memory_id: string | null;
 }
+
+export interface XpertAppPolicy {
+  allow_tools: boolean;
+  allow_handoffs: boolean;
+  allow_xpert_memory: boolean;
+}
+
+export interface XpertAppLimits {
+  requests_per_minute: number;
+  requests_per_day: number;
+  max_concurrency: number;
+}
+
+export interface XpertAppDeployment {
+  revision: number;
+  version: number;
+  release_notes: string;
+  deployed_at: number;
+}
+
+export interface XpertAppApiKey {
+  key_id: string;
+  name: string;
+  prefix: string;
+  limits: XpertAppLimits;
+  usage_day: string;
+  requests_today: number;
+  created_at: number;
+  last_used_at: number | null;
+  revoked_at: number | null;
+  expires_at: number | null;
+}
+
+export interface XpertAppDefinition {
+  app_id: string;
+  xpert_id: string;
+  slug: string;
+  name: string;
+  description: string;
+  starters: string[];
+  status: "draft" | "active" | "disabled";
+  visibility: "unlisted";
+  pinned_version: number | null;
+  deployment_revision: number;
+  policy: XpertAppPolicy;
+  limits: XpertAppLimits;
+  share_token_prefix: string;
+  share_usage_day: string;
+  share_requests_today: number;
+  share_last_used_at: number | null;
+  api_keys: XpertAppApiKey[];
+  deployments: XpertAppDeployment[];
+  created_at: number;
+  updated_at: number;
+}
+
+export interface XpertAppManifest {
+  object: "xpert.app";
+  slug: string;
+  name: string;
+  description: string;
+  starters: string[];
+  version: number;
+  deployment_revision: number;
+  visibility: "unlisted";
+}

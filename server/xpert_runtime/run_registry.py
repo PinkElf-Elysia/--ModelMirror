@@ -9,12 +9,14 @@ from typing import Any, Literal
 RuntimeRunType = Literal[
     "workflow",
     "xpert",
+    "xpert_app",
     "goal",
     "workflow_agent",
     "agent_task",
     "agent_handoff",
     "chat",
     "knowledge_citation",
+    "knowledge_pipeline",
 ]
 RuntimeRunStatus = Literal["pending", "running", "completed", "failed", "cancelled"]
 

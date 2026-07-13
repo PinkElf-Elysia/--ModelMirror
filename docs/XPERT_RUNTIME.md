@@ -1,6 +1,6 @@
 # Xpert Runtime Contract
 
-Last updated: 2026-07-10
+Last updated: 2026-07-13
 
 ## Purpose
 
@@ -118,10 +118,28 @@ Goal state is atomically persisted in `goals.json` under `AGENT_TASK_STORAGE_DIR
 
 See `docs/XPERT_GOALS.md` for the model, state machine, API, planner contract, and safety limits.
 
+## Versioned Knowledge Pipeline Execution
+
+`RagService` persists pipeline drafts, jobs, immutable candidate versions, and the active-version pointer in RAG metadata. `KnowledgePipelineExecutor` is a single-process background worker that claims queued jobs and runs five ordered stages: load, process, chunk, embed, and store.
+
+A job pins its draft version and snapshots every selected source before execution. Knowledge-base documents are copied into a private job source area. Explicitly selected Xpert conversation files are resolved through `XpertContextStore`, deduplicated, and snapshotted; archived source assets remain usable by an already-created job, while cross-Xpert references are rejected.
+
+Successful execution creates a `ready` candidate index in an isolated vector namespace. It never changes retrieval automatically. The candidate must be queried through the preview API and explicitly activated. Activation atomically updates the active-version pointer, and activating an older ready version is the rollback mechanism. Normal RAG, Chat RAG, `knowledge_retrieval`, and `knowledge_citation` resolve the active namespace centrally; a knowledge base without an active version retains legacy-index behavior.
+
+Pipeline jobs and versions survive process restarts. Running jobs are returned to the queue. RunRegistry remains in memory, so a persisted job whose old run is absent creates a `knowledge_pipeline` recovery run with `recovery_of_run_id` metadata before recording new checkpoints. Checkpoints contain job, stage, version, count, and error summaries only.
+
+The executor is intentionally limited to one local worker and one concurrent job. Cancellation is cooperative between stages. Failed or cancelled attempts delete their candidate namespace and cannot change the active version. See `docs/XPERT_KNOWLEDGE.md` for APIs, states, and operational checks.
+
 ## Current Limits
 
 - File persistence is local and is not a workspace database.
-- There is no public App/API token, sharing model, organization permission, or collaborative editor.
+- Public Xpert Apps now provide fixed-version unlisted sharing and an OpenAI-compatible API. They remain a trusted-local management feature without organization permissions or a collaborative editor. See `docs/XPERT_APP_API.md`.
+
+## Xpert App Deployment
+
+`XpertAppStore` shares the Xpert storage directory and persists App metadata, immutable deployment history, credential hashes, prefixes, status, limits, and daily usage through atomic replacement. Raw share tokens and API keys are returned once and never persisted.
+
+App execution uses `run_type=xpert_app` and the same classic runner. The deployment fixes one immutable XpertVersion. Tool, Handoff, and Xpert-memory capabilities are disabled by default; tool execution also requires an active `tool_policy`, otherwise the runtime denies the call. Public JSON/SSE responses expose only the final output.
 - Automatic Handoff execution is limited to a single backend process and explicit `xpert:` targets.
-- Knowledge-ingestion jobs and promotion of conversation files into versioned RAG indexes remain a future milestone.
+- Knowledge ingestion is local and single-process; it has no distributed lease, automatic activation, or image-understanding stage.
 - A normal /workflow run remains unchanged and continues to use its existing local-draft behavior.

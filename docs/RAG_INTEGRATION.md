@@ -2,7 +2,29 @@
 
 本文件说明模镜本地 RAG 模块的架构、API、扩展方式和测试方法。该模块位于 `server/rag/`，前端入口为 `/rag`，聊天页可选择知识库进行检索增强问答。
 
-最后更新日期：2026-07-09
+最后更新日期：2026-07-12
+
+## 2026-07-12 增量：版本化 Knowledge Pipeline 执行
+
+Pipeline Draft 现在可以创建真实 ingestion job。后台执行器固定草稿版本和显式数据源，依次执行 load、process、chunk、embed、store，生成与当前检索隔离的候选索引。候选版本必须先预览并由用户手动激活；激活旧版本即完成回滚。
+
+新增 API：
+
+```text
+POST /api/rag/pipeline/draft/{kb_id}/execute
+GET  /api/rag/pipeline/jobs?kb_id=&status=&limit=
+GET  /api/rag/pipeline/jobs/{job_id}
+POST /api/rag/pipeline/jobs/{job_id}/cancel
+POST /api/rag/pipeline/jobs/{job_id}/retry
+GET  /api/rag/pipeline/versions?kb_id=
+GET  /api/rag/pipeline/versions/{version_id}
+POST /api/rag/pipeline/versions/{version_id}/query
+POST /api/rag/pipeline/versions/{version_id}/activate
+```
+
+执行请求可选择知识库 document IDs，也可携带最多 5 个用户明确选择的 Xpert 会话附件引用。附件会在创建 Job 时去重并快照；API 不返回快照路径、向量 namespace、完整文件正文、embedding 或密钥。普通查询统一读取 active version；没有 active version 的旧知识库保持 legacy index 兼容。
+
+详细状态机、激活安全边界与恢复规则见 `docs/XPERT_KNOWLEDGE.md`。
 
 ## 2026-07-09 增量：Knowledge Pipeline Stage 草稿
 

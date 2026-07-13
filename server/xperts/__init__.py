@@ -7,6 +7,14 @@ from .api import (
     set_xpert_context_store_for_tests,
     set_xpert_store_for_tests,
 )
+from .app_api import (
+    configure_xpert_app_runtime,
+    get_xpert_app_store,
+    router as xpert_apps_router,
+    set_xpert_app_store_for_tests,
+)
+from .app_models import XpertAppAccessGrant, XpertAppDefinition
+from .app_store import XpertAppStore
 from .context import (
     MemoryWriteCandidate,
     XpertContextError,
@@ -52,10 +60,17 @@ __all__ = [
     "XpertFileAsset",
     "XpertMemoryRecord",
     "MemoryWriteCandidate",
+    "XpertAppAccessGrant",
+    "XpertAppDefinition",
+    "XpertAppStore",
+    "configure_xpert_app_runtime",
     "get_xpert_context_store",
+    "get_xpert_app_store",
     "get_xpert_store",
     "router",
     "set_xpert_store_for_tests",
     "set_xpert_context_store_for_tests",
+    "set_xpert_app_store_for_tests",
     "validate_xpert_definition",
+    "xpert_apps_router",
 ]

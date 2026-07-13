@@ -1,4 +1,5 @@
 import { type DragEvent, useEffect, useMemo, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import PageContainer from "../components/PageContainer";
 
 interface KnowledgeBase {
@@ -104,6 +105,67 @@ interface PipelineDraftEdits {
   chunkOverlap: string;
 }
 
+interface PipelineJobStage {
+  id: string;
+  title: string;
+  status: string;
+  progress: number;
+  item_count: number | null;
+  error: string | null;
+}
+
+interface PipelineJob {
+  job_id: string;
+  kb_id: string;
+  draft_version: number;
+  status: string;
+  stages: PipelineJobStage[];
+  source_count: number;
+  candidate_version_id: string;
+  candidate_version: number;
+  attempt: number;
+  error: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
+interface PipelineJobListResponse {
+  jobs: PipelineJob[];
+  job_count: number;
+}
+
+interface PipelineVersion {
+  version_id: string;
+  kb_id: string;
+  version: number;
+  status: string;
+  active: boolean;
+  draft_version: number;
+  document_count: number;
+  chunk_count: number;
+  job_id: string;
+  created_at: number;
+  activated_at: number | null;
+}
+
+interface PipelineVersionListResponse {
+  versions: PipelineVersion[];
+  version_count: number;
+  active_version_id: string | null;
+}
+
+interface PipelineVersionQueryResponse {
+  version_id: string;
+  version: number;
+  answer: string;
+  sources: Array<{
+    chunk_id: string;
+    document_name: string;
+    text: string;
+    score: number;
+  }>;
+}
+
 const MAX_FILE_BYTES = 10 * 1024 * 1024;
 const SUPPORTED_EXTENSIONS = [".txt", ".md", ".markdown", ".pdf"];
 
@@ -141,6 +203,22 @@ function preflightSeverityClass(severity: string) {
   return "border-emerald-300/25 bg-emerald-300/10 text-emerald-100";
 }
 
+function pipelineJobStatusLabel(status: string) {
+  if (status === "queued") return "等待执行";
+  if (status === "running") return "执行中";
+  if (status === "succeeded") return "候选就绪";
+  if (status === "failed") return "执行失败";
+  if (status === "cancelled") return "已取消";
+  return status;
+}
+
+function pipelineJobStatusClass(status: string) {
+  if (status === "succeeded") return "border-emerald-300/25 bg-emerald-300/10 text-emerald-100";
+  if (status === "running" || status === "queued") return "border-sky-300/25 bg-sky-300/10 text-sky-100";
+  if (status === "failed") return "border-rose-300/25 bg-rose-300/10 text-rose-100";
+  return "border-white/10 bg-white/[0.06] text-slate-300";
+}
+
 function formatConfigValue(value: unknown) {
   if (Array.isArray(value)) return value.join(", ");
   if (typeof value === "boolean") return value ? "true" : "false";
@@ -172,6 +250,9 @@ function validateFile(file: File) {
 }
 
 export default function RagPage() {
+  const [searchParams] = useSearchParams();
+  const requestedKbId = searchParams.get("kb_id") ?? "";
+  const requestedJobId = searchParams.get("job_id") ?? "";
   const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBase[]>([]);
   const [selectedKbId, setSelectedKbId] = useState("");
   const [documents, setDocuments] = useState<RagDocument[]>([]);
@@ -184,7 +265,7 @@ export default function RagPage() {
   const [notice, setNotice] = useState("");
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [newKbName, setNewKbName] = useState("");
-  const [isPipelineOpen, setIsPipelineOpen] = useState(false);
+  const [isPipelineOpen, setIsPipelineOpen] = useState(Boolean(requestedKbId || requestedJobId));
   const [isLoadingPipeline, setIsLoadingPipeline] = useState(false);
   const [pipelineError, setPipelineError] = useState("");
   const [pipelineAssets, setPipelineAssets] = useState<PipelineAsset[]>([]);
@@ -198,6 +279,15 @@ export default function RagPage() {
   const [isSavingPipelineDraft, setIsSavingPipelineDraft] = useState(false);
   const [isPreflightingPipeline, setIsPreflightingPipeline] = useState(false);
   const [pipelineDraftNotice, setPipelineDraftNotice] = useState("");
+  const [pipelineJobs, setPipelineJobs] = useState<PipelineJob[]>([]);
+  const [pipelineVersions, setPipelineVersions] = useState<PipelineVersion[]>([]);
+  const [activePipelineVersionId, setActivePipelineVersionId] = useState<string | null>(null);
+  const [selectedPipelineJobId, setSelectedPipelineJobId] = useState(requestedJobId);
+  const [isExecutingPipeline, setIsExecutingPipeline] = useState(false);
+  const [pipelinePreviewQuestion, setPipelinePreviewQuestion] = useState("");
+  const [pipelinePreview, setPipelinePreview] = useState<PipelineVersionQueryResponse | null>(null);
+  const [previewingVersionId, setPreviewingVersionId] = useState("");
+  const [activatingVersionId, setActivatingVersionId] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const selectedKnowledgeBase = useMemo(
@@ -208,6 +298,16 @@ export default function RagPage() {
   const pipelineChunkCount = useMemo(
     () => pipelineArtifacts.reduce((total, artifact) => total + artifact.chunk_count, 0),
     [pipelineArtifacts],
+  );
+
+  const selectedPipelineJob = useMemo(
+    () => pipelineJobs.find((job) => job.job_id === selectedPipelineJobId) ?? pipelineJobs[0] ?? null,
+    [pipelineJobs, selectedPipelineJobId],
+  );
+
+  const hasActivePipelineJob = useMemo(
+    () => pipelineJobs.some((job) => job.status === "queued" || job.status === "running"),
+    [pipelineJobs],
   );
 
   useEffect(() => {
@@ -222,6 +322,11 @@ export default function RagPage() {
       setPipelineArtifacts([]);
       setPipelineDraft(null);
       setPipelinePreflight(null);
+      setPipelineJobs([]);
+      setPipelineVersions([]);
+      setActivePipelineVersionId(null);
+      setSelectedPipelineJobId("");
+      setPipelinePreview(null);
       setPipelineDraftNotice("");
       setPipelineError("");
       return;
@@ -229,6 +334,14 @@ export default function RagPage() {
     void loadDocuments(selectedKbId);
     if (isPipelineOpen) void loadPipeline(selectedKbId);
   }, [isPipelineOpen, selectedKbId]);
+
+  useEffect(() => {
+    if (!isPipelineOpen || !selectedKbId || !hasActivePipelineJob) return;
+    const timer = window.setInterval(() => {
+      void loadPipelineRuntime(selectedKbId);
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [hasActivePipelineJob, isPipelineOpen, selectedKbId]);
 
   async function loadKnowledgeBases(nextSelectedId?: string) {
     setIsLoadingKbs(true);
@@ -239,10 +352,7 @@ export default function RagPage() {
       const data = (await response.json()) as KnowledgeBaseListResponse;
       setKnowledgeBases(data.knowledge_bases);
       const preferredId =
-        nextSelectedId ??
-        selectedKbId ??
-        data.knowledge_bases[0]?.id ??
-        "";
+        nextSelectedId || requestedKbId || selectedKbId || data.knowledge_bases[0]?.id || "";
       if (preferredId && data.knowledge_bases.some((item) => item.id === preferredId)) {
         setSelectedKbId(preferredId);
       } else {
@@ -275,20 +385,34 @@ export default function RagPage() {
     setPipelineError("");
     try {
       const query = new URLSearchParams({ kb_id: kbId }).toString();
-      const [assetsResponse, artifactsResponse, draftResponse] = await Promise.all([
+      const [assetsResponse, artifactsResponse, draftResponse, jobsResponse, versionsResponse] = await Promise.all([
         fetch(`/api/rag/pipeline/assets?${query}`),
         fetch(`/api/rag/pipeline/artifacts?${query}`),
         fetch(`/api/rag/pipeline/draft?${query}`),
+        fetch(`/api/rag/pipeline/jobs?${query}&limit=20`),
+        fetch(`/api/rag/pipeline/versions?${query}`),
       ]);
       if (!assetsResponse.ok) throw new Error(await readError(assetsResponse));
       if (!artifactsResponse.ok) throw new Error(await readError(artifactsResponse));
       if (!draftResponse.ok) throw new Error(await readError(draftResponse));
+      if (!jobsResponse.ok) throw new Error(await readError(jobsResponse));
+      if (!versionsResponse.ok) throw new Error(await readError(versionsResponse));
       const assetsData = (await assetsResponse.json()) as PipelineAssetListResponse;
       const artifactsData = (await artifactsResponse.json()) as PipelineArtifactListResponse;
       const draftData = (await draftResponse.json()) as PipelineDraftResponse;
+      const jobsData = (await jobsResponse.json()) as PipelineJobListResponse;
+      const versionsData = (await versionsResponse.json()) as PipelineVersionListResponse;
       setPipelineAssets(assetsData.assets);
       setPipelineArtifacts(artifactsData.artifacts);
       setPipelineDraft(draftData);
+      setPipelineJobs(jobsData.jobs);
+      setPipelineVersions(versionsData.versions);
+      setActivePipelineVersionId(versionsData.active_version_id);
+      setSelectedPipelineJobId((current) => {
+        if (current && jobsData.jobs.some((job) => job.job_id === current)) return current;
+        if (requestedJobId && jobsData.jobs.some((job) => job.job_id === requestedJobId)) return requestedJobId;
+        return jobsData.jobs[0]?.job_id ?? "";
+      });
       const chunkerStage = draftData.stages.find((stage) => stage.kind === "chunker");
       setPipelineDraftEdits({
         chunkSize: String(chunkerStage?.config?.chunk_size ?? 500),
@@ -302,6 +426,32 @@ export default function RagPage() {
       );
     } finally {
       setIsLoadingPipeline(false);
+    }
+  }
+
+  async function loadPipelineRuntime(kbId: string) {
+    try {
+      const query = new URLSearchParams({ kb_id: kbId }).toString();
+      const [jobsResponse, versionsResponse] = await Promise.all([
+        fetch(`/api/rag/pipeline/jobs?${query}&limit=20`),
+        fetch(`/api/rag/pipeline/versions?${query}`),
+      ]);
+      if (!jobsResponse.ok) throw new Error(await readError(jobsResponse));
+      if (!versionsResponse.ok) throw new Error(await readError(versionsResponse));
+      const jobsData = (await jobsResponse.json()) as PipelineJobListResponse;
+      const versionsData = (await versionsResponse.json()) as PipelineVersionListResponse;
+      setPipelineJobs(jobsData.jobs);
+      setPipelineVersions(versionsData.versions);
+      setActivePipelineVersionId(versionsData.active_version_id);
+      setSelectedPipelineJobId((current) =>
+        current && jobsData.jobs.some((job) => job.job_id === current)
+          ? current
+          : jobsData.jobs[0]?.job_id ?? "",
+      );
+    } catch (loadError) {
+      setPipelineError(
+        loadError instanceof Error ? loadError.message : "知识流水线运行状态加载失败。",
+      );
     }
   }
 
@@ -366,6 +516,98 @@ export default function RagPage() {
       );
     } finally {
       setIsPreflightingPipeline(false);
+    }
+  }
+
+  async function executePipelineDraft() {
+    if (!selectedKbId || !pipelineDraft || isExecutingPipeline) return;
+    setIsExecutingPipeline(true);
+    setPipelineError("");
+    setPipelineDraftNotice("");
+    try {
+      const response = await fetch(`/api/rag/pipeline/draft/${selectedKbId}/execute`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          draft_version: pipelineDraft.version,
+          source_document_ids: null,
+          xpert_file_refs: [],
+        }),
+      });
+      if (!response.ok) throw new Error(await readError(response));
+      const created = (await response.json()) as PipelineJob;
+      setSelectedPipelineJobId(created.job_id);
+      setPipelineJobs((current) => [created, ...current]);
+      setPipelineDraftNotice("执行任务已创建。候选索引完成后需人工预览并激活，当前检索不会自动切换。");
+      await loadPipelineRuntime(selectedKbId);
+    } catch (executeError) {
+      setPipelineError(
+        executeError instanceof Error ? executeError.message : "知识流水线执行失败。",
+      );
+    } finally {
+      setIsExecutingPipeline(false);
+    }
+  }
+
+  async function cancelPipelineJob(jobId: string) {
+    setPipelineError("");
+    try {
+      const response = await fetch(`/api/rag/pipeline/jobs/${jobId}/cancel`, { method: "POST" });
+      if (!response.ok) throw new Error(await readError(response));
+      await loadPipelineRuntime(selectedKbId);
+    } catch (cancelError) {
+      setPipelineError(cancelError instanceof Error ? cancelError.message : "取消任务失败。");
+    }
+  }
+
+  async function retryPipelineJob(jobId: string) {
+    setPipelineError("");
+    try {
+      const response = await fetch(`/api/rag/pipeline/jobs/${jobId}/retry`, { method: "POST" });
+      if (!response.ok) throw new Error(await readError(response));
+      setSelectedPipelineJobId(jobId);
+      await loadPipelineRuntime(selectedKbId);
+    } catch (retryError) {
+      setPipelineError(retryError instanceof Error ? retryError.message : "重试任务失败。");
+    }
+  }
+
+  async function previewPipelineVersion(versionId: string) {
+    const question = pipelinePreviewQuestion.trim();
+    if (!question || previewingVersionId) return;
+    setPreviewingVersionId(versionId);
+    setPipelineError("");
+    try {
+      const response = await fetch(`/api/rag/pipeline/versions/${versionId}/query`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ question, top_k: 4 }),
+      });
+      if (!response.ok) throw new Error(await readError(response));
+      setPipelinePreview((await response.json()) as PipelineVersionQueryResponse);
+    } catch (previewError) {
+      setPipelineError(previewError instanceof Error ? previewError.message : "候选版本预览失败。");
+    } finally {
+      setPreviewingVersionId("");
+    }
+  }
+
+  async function activatePipelineVersion(versionId: string) {
+    if (activatingVersionId) return;
+    setActivatingVersionId(versionId);
+    setPipelineError("");
+    try {
+      const response = await fetch(`/api/rag/pipeline/versions/${versionId}/activate`, {
+        method: "POST",
+      });
+      if (!response.ok) throw new Error(await readError(response));
+      await loadPipelineRuntime(selectedKbId);
+      const activated = (await response.json()) as PipelineVersion;
+      setPipelineDraftNotice(`知识索引 v${activated.version} 已激活。RAG、聊天和知识引用节点将使用该版本。`);
+    } catch (activateError) {
+      setPipelineError(activateError instanceof Error ? activateError.message : "激活版本失败。");
+    } finally {
+      setActivatingVersionId("");
     }
   }
 
@@ -661,7 +903,7 @@ export default function RagPage() {
                       知识流水线 Beta
                     </span>
                     <span className="mt-1 block text-xs leading-5 text-slate-400">
-                      FileAsset → Artifact → Chunk → CitationAnchor 只读元数据视图
+                      FileAsset → Artifact → Chunk → 版本化索引 → CitationAnchor
                     </span>
                   </span>
                   <span className="rounded-full border border-hire-300/25 bg-hire-300/10 px-3 py-1 text-xs font-semibold text-hire-100">
@@ -678,12 +920,11 @@ export default function RagPage() {
                     ) : (
                       <>
                         <div className="rounded-lg border border-hire-300/20 bg-hire-300/10 p-3 text-xs leading-5 text-hire-50">
-                          当前为只读流水线草稿：展示数据源、处理器、分块器与图像理解 stage，
-                          不改变上传、切分、向量化或检索行为。
+                          草稿执行会生成隔离的候选索引。候选完成后先预览，再由你人工激活或回滚。
                         </div>
 
                         <div className="mt-3 rounded-lg border border-sky-300/20 bg-sky-300/10 p-3 text-xs leading-5 text-sky-100">
-                          当前为知识流水线草稿：配置可保存和预检，但不会改变上传、切分、向量化、检索或聊天 RAG 行为。
+                          保存草稿本身不会改变检索。只有显式激活候选版本后，RAG、聊天和知识引用节点才会切换索引。
                         </div>
 
                         <div className="mt-3 flex flex-col gap-3 rounded-lg border border-white/10 bg-ink-950/35 p-3 sm:flex-row sm:items-center sm:justify-between">
@@ -713,6 +954,15 @@ export default function RagPage() {
                               type="button"
                             >
                               {isPreflightingPipeline ? "预检中..." : "运行预检"}
+                            </button>
+                            <button
+                              className="inline-flex items-center gap-1.5 rounded-lg bg-hire-300 px-3 py-1.5 text-xs font-semibold text-ink-950 transition hover:bg-hire-200 disabled:cursor-not-allowed disabled:opacity-50"
+                              disabled={isExecutingPipeline || !pipelineDraft || documents.length === 0}
+                              onClick={() => void executePipelineDraft()}
+                              title={documents.length === 0 ? "请先上传至少一份文档" : "构建候选知识索引"}
+                              type="button"
+                            >
+                              {isExecutingPipeline ? "创建任务中..." : "执行草稿"}
                             </button>
                           </div>
                         </div>
@@ -893,6 +1143,190 @@ export default function RagPage() {
                               </div>
                             )}
                           </div>
+                        </div>
+
+                        <div className="mt-3 grid gap-3 xl:grid-cols-[minmax(0,1.05fr)_minmax(0,0.95fr)]">
+                          <section className="rounded-lg border border-white/10 bg-white/[0.025] p-4">
+                            <div className="flex items-start justify-between gap-3">
+                              <div>
+                                <h3 className="text-sm font-semibold text-white">执行任务</h3>
+                                <p className="mt-1 text-xs leading-5 text-slate-400">
+                                  五阶段构建候选索引。失败或取消不会影响当前激活版本。
+                                </p>
+                              </div>
+                              <button
+                                className="rounded-md border border-white/10 px-2.5 py-1.5 text-xs font-semibold text-slate-300 transition hover:bg-white/[0.07] hover:text-white"
+                                onClick={() => void loadPipelineRuntime(selectedKbId)}
+                                type="button"
+                              >
+                                刷新
+                              </button>
+                            </div>
+
+                            {pipelineJobs.length > 0 ? (
+                              <div className="mt-3 flex gap-2 overflow-x-auto pb-1">
+                                {pipelineJobs.slice(0, 8).map((job) => (
+                                  <button
+                                    className={`shrink-0 rounded-md border px-2.5 py-1.5 text-left text-[11px] transition ${
+                                      selectedPipelineJob?.job_id === job.job_id
+                                        ? "border-hire-300/45 bg-hire-300/10 text-hire-100"
+                                        : "border-white/10 bg-white/[0.035] text-slate-400 hover:text-slate-200"
+                                    }`}
+                                    key={job.job_id}
+                                    onClick={() => setSelectedPipelineJobId(job.job_id)}
+                                    type="button"
+                                  >
+                                    v{job.candidate_version} · {pipelineJobStatusLabel(job.status)}
+                                  </button>
+                                ))}
+                              </div>
+                            ) : null}
+
+                            {selectedPipelineJob ? (
+                              <div className="mt-3">
+                                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/10 pb-3">
+                                  <div>
+                                    <p className="font-mono text-[11px] text-slate-300">{selectedPipelineJob.job_id}</p>
+                                    <p className="mt-1 text-[11px] text-slate-500">
+                                      {selectedPipelineJob.source_count} 个来源 · attempt {selectedPipelineJob.attempt}
+                                    </p>
+                                  </div>
+                                  <span className={`rounded-full border px-2 py-0.5 text-[11px] font-semibold ${pipelineJobStatusClass(selectedPipelineJob.status)}`}>
+                                    {pipelineJobStatusLabel(selectedPipelineJob.status)}
+                                  </span>
+                                </div>
+
+                                <div className="mt-3 space-y-2">
+                                  {selectedPipelineJob.stages.map((stage) => (
+                                    <div className="grid grid-cols-[86px_minmax(0,1fr)_auto] items-center gap-2" key={stage.id}>
+                                      <span className="text-[11px] font-medium text-slate-300">{stage.title}</span>
+                                      <div className="h-1.5 overflow-hidden rounded-full bg-white/[0.07]">
+                                        <div
+                                          className={`h-full rounded-full transition-[width] duration-200 ${
+                                            stage.status === "failed" ? "bg-rose-300" : "bg-hire-300"
+                                          }`}
+                                          style={{ width: `${Math.max(0, Math.min(stage.progress, 100))}%` }}
+                                        />
+                                      </div>
+                                      <span className="w-14 text-right text-[10px] text-slate-500">{stage.status}</span>
+                                    </div>
+                                  ))}
+                                </div>
+
+                                {selectedPipelineJob.error ? (
+                                  <p className="mt-3 rounded-md border border-rose-300/20 bg-rose-300/10 px-3 py-2 text-xs leading-5 text-rose-100">
+                                    {selectedPipelineJob.error}
+                                  </p>
+                                ) : null}
+
+                                <div className="mt-3 flex justify-end gap-2">
+                                  {selectedPipelineJob.status === "queued" || selectedPipelineJob.status === "running" ? (
+                                    <button
+                                      className="inline-flex items-center gap-1.5 rounded-md border border-rose-300/20 bg-rose-300/10 px-3 py-1.5 text-xs font-semibold text-rose-100 transition hover:bg-rose-300/15"
+                                      onClick={() => void cancelPipelineJob(selectedPipelineJob.job_id)}
+                                      type="button"
+                                    >
+                                      取消任务
+                                    </button>
+                                  ) : null}
+                                  {selectedPipelineJob.status === "failed" || selectedPipelineJob.status === "cancelled" ? (
+                                    <button
+                                      className="inline-flex items-center gap-1.5 rounded-md border border-white/10 bg-white/[0.06] px-3 py-1.5 text-xs font-semibold text-slate-200 transition hover:bg-white/[0.1]"
+                                      onClick={() => void retryPipelineJob(selectedPipelineJob.job_id)}
+                                      type="button"
+                                    >
+                                      重试任务
+                                    </button>
+                                  ) : null}
+                                </div>
+                              </div>
+                            ) : (
+                              <p className="mt-3 rounded-lg border border-dashed border-white/10 p-4 text-center text-xs leading-5 text-slate-500">
+                                保存并预检草稿后，点击“执行草稿”构建第一个候选版本。
+                              </p>
+                            )}
+                          </section>
+
+                          <section className="rounded-lg border border-white/10 bg-white/[0.025] p-4">
+                            <div className="flex items-start justify-between gap-3">
+                              <div>
+                                <h3 className="text-sm font-semibold text-white">索引版本</h3>
+                                <p className="mt-1 text-xs leading-5 text-slate-400">
+                                  候选版本先预览，再人工激活。激活旧版本即完成回滚。
+                                </p>
+                              </div>
+                              <span className="rounded-full border border-white/10 bg-white/[0.05] px-2 py-0.5 text-[11px] text-slate-300">
+                                {pipelineVersions.length} versions
+                              </span>
+                            </div>
+
+                            <div className="mt-3 flex gap-2">
+                              <input
+                                className="min-w-0 flex-1 rounded-lg border border-white/10 bg-ink-950/45 px-3 py-2 text-xs text-white outline-none placeholder:text-slate-500 focus:border-hire-300/50"
+                                onChange={(event) => setPipelinePreviewQuestion(event.target.value)}
+                                placeholder="输入问题预览候选版本"
+                                value={pipelinePreviewQuestion}
+                              />
+                            </div>
+
+                            <div className="mt-3 divide-y divide-white/10 overflow-hidden rounded-lg border border-white/10">
+                              {pipelineVersions.length > 0 ? pipelineVersions.map((versionItem) => (
+                                <div className="bg-ink-950/30 p-3" key={versionItem.version_id}>
+                                  <div className="flex items-start justify-between gap-3">
+                                    <div>
+                                      <div className="flex items-center gap-2">
+                                        <p className="text-sm font-semibold text-white">v{versionItem.version}</p>
+                                        {versionItem.active ? (
+                                          <span className="inline-flex items-center gap-1 rounded-full border border-emerald-300/25 bg-emerald-300/10 px-2 py-0.5 text-[10px] font-semibold text-emerald-100">
+                                            当前激活
+                                          </span>
+                                        ) : (
+                                          <span className="rounded-full border border-sky-300/20 bg-sky-300/10 px-2 py-0.5 text-[10px] text-sky-100">候选</span>
+                                        )}
+                                      </div>
+                                      <p className="mt-1 text-[10px] text-slate-500">
+                                        {versionItem.document_count} 文档 · {versionItem.chunk_count} chunks · draft v{versionItem.draft_version}
+                                      </p>
+                                    </div>
+                                    <div className="flex gap-1.5">
+                                      <button
+                                        className="rounded-md border border-white/10 px-2 py-1.5 text-[11px] font-semibold text-slate-300 transition hover:bg-white/[0.08] hover:text-white disabled:opacity-40"
+                                        disabled={!pipelinePreviewQuestion.trim() || Boolean(previewingVersionId)}
+                                        onClick={() => void previewPipelineVersion(versionItem.version_id)}
+                                        type="button"
+                                      >
+                                        预览
+                                      </button>
+                                      {!versionItem.active ? (
+                                        <button
+                                          className="rounded-md bg-hire-300 px-2.5 py-1.5 text-[11px] font-semibold text-ink-950 transition hover:bg-hire-200 disabled:opacity-50"
+                                          disabled={Boolean(activatingVersionId)}
+                                          onClick={() => void activatePipelineVersion(versionItem.version_id)}
+                                          type="button"
+                                        >
+                                          {activePipelineVersionId ? "回滚/切换" : "激活"}
+                                        </button>
+                                      ) : null}
+                                    </div>
+                                  </div>
+                                </div>
+                              )) : (
+                                <p className="p-4 text-center text-xs leading-5 text-slate-500">
+                                  尚无候选版本。执行草稿后在此预览和激活。
+                                </p>
+                              )}
+                            </div>
+
+                            {pipelinePreview ? (
+                              <div className="mt-3 rounded-lg border border-sky-300/20 bg-sky-300/[0.07] p-3">
+                                <p className="text-[11px] font-semibold text-sky-100">v{pipelinePreview.version} 预览结果</p>
+                                <p className="mt-2 line-clamp-5 text-xs leading-5 text-slate-200">{pipelinePreview.answer}</p>
+                                <p className="mt-2 text-[10px] text-slate-500">
+                                  {pipelinePreview.sources.length} 个引用来源
+                                </p>
+                              </div>
+                            ) : null}
+                          </section>
                         </div>
 
                         <div className="mt-3 grid gap-3 sm:grid-cols-3">

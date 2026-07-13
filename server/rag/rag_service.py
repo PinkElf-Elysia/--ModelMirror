@@ -5,6 +5,7 @@ import mimetypes
 import os
 import re
 import shutil
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -38,12 +39,32 @@ class PipelineDraftValidationError(RagError):
     """Raised when a knowledge pipeline draft config is invalid."""
 
 
+class PipelineJobNotFoundError(RagError):
+    """Raised when a knowledge pipeline job does not exist."""
+
+
+class PipelineVersionNotFoundError(RagError):
+    """Raised when a knowledge index version does not exist."""
+
+
+class PipelineJobStateError(RagError):
+    """Raised when a pipeline job operation is invalid for its current state."""
+
+
 PIPELINE_STAGE_IDS = {
     "data_source": "stage_data_source",
     "processor": "stage_processor",
     "chunker": "stage_chunker",
     "image_understanding": "stage_image_understanding",
 }
+
+PIPELINE_JOB_STAGES = (
+    ("load", "读取来源"),
+    ("process", "解析文档"),
+    ("chunk", "生成分块"),
+    ("embed", "生成向量"),
+    ("store", "写入候选索引"),
+)
 
 
 class RagService:
@@ -65,6 +86,9 @@ class RagService:
         self.storage_dir.mkdir(parents=True, exist_ok=True)
         self.uploads_dir.mkdir(parents=True, exist_ok=True)
         self.metadata_path = self.storage_dir / "metadata.json"
+        self.pipeline_sources_dir = self.storage_dir / "pipeline_sources"
+        self.pipeline_sources_dir.mkdir(parents=True, exist_ok=True)
+        self._metadata_lock = threading.RLock()
         self.embedder = embedder or EmbeddingClient()
         self.vector_store = vector_store or create_vector_store(self.storage_dir)
         self.splitter = splitter or TextSplitter(
@@ -122,8 +146,34 @@ class RagService:
             metadata["documents"].pop(doc_id, None)
         metadata["knowledge_bases"].pop(kb_id, None)
         metadata["pipeline_drafts"].pop(kb_id, None)
+        metadata["pipeline_active_versions"].pop(kb_id, None)
+        version_namespaces = [
+            str(item.get("namespace") or "")
+            for item in metadata["pipeline_versions"].values()
+            if item.get("kb_id") == kb_id
+        ]
+        metadata["pipeline_versions"] = {
+            version_id: item
+            for version_id, item in metadata["pipeline_versions"].items()
+            if item.get("kb_id") != kb_id
+        }
+        job_ids = [
+            job_id
+            for job_id, item in metadata["pipeline_jobs"].items()
+            if item.get("kb_id") == kb_id
+        ]
+        metadata["pipeline_jobs"] = {
+            job_id: item
+            for job_id, item in metadata["pipeline_jobs"].items()
+            if item.get("kb_id") != kb_id
+        }
         self._write_metadata(metadata)
         self.vector_store.delete_knowledge_base(kb_id)
+        for namespace in version_namespaces:
+            if namespace:
+                self.vector_store.delete_knowledge_base(namespace)
+        for job_id in job_ids:
+            shutil.rmtree(self.pipeline_sources_dir / job_id, ignore_errors=True)
         shutil.rmtree(self.uploads_dir / kb_id, ignore_errors=True)
 
     async def upload_document(self, kb_id: str, filename: str, content: bytes) -> dict[str, Any]:
@@ -177,9 +227,15 @@ class RagService:
             "chunk_count": len(chunks),
             "created_at": time.time(),
         }
-        metadata["documents"][doc_id] = document
-        metadata["knowledge_bases"][kb_id]["updated_at"] = time.time()
-        self._write_metadata(metadata)
+        with self._metadata_lock:
+            latest = self._read_metadata_unlocked()
+            if kb_id not in latest["knowledge_bases"]:
+                self.vector_store.delete_document(doc_id)
+                stored_path.unlink(missing_ok=True)
+                raise KnowledgeBaseNotFoundError("Knowledge base was removed during upload.")
+            latest["documents"][doc_id] = document
+            latest["knowledge_bases"][kb_id]["updated_at"] = time.time()
+            self._write_metadata_unlocked(latest)
         return self._document_payload(document)
 
     def list_documents(self, kb_id: str) -> list[dict[str, Any]]:
@@ -329,13 +385,17 @@ class RagService:
             )
 
         now = time.time()
-        metadata["pipeline_drafts"][kb_id] = {
-            "draft_id": draft["draft_id"],
-            "version": int(draft.get("version", 1)) + 1,
-            "updated_at": now,
-            "stages": configs,
-        }
-        self._write_metadata(metadata)
+        with self._metadata_lock:
+            latest = self._read_metadata_unlocked()
+            self._ensure_kb_exists(latest, kb_id)
+            current = self._pipeline_draft_record(latest, kb_id)
+            latest["pipeline_drafts"][kb_id] = {
+                "draft_id": current["draft_id"],
+                "version": int(current.get("version", 1)) + 1,
+                "updated_at": now,
+                "stages": configs,
+            }
+            self._write_metadata_unlocked(latest)
         return self.get_pipeline_draft(kb_id)
 
     def preflight_pipeline_draft(self, kb_id: str) -> dict[str, Any]:
@@ -403,6 +463,522 @@ class RagService:
             "chunk_count": chunk_count,
         }
 
+    def create_pipeline_job(
+        self,
+        kb_id: str,
+        *,
+        draft_version: int,
+        source_document_ids: list[str] | None = None,
+        xpert_sources: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """Create a durable job with immutable source and draft snapshots."""
+
+        with self._metadata_lock:
+            metadata = self._read_metadata_unlocked()
+            self._ensure_kb_exists(metadata, kb_id)
+            draft = self._pipeline_draft_record(metadata, kb_id)
+            if int(draft["version"]) != int(draft_version):
+                raise PipelineJobStateError(
+                    f"Pipeline draft changed. Expected v{draft_version}, current v{draft['version']}."
+                )
+
+            documents = [
+                item
+                for item in metadata["documents"].values()
+                if item["kb_id"] == kb_id
+            ]
+            if source_document_ids is not None:
+                requested = list(dict.fromkeys(str(item) for item in source_document_ids))
+                by_id = {str(item["id"]): item for item in documents}
+                missing = [item for item in requested if item not in by_id]
+                if missing:
+                    raise DocumentNotFoundError(
+                        f"Pipeline source document not found: {missing[0]}"
+                    )
+                documents = [by_id[item] for item in requested]
+
+            job_id = f"kpjob_{uuid.uuid4().hex}"
+            source_dir = self.pipeline_sources_dir / job_id
+            source_dir.mkdir(parents=True, exist_ok=True)
+            manifest: list[dict[str, Any]] = []
+            try:
+                for index, document in enumerate(documents):
+                    source_path = Path(str(document.get("stored_path") or ""))
+                    if not source_path.is_file():
+                        raise DocumentNotFoundError(
+                            f"Pipeline source file is unavailable: {document['id']}"
+                        )
+                    suffix = source_path.suffix or Path(str(document["filename"])).suffix or ".txt"
+                    snapshot = source_dir / f"document_{index}{suffix.lower()}"
+                    shutil.copyfile(source_path, snapshot)
+                    manifest.append(
+                        {
+                            "source_id": str(document["id"]),
+                            "source_kind": "knowledge_document",
+                            "filename": str(document["filename"]),
+                            "size": int(document.get("size", snapshot.stat().st_size)),
+                            "snapshot_key": snapshot.relative_to(self.storage_dir).as_posix(),
+                            "content_mode": "document",
+                        }
+                    )
+
+                seen_external: set[tuple[str, str, str]] = set()
+                for index, source in enumerate(xpert_sources or []):
+                    key = (
+                        str(source.get("xpert_id") or ""),
+                        str(source.get("conversation_id") or ""),
+                        str(source.get("asset_id") or ""),
+                    )
+                    if not all(key) or key in seen_external:
+                        continue
+                    seen_external.add(key)
+                    text = str(source.get("text") or "")
+                    if not text.strip():
+                        continue
+                    snapshot = source_dir / f"xpert_file_{index}.txt"
+                    snapshot.write_text(text, encoding="utf-8")
+                    manifest.append(
+                        {
+                            "source_id": f"xpert_{key[2]}",
+                            "source_kind": "xpert_file",
+                            "filename": str(source.get("filename") or f"attachment_{index}.txt"),
+                            "size": len(text.encode("utf-8")),
+                            "snapshot_key": snapshot.relative_to(self.storage_dir).as_posix(),
+                            "content_mode": "extracted_text",
+                            "xpert_id": key[0],
+                            "conversation_id": key[1],
+                            "asset_id": key[2],
+                        }
+                    )
+                if not manifest:
+                    raise PipelineDraftValidationError(
+                        "A knowledge pipeline job requires at least one document or Xpert file."
+                    )
+            except Exception:
+                shutil.rmtree(source_dir, ignore_errors=True)
+                raise
+
+            reserved_numbers = [
+                int(item.get("version", 0))
+                for item in metadata["pipeline_versions"].values()
+                if item.get("kb_id") == kb_id
+            ] + [
+                int(item.get("candidate_version", 0))
+                for item in metadata["pipeline_jobs"].values()
+                if item.get("kb_id") == kb_id
+            ]
+            candidate_version = max(reserved_numbers, default=0) + 1
+            candidate_version_id = f"kpv_{uuid.uuid4().hex}"
+            now = time.time()
+            job = {
+                "job_id": job_id,
+                "kb_id": kb_id,
+                "draft_id": str(draft["draft_id"]),
+                "draft_version": int(draft["version"]),
+                "config_snapshot": json.loads(json.dumps(draft["stages"])),
+                "sources": manifest,
+                "status": "queued",
+                "stages": self._new_pipeline_job_stages(),
+                "candidate_version_id": candidate_version_id,
+                "candidate_version": candidate_version,
+                "candidate_namespace": f"{kb_id}::{candidate_version_id}",
+                "run_id": None,
+                "attempt": 0,
+                "cancel_requested": False,
+                "error": None,
+                "created_at": now,
+                "updated_at": now,
+                "started_at": None,
+                "completed_at": None,
+            }
+            metadata["pipeline_jobs"][job_id] = job
+            self._write_metadata_unlocked(metadata)
+            return self.pipeline_job_payload(job)
+
+    def list_pipeline_jobs(
+        self,
+        *,
+        kb_id: str | None = None,
+        status: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        metadata = self._read_metadata()
+        items = list(metadata["pipeline_jobs"].values())
+        if kb_id is not None:
+            self._ensure_kb_exists(metadata, kb_id)
+            items = [item for item in items if item.get("kb_id") == kb_id]
+        if status is not None:
+            items = [item for item in items if item.get("status") == status]
+        items.sort(key=lambda item: float(item.get("created_at", 0)), reverse=True)
+        return [self.pipeline_job_payload(item) for item in items[: max(1, min(limit, 200))]]
+
+    def get_pipeline_job(self, job_id: str) -> dict[str, Any]:
+        metadata = self._read_metadata()
+        job = metadata["pipeline_jobs"].get(job_id)
+        if not isinstance(job, dict):
+            raise PipelineJobNotFoundError("Knowledge pipeline job not found.")
+        return json.loads(json.dumps(job))
+
+    def pipeline_job_payload(self, job: dict[str, Any]) -> dict[str, Any]:
+        sources = [
+            {
+                key: value
+                for key, value in source.items()
+                if key not in {"snapshot_key"}
+            }
+            for source in job.get("sources", [])
+        ]
+        return {
+            key: json.loads(json.dumps(value))
+            for key, value in job.items()
+            if key not in {"candidate_namespace", "config_snapshot", "sources"}
+        } | {
+            "sources": sources,
+            "source_count": len(sources),
+        }
+
+    def claim_next_pipeline_job(self) -> dict[str, Any] | None:
+        with self._metadata_lock:
+            metadata = self._read_metadata_unlocked()
+            queued = [
+                item
+                for item in metadata["pipeline_jobs"].values()
+                if item.get("status") == "queued"
+            ]
+            if not queued:
+                return None
+            queued.sort(key=lambda item: float(item.get("created_at", 0)))
+            job = queued[0]
+            now = time.time()
+            job["status"] = "running"
+            job["attempt"] = int(job.get("attempt", 0)) + 1
+            job["started_at"] = now
+            job["updated_at"] = now
+            job["error"] = None
+            job["cancel_requested"] = False
+            self._write_metadata_unlocked(metadata)
+            return json.loads(json.dumps(job))
+
+    def recover_pipeline_jobs(self) -> int:
+        with self._metadata_lock:
+            metadata = self._read_metadata_unlocked()
+            recovered = 0
+            for job in metadata["pipeline_jobs"].values():
+                if job.get("status") != "running":
+                    continue
+                self.vector_store.delete_knowledge_base(str(job.get("candidate_namespace") or ""))
+                job["status"] = "queued"
+                job["error"] = "Recovered after process restart."
+                job["updated_at"] = time.time()
+                job["stages"] = self._new_pipeline_job_stages()
+                recovered += 1
+            if recovered:
+                self._write_metadata_unlocked(metadata)
+            return recovered
+
+    def set_pipeline_job_run_id(self, job_id: str, run_id: str) -> None:
+        self._update_pipeline_job(job_id, lambda job: job.update({"run_id": run_id}))
+
+    def start_pipeline_job_stage(self, job_id: str, stage_id: str) -> None:
+        def update(job: dict[str, Any]) -> None:
+            stage = self._pipeline_stage(job, stage_id)
+            stage.update(
+                {
+                    "status": "running",
+                    "progress": 10,
+                    "started_at": time.time(),
+                    "completed_at": None,
+                    "error": None,
+                }
+            )
+
+        self._update_pipeline_job(job_id, update)
+
+    def complete_pipeline_job_stage(
+        self,
+        job_id: str,
+        stage_id: str,
+        *,
+        item_count: int | None = None,
+    ) -> None:
+        def update(job: dict[str, Any]) -> None:
+            stage = self._pipeline_stage(job, stage_id)
+            stage.update(
+                {
+                    "status": "completed",
+                    "progress": 100,
+                    "completed_at": time.time(),
+                }
+            )
+            if item_count is not None:
+                stage["item_count"] = item_count
+
+        self._update_pipeline_job(job_id, update)
+
+    def load_pipeline_job_sources(self, job_id: str) -> list[dict[str, Any]]:
+        job = self.get_pipeline_job(job_id)
+        loaded: list[dict[str, Any]] = []
+        for source in job["sources"]:
+            path = self._pipeline_snapshot_path(str(source["snapshot_key"]))
+            if not path.is_file():
+                raise PipelineJobStateError(
+                    f"Pipeline source snapshot is unavailable: {source['source_id']}"
+                )
+            loaded.append({**source, "snapshot_exists": True})
+        return loaded
+
+    def parse_pipeline_job_sources(self, job_id: str) -> list[dict[str, Any]]:
+        job = self.get_pipeline_job(job_id)
+        parsed: list[dict[str, Any]] = []
+        for source in job["sources"]:
+            path = self._pipeline_snapshot_path(str(source["snapshot_key"]))
+            if source.get("content_mode") == "extracted_text":
+                text = path.read_text(encoding="utf-8")
+            else:
+                text = parse_document(path, str(source["filename"]))
+            if text.strip():
+                parsed.append({**source, "text": text})
+        if not parsed:
+            raise PipelineJobStateError("No pipeline sources produced readable text.")
+        return parsed
+
+    def pipeline_job_cancel_requested(self, job_id: str) -> bool:
+        return bool(self.get_pipeline_job(job_id).get("cancel_requested"))
+
+    def request_pipeline_job_cancel(self, job_id: str) -> dict[str, Any]:
+        def update(job: dict[str, Any]) -> None:
+            status = str(job.get("status"))
+            if status not in {"queued", "running"}:
+                raise PipelineJobStateError("Only queued or running jobs can be cancelled.")
+            if status == "queued":
+                job["status"] = "cancelled"
+                job["completed_at"] = time.time()
+            else:
+                job["cancel_requested"] = True
+
+        job = self._update_pipeline_job(job_id, update)
+        return self.pipeline_job_payload(job)
+
+    def cancel_running_pipeline_job(self, job_id: str) -> None:
+        def update(job: dict[str, Any]) -> None:
+            job["status"] = "cancelled"
+            job["completed_at"] = time.time()
+            job["error"] = "Cancelled by user."
+            for stage in job["stages"]:
+                if stage["status"] in {"pending", "running"}:
+                    stage["status"] = "cancelled"
+
+        self._update_pipeline_job(job_id, update)
+
+    def retry_pipeline_job(self, job_id: str) -> dict[str, Any]:
+        def update(job: dict[str, Any]) -> None:
+            if job.get("status") not in {"failed", "cancelled"}:
+                raise PipelineJobStateError("Only failed or cancelled jobs can be retried.")
+            job.update(
+                {
+                    "status": "queued",
+                    "stages": self._new_pipeline_job_stages(),
+                    "cancel_requested": False,
+                    "error": None,
+                    "started_at": None,
+                    "completed_at": None,
+                }
+            )
+
+        job = self._update_pipeline_job(job_id, update)
+        return self.pipeline_job_payload(job)
+
+    def fail_pipeline_job(self, job_id: str, error: str) -> None:
+        def update(job: dict[str, Any]) -> None:
+            job["status"] = "failed"
+            job["error"] = str(error)[:500]
+            job["completed_at"] = time.time()
+            for stage in job["stages"]:
+                if stage["status"] == "running":
+                    stage["status"] = "failed"
+                    stage["error"] = str(error)[:500]
+                elif stage["status"] == "pending":
+                    stage["status"] = "blocked"
+
+        self._update_pipeline_job(job_id, update)
+
+    def complete_pipeline_job(
+        self,
+        job_id: str,
+        *,
+        document_count: int,
+        chunk_count: int,
+    ) -> dict[str, Any]:
+        version_holder: dict[str, Any] = {}
+
+        def update(metadata: dict[str, Any], job: dict[str, Any]) -> None:
+            now = time.time()
+            version = {
+                "version_id": str(job["candidate_version_id"]),
+                "kb_id": str(job["kb_id"]),
+                "version": int(job["candidate_version"]),
+                "status": "ready",
+                "namespace": str(job["candidate_namespace"]),
+                "draft_id": str(job["draft_id"]),
+                "draft_version": int(job["draft_version"]),
+                "config_snapshot": json.loads(json.dumps(job["config_snapshot"])),
+                "source_summary": [
+                    {
+                        key: value
+                        for key, value in source.items()
+                        if key not in {"snapshot_key"}
+                    }
+                    for source in job["sources"]
+                ],
+                "document_count": document_count,
+                "chunk_count": chunk_count,
+                "job_id": job_id,
+                "created_at": now,
+                "activated_at": None,
+            }
+            metadata["pipeline_versions"][version["version_id"]] = version
+            job["status"] = "succeeded"
+            job["completed_at"] = now
+            job["updated_at"] = now
+            job["error"] = None
+            version_holder.update(version)
+
+        self._update_pipeline_job_with_metadata(job_id, update)
+        return self.pipeline_version_payload(version_holder)
+
+    def list_pipeline_versions(self, kb_id: str) -> list[dict[str, Any]]:
+        metadata = self._read_metadata()
+        self._ensure_kb_exists(metadata, kb_id)
+        active_id = metadata["pipeline_active_versions"].get(kb_id)
+        items = [
+            self.pipeline_version_payload(item, active_id=active_id)
+            for item in metadata["pipeline_versions"].values()
+            if item.get("kb_id") == kb_id
+        ]
+        items.sort(key=lambda item: int(item["version"]), reverse=True)
+        return items
+
+    def get_pipeline_version(self, version_id: str) -> dict[str, Any]:
+        metadata = self._read_metadata()
+        version = metadata["pipeline_versions"].get(version_id)
+        if not isinstance(version, dict):
+            raise PipelineVersionNotFoundError("Knowledge pipeline version not found.")
+        return json.loads(json.dumps(version))
+
+    def pipeline_version_payload(
+        self,
+        version: dict[str, Any],
+        *,
+        active_id: str | None = None,
+    ) -> dict[str, Any]:
+        payload = {
+            key: json.loads(json.dumps(value))
+            for key, value in version.items()
+            if key not in {"namespace", "config_snapshot"}
+        }
+        payload["active"] = str(active_id or "") == str(version.get("version_id"))
+        return payload
+
+    def activate_pipeline_version(self, version_id: str) -> dict[str, Any]:
+        with self._metadata_lock:
+            metadata = self._read_metadata_unlocked()
+            version = metadata["pipeline_versions"].get(version_id)
+            if not isinstance(version, dict):
+                raise PipelineVersionNotFoundError("Knowledge pipeline version not found.")
+            kb_id = str(version["kb_id"])
+            previous_id = metadata["pipeline_active_versions"].get(kb_id)
+            if previous_id and previous_id in metadata["pipeline_versions"]:
+                metadata["pipeline_versions"][previous_id]["status"] = "ready"
+            version["status"] = "active"
+            version["activated_at"] = time.time()
+            metadata["pipeline_active_versions"][kb_id] = version_id
+            metadata["knowledge_bases"][kb_id]["updated_at"] = time.time()
+            self._write_metadata_unlocked(metadata)
+            return self.pipeline_version_payload(version, active_id=version_id)
+
+    async def query_pipeline_version(
+        self,
+        version_id: str,
+        question: str,
+        *,
+        top_k: int = 4,
+    ) -> dict[str, Any]:
+        version = self.get_pipeline_version(version_id)
+        result = await self._query_namespace(
+            str(version["kb_id"]),
+            str(version["namespace"]),
+            question,
+            top_k=top_k,
+        )
+        return {
+            "version_id": version_id,
+            "version": int(version["version"]),
+            **result,
+        }
+
+    def get_active_pipeline_version(self, kb_id: str) -> dict[str, Any] | None:
+        metadata = self._read_metadata()
+        self._ensure_kb_exists(metadata, kb_id)
+        version_id = metadata["pipeline_active_versions"].get(kb_id)
+        if not version_id:
+            return None
+        version = metadata["pipeline_versions"].get(version_id)
+        return self.pipeline_version_payload(version, active_id=version_id) if isinstance(version, dict) else None
+
+    def _new_pipeline_job_stages(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "id": stage_id,
+                "title": title,
+                "status": "pending",
+                "progress": 0,
+                "item_count": None,
+                "started_at": None,
+                "completed_at": None,
+                "error": None,
+            }
+            for stage_id, title in PIPELINE_JOB_STAGES
+        ]
+
+    def _pipeline_stage(self, job: dict[str, Any], stage_id: str) -> dict[str, Any]:
+        for stage in job["stages"]:
+            if stage["id"] == stage_id:
+                return stage
+        raise PipelineJobStateError(f"Unknown pipeline job stage: {stage_id}")
+
+    def _update_pipeline_job(
+        self,
+        job_id: str,
+        update: Any,
+    ) -> dict[str, Any]:
+        def wrapped(metadata: dict[str, Any], job: dict[str, Any]) -> None:
+            update(job)
+            job["updated_at"] = time.time()
+
+        return self._update_pipeline_job_with_metadata(job_id, wrapped)
+
+    def _update_pipeline_job_with_metadata(
+        self,
+        job_id: str,
+        update: Any,
+    ) -> dict[str, Any]:
+        with self._metadata_lock:
+            metadata = self._read_metadata_unlocked()
+            job = metadata["pipeline_jobs"].get(job_id)
+            if not isinstance(job, dict):
+                raise PipelineJobNotFoundError("Knowledge pipeline job not found.")
+            update(metadata, job)
+            job["updated_at"] = time.time()
+            self._write_metadata_unlocked(metadata)
+            return json.loads(json.dumps(job))
+
+    def _pipeline_snapshot_path(self, snapshot_key: str) -> Path:
+        path = (self.storage_dir / snapshot_key).resolve()
+        root = self.pipeline_sources_dir.resolve()
+        if path != root and root not in path.parents:
+            raise PipelineJobStateError("Invalid pipeline source snapshot path.")
+        return path
+
     def list_pipeline_artifact_chunks(self, artifact_id: str) -> list[dict[str, Any]]:
         """Return chunk metadata for one artifact without exposing embeddings."""
 
@@ -467,6 +1043,27 @@ class RagService:
     async def query(self, kb_id: str, question: str, *, top_k: int = 4) -> dict[str, Any]:
         """Run retrieval and generate an answer from the retrieved context."""
 
+        metadata = self._read_metadata()
+        if kb_id not in metadata["knowledge_bases"]:
+            raise KnowledgeBaseNotFoundError("Knowledge base not found.")
+        active_version_id = metadata["pipeline_active_versions"].get(kb_id)
+        namespace = kb_id
+        if active_version_id:
+            version = metadata["pipeline_versions"].get(active_version_id)
+            if isinstance(version, dict):
+                namespace = str(version.get("namespace") or kb_id)
+        return await self._query_namespace(kb_id, namespace, question, top_k=top_k)
+
+    async def _query_namespace(
+        self,
+        kb_id: str,
+        namespace: str,
+        question: str,
+        *,
+        top_k: int,
+    ) -> dict[str, Any]:
+        """Query one explicit index namespace while preserving public KB identity."""
+
         clean_question = question.strip()
         if not clean_question:
             raise ValueError("问题不能为空。")
@@ -475,7 +1072,7 @@ class RagService:
             raise KnowledgeBaseNotFoundError("知识库不存在。")
 
         query_embedding = (await self.embedder.embed_texts([clean_question]))[0]
-        results = self.vector_store.query(kb_id, query_embedding, top_k)
+        results = self.vector_store.query(namespace, query_embedding, top_k)
         if not results:
             return {
                 "answer": "没有在该知识库中找到相关内容，请尝试换一种问法或上传更多资料。",
@@ -698,26 +1295,49 @@ class RagService:
         except (TypeError, ValueError) as exc:
             raise PipelineDraftValidationError(f"{field_name} must be an integer.") from exc
 
+    def _empty_metadata(self) -> dict[str, dict[str, Any]]:
+        return {
+            "knowledge_bases": {},
+            "documents": {},
+            "pipeline_drafts": {},
+            "pipeline_jobs": {},
+            "pipeline_versions": {},
+            "pipeline_active_versions": {},
+        }
+
     def _read_metadata(self) -> dict[str, dict[str, Any]]:
+        with self._metadata_lock:
+            return self._read_metadata_unlocked()
+
+    def _read_metadata_unlocked(self) -> dict[str, dict[str, Any]]:
         if not self.metadata_path.exists():
-            return {"knowledge_bases": {}, "documents": {}, "pipeline_drafts": {}}
+            return self._empty_metadata()
         try:
             data = json.loads(self.metadata_path.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
-            return {"knowledge_bases": {}, "documents": {}, "pipeline_drafts": {}}
+            return self._empty_metadata()
         if not isinstance(data, dict):
-            return {"knowledge_bases": {}, "documents": {}, "pipeline_drafts": {}}
+            return self._empty_metadata()
         return {
             "knowledge_bases": data.get("knowledge_bases") if isinstance(data.get("knowledge_bases"), dict) else {},
             "documents": data.get("documents") if isinstance(data.get("documents"), dict) else {},
             "pipeline_drafts": data.get("pipeline_drafts") if isinstance(data.get("pipeline_drafts"), dict) else {},
+            "pipeline_jobs": data.get("pipeline_jobs") if isinstance(data.get("pipeline_jobs"), dict) else {},
+            "pipeline_versions": data.get("pipeline_versions") if isinstance(data.get("pipeline_versions"), dict) else {},
+            "pipeline_active_versions": data.get("pipeline_active_versions") if isinstance(data.get("pipeline_active_versions"), dict) else {},
         }
 
     def _write_metadata(self, metadata: dict[str, Any]) -> None:
-        self.metadata_path.write_text(
+        with self._metadata_lock:
+            self._write_metadata_unlocked(metadata)
+
+    def _write_metadata_unlocked(self, metadata: dict[str, Any]) -> None:
+        temporary = self.metadata_path.with_suffix(self.metadata_path.suffix + ".tmp")
+        temporary.write_text(
             json.dumps(metadata, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        os.replace(temporary, self.metadata_path)
 
     def _kb_payload(self, item: dict[str, Any], metadata: dict[str, Any]) -> dict[str, Any]:
         doc_count = sum(

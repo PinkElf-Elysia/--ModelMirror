@@ -1,6 +1,6 @@
 # 术语表
 
-最后更新日期：2026-06-17
+最后更新日期：2026-07-13
 维护人：模镜团队
 
 | 中文名称 | 英文 / 缩写 | 解释 | 在项目中的使用场景 |
@@ -27,6 +27,10 @@
 | 经典画布 | Classic Canvas | React Flow 自研工作流编辑器。 | `/workflow`、`/workflow/classic`。 |
 | workflow-native | workflow-native | 自研工作流实验线，提供静态校验和增量节点验证。 | `/workflow-native`、`/api/workflow-native/validate`。 |
 | 工作流校验 | validate | 执行前检查节点、连线、变量引用和拓扑顺序。 | workflow-native 护栏。 |
+| XpertVersion | Immutable Xpert Version | 发布后不可变的 Xpert 工作流快照。 | Xpert Studio、Handoff、Goal、App 部署。 |
+| Deployment Revision | Deployment Revision | App 每次部署或回滚产生的递增部署记录。 | Xpert App 管理与审计。 |
+| 未列出 App | Unlisted App | 只有持有分享 token 的用户可访问的 Xpert App。 | `/apps/:appSlug`。 |
+| Candidate Index | Candidate Index | Knowledge Pipeline 执行后、尚未激活的隔离索引版本。 | RAG 预览、激活和回滚。 |
 | Fusion | Model Fusion | 多模型并行回答后由裁判模型综合。 | 专家团。 |
 | AI Team | AI Team | 多智能体串行或协作处理任务。 | 专家团。 |
 | 自动路由 | Auto Routing | 根据用户需求匹配最合适的智能体。 | `/api/route-agent`。 |

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import PageContainer from "../components/PageContainer";
 import WorkflowEditor from "../components/workflow/WorkflowEditor";
+import XpertAppDeploymentPanel from "../components/xpert/XpertAppDeploymentPanel";
 import {
   type XpertDefinition,
   type XpertValidationResult,
@@ -272,6 +273,8 @@ export default function XpertStudioPage() {
           )}
         </aside>
       </section>
+
+      <XpertAppDeploymentPanel xpert={xpert} />
 
       <WorkflowEditor
         initialDefinition={toWorkflowDefinition(xpert)}
