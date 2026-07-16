@@ -157,6 +157,7 @@ class KnowledgePipelineExecutor:
             self.service.lexical_store.delete_namespace(namespace)
 
             await self._stage(job_id, "load", self._load_sources)
+            await self._stage(job_id, "vision", self._vision_sources)
             parsed = await self._stage(job_id, "process", self._parse_sources)
             chunks = await self._stage(job_id, "chunk", self._chunk_sources, parsed)
             embeddings = await self._stage(job_id, "embed", self._embed_chunks, chunks)
@@ -253,6 +254,36 @@ class KnowledgePipelineExecutor:
 
     async def _load_sources(self, job_id: str) -> list[dict[str, Any]]:
         return self.service.load_pipeline_job_sources(job_id)
+
+    async def _vision_sources(self, job_id: str) -> list[dict[str, Any]]:
+        processed = await self.service.process_pipeline_job_vision(job_id)
+        job = self.service.get_pipeline_job(job_id)
+        for result in job.get("document_results", []):
+            if not isinstance(result, dict):
+                continue
+            status = str(result.get("vision_status") or "skipped")
+            if status not in {"completed", "failed"}:
+                continue
+            await self._checkpoint(
+                job_id,
+                event_type=f"knowledge_pipeline.vision.{status}",
+                title=(
+                    "Visual understanding completed"
+                    if status == "completed"
+                    else "Visual understanding completed with failures"
+                ),
+                summary=str(result.get("vision_error") or ""),
+                severity="warning" if status == "failed" else "info",
+                metadata={
+                    "source_id": result.get("source_id"),
+                    "selected_page_count": result.get("vision_selected_page_count", 0),
+                    "processed_page_count": result.get("vision_processed_page_count", 0),
+                    "failed_page_count": result.get("vision_failed_page_count", 0),
+                    "block_count": result.get("vision_block_count", 0),
+                    "attempt": result.get("vision_attempt", 0),
+                },
+            )
+        return processed
 
     async def _parse_sources(
         self,
@@ -354,6 +385,16 @@ class KnowledgePipelineExecutor:
                         (int(block.get("end_char", 0)) for block in source_blocks),
                         default=0,
                     )
+                    page_numbers = {
+                        int(block["page_number"])
+                        for block in source_blocks
+                        if block.get("page_number") is not None
+                    }
+                    visual_kinds = {
+                        str(block.get("kind") or "")
+                        for block in source_blocks
+                        if str(block.get("kind") or "").startswith(("image_", "visual_"))
+                    }
                     index = per_source_counts.get(source_id, 0)
                     per_source_counts[source_id] = index + 1
                     chunks.append(
@@ -367,6 +408,13 @@ class KnowledgePipelineExecutor:
                             "chunk_type": str(generated.get("item_type") or "generated"),
                             "parent_chunk_id": (
                                 f"{source_id}_{generated.get('item_id', index)}"
+                            ),
+                            "page_number": next(iter(page_numbers)) if len(page_numbers) == 1 else None,
+                            "visual_kind": next(iter(visual_kinds)) if len(visual_kinds) == 1 else None,
+                            "source_block_id": (
+                                str(source_blocks[0].get("block_id"))
+                                if len(source_blocks) == 1
+                                else None
                             ),
                         }
                     )
@@ -415,6 +463,13 @@ class KnowledgePipelineExecutor:
                                 else str(block.get("kind") or "standard")
                             ),
                             "parent_chunk_id": parent_id,
+                            "page_number": block.get("page_number"),
+                            "visual_kind": (
+                                str(block.get("kind"))
+                                if str(block.get("kind") or "").startswith(("image_", "visual_"))
+                                else None
+                            ),
+                            "source_block_id": block.get("block_id"),
                         }
                     )
         if not chunks:
@@ -469,6 +524,9 @@ class KnowledgePipelineExecutor:
                 "chunk_type": str(item.get("chunk_type") or "standard"),
                 "start_char": int(item.get("start_char", 0)),
                 "end_char": int(item.get("end_char", 0)),
+                "page_number": item.get("page_number"),
+                "visual_kind": item.get("visual_kind"),
+                "source_block_id": item.get("source_block_id"),
             }
             vector_chunks.append(
                 VectorChunk(

@@ -24,6 +24,9 @@ class VectorChunk:
     chunk_type: str = "standard"
     start_char: int = 0
     end_char: int = 0
+    page_number: int | None = None
+    visual_kind: str | None = None
+    source_block_id: str | None = None
 
 
 @dataclass(slots=True)
@@ -39,6 +42,9 @@ class SearchResult:
     chunk_type: str = "standard"
     start_char: int = 0
     end_char: int = 0
+    page_number: int | None = None
+    visual_kind: str | None = None
+    source_block_id: str | None = None
 
 
 @dataclass(slots=True)
@@ -53,6 +59,9 @@ class StoredVectorChunk:
     chunk_type: str = "standard"
     start_char: int = 0
     end_char: int = 0
+    page_number: int | None = None
+    visual_kind: str | None = None
+    source_block_id: str | None = None
 
 
 class VectorStore(Protocol):
@@ -109,6 +118,9 @@ class LocalJsonVectorStore:
                     chunk_type=str(record.get("chunk_type", "standard")),
                     start_char=int(record.get("start_char", 0)),
                     end_char=int(record.get("end_char", 0)),
+                    page_number=_optional_int(record.get("page_number")),
+                    visual_kind=str(record.get("visual_kind") or "") or None,
+                    source_block_id=str(record.get("source_block_id") or "") or None,
                 )
             )
         return sorted(scored, key=lambda item: item.score, reverse=True)[:top_k]
@@ -136,6 +148,9 @@ class LocalJsonVectorStore:
                 chunk_type=str(record.get("chunk_type", "standard")),
                 start_char=int(record.get("start_char", 0)),
                 end_char=int(record.get("end_char", 0)),
+                page_number=_optional_int(record.get("page_number")),
+                visual_kind=str(record.get("visual_kind") or "") or None,
+                source_block_id=str(record.get("source_block_id") or "") or None,
             )
             for record in self._read_records()
             if record.get("doc_id") == doc_id
@@ -189,6 +204,9 @@ class ChromaVectorStore:
                     "chunk_type": chunk.chunk_type,
                     "start_char": chunk.start_char,
                     "end_char": chunk.end_char,
+                    "page_number": chunk.page_number or 0,
+                    "visual_kind": chunk.visual_kind or "",
+                    "source_block_id": chunk.source_block_id or "",
                     "updated_at": time.time(),
                 }
                 for chunk in chunks
@@ -224,6 +242,9 @@ class ChromaVectorStore:
                     chunk_type=str(metadata.get("chunk_type") or "standard"),
                     start_char=int(metadata.get("start_char", 0)),
                     end_char=int(metadata.get("end_char", 0)),
+                    page_number=_optional_int(metadata.get("page_number")),
+                    visual_kind=str(metadata.get("visual_kind") or "") or None,
+                    source_block_id=str(metadata.get("source_block_id") or "") or None,
                 )
             )
         return results
@@ -259,6 +280,9 @@ class ChromaVectorStore:
                     chunk_type=str(metadata.get("chunk_type") or "standard"),
                     start_char=int(metadata.get("start_char", 0)),
                     end_char=int(metadata.get("end_char", 0)),
+                    page_number=_optional_int(metadata.get("page_number")),
+                    visual_kind=str(metadata.get("visual_kind") or "") or None,
+                    source_block_id=str(metadata.get("source_block_id") or "") or None,
                 )
             )
         return sorted(chunks, key=lambda item: item.chunk_index)
@@ -291,4 +315,15 @@ def _chunk_to_record(chunk: VectorChunk) -> dict[str, Any]:
         "chunk_type": chunk.chunk_type,
         "start_char": chunk.start_char,
         "end_char": chunk.end_char,
+        "page_number": chunk.page_number,
+        "visual_kind": chunk.visual_kind,
+        "source_block_id": chunk.source_block_id,
     }
+
+
+def _optional_int(value: Any) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None

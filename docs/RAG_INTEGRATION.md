@@ -2,11 +2,29 @@
 
 本文件说明模镜本地 RAG 模块的架构、API、扩展方式和测试方法。该模块位于 `server/rag/`，前端入口为 `/rag`，聊天页可选择知识库进行检索增强问答。
 
-最后更新日期：2026-07-13
+最后更新日期：2026-07-15
+
+## 2026-07-15 增量：图像与扫描 PDF 知识理解
+
+RAG 上传现支持 PNG、JPEG、WebP 与扫描 PDF。视觉源不会进入旧版即时索引，而是标记为 `pipeline_required`；必须在 Knowledge Canvas 中加入 `image_understanding`、显式选择支持图片输入的模型、执行候选版本并人工激活后才可检索。
+
+```text
+data_source -> image_understanding -> structured_processor
+            -> recursive_chunker | parent_child_chunker
+            -> embedding -> dual_index -> retrieval
+```
+
+- PDF 页面由 `pypdfium2`/PDFium 渲染，图片由 Pillow 解码；上传校验真实格式、声明 MIME、损坏文件、10MB 文件限制和 40MP 解压像素限制。
+- `pdf_page_strategy=auto` 选择文字少于 80 字符或图片覆盖率至少 12% 的页面；画布预览可临时使用全页策略。
+- VLM 沿用现有 LLM Gateway/OpenRouter，不新增供应商 SDK。严格 JSON 输出转换为 OCR、视觉描述、表格和图表块，并继续经过 General/QA/Summary Processor。
+- Job 新增 `vision` stage，候选版本固定 `vision_profile`。逐页缓存以 source/config hash 隔离，失败页可重试，重启后可恢复。
+- 检索和 Citation 响应保持兼容，并可增加 `page_number`、`visual_kind`、`source_block_id` 诊断字段。
+
+安全能力摘要使用 `GET /api/rag/vision-capabilities`。Graph 节点预览最多返回 20 个截断视觉块，不返回原图、Base64、本地路径、正文全集、prompt 或密钥。第三方许可证见 `server/THIRD_PARTY_NOTICES.md`。
 
 ## 2026-07-13 增量：可执行知识流水线画布
 
-新增 `/rag/:kbId/pipeline` 和服务端 Knowledge Pipeline Graph。画布不是新的索引执行系统：Graph 经过校验后编译为现有 Draft，随后仍由 `KnowledgePipelineExecutor` 按 `load / process / chunk / embed / store` 执行并生成隔离候选版本。
+新增 `/rag/:kbId/pipeline` 和服务端 Knowledge Pipeline Graph。画布不是新的索引执行系统：Graph 经过校验后编译为现有 Draft，随后仍由 `KnowledgePipelineExecutor` 按 `load / vision / process / chunk / embed / store` 执行并生成隔离候选版本。
 
 真实节点固定为：
 
@@ -15,7 +33,7 @@ data_source -> structured_processor -> recursive_chunker | parent_child_chunker
             -> embedding -> dual_index -> retrieval
 ```
 
-图校验要求 DAG、端口匹配、六阶段各一个、只有一种分块器、无孤立启用节点，并强制向量与 FTS5 双索引同时启用。`image_understanding` 当前仅为禁用占位，不可连接或执行。
+图校验要求 DAG、端口匹配、必需阶段各一个、只有一种分块器、无孤立启用节点，并强制向量与 FTS5 双索引同时启用。`image_understanding` 是可选真实阶段，启用时只能位于数据源和结构化处理器之间。
 
 新增 API：
 
@@ -492,6 +510,6 @@ The local RAG pipeline now exposes a safe editable draft layer:
 - `PATCH /api/rag/pipeline/draft/{kb_id}` persists safe draft fields only: uploaded file source mode, local parser, local recursive character chunking, `chunk_size`, and `chunk_overlap`.
 - `POST /api/rag/pipeline/draft/{kb_id}/preflight` returns readiness, warnings, per-stage checks, and document/artifact/chunk counts.
 
-Validation boundaries: `chunk_size` must stay between 100 and 4000, `chunk_overlap` must be non-negative and smaller than `chunk_size`, and image understanding cannot be enabled yet. The draft layer does not change upload, parsing, splitting, embedding, vector storage, retrieval, chat RAG, or workflow `knowledge_citation` behavior. Responses must not expose local stored paths, full chunk text, embeddings, prompts, tools outputs, or secrets.
+Validation boundaries: `chunk_size` must stay between 100 and 4000, and `chunk_overlap` must be non-negative and smaller than `chunk_size`. Image understanding is optional, but enabling it requires an explicit vision model and the renderer/model-gateway preflight. Draft changes alone do not rebuild indexes or change chat/workflow retrieval until a candidate version is executed and activated. Responses must not expose local stored paths, full chunk text, images, embeddings, prompts, tool outputs, or secrets.
 
 Last updated: 2026-07-10

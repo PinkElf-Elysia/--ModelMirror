@@ -118,7 +118,7 @@ ModelMirror 已有最小底座：`system_prompt_injector`、`event_recorder`、`
 
 ModelMirror 当前已在本地 RAG 上完成只读 Knowledge Pipeline 元数据视图、`knowledge_citation` 节点，以及 `/rag` 中的数据源、处理器、分块器、图像理解四段 stage 草稿 UI。该草稿层实时派生自现有 FileAsset / Artifact / Chunk 元数据，不迁移向量库、embedding 策略或 `/api/rag/query`。
 
-`XPERT-KNOWLEDGE-CANVAS-01` 将这组 stage 映射为 `/rag/:kbId/pipeline`：中间是 React Flow 执行图，画布附近提供节点库，右侧工作台使用“配置 / 预览 / 运行”tabs，顶部集中保存、校验和执行。真实节点覆盖数据源、结构化处理、两种分块、Embedding、双索引和检索；图像理解仍显示为禁用占位。该映射复用 ModelMirror 现有 Draft/Job/Version，不复制 Xpert Angular 实现，也不产生第二套知识执行器。
+`XPERT-KNOWLEDGE-CANVAS-01` 将这组 stage 映射为 `/rag/:kbId/pipeline`：中间是 React Flow 执行图，画布附近提供节点库，右侧工作台使用“配置 / 预览 / 运行”tabs，顶部集中保存、校验和执行。真实节点覆盖数据源、可选图像理解、结构化处理、两种分块、Embedding、双索引和检索；图像节点要求显式选择视觉模型，并显示页面策略、渲染限制、失败策略和预览。该映射复用 ModelMirror 现有 Draft/Job/Version，不复制 Xpert Angular 实现，也不产生第二套知识执行器。
 
 ## 工具集菜单与市场
 

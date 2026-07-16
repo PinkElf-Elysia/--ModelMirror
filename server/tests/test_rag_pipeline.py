@@ -120,7 +120,7 @@ async def test_rag_pipeline_draft_empty_knowledge_base(client: httpx.AsyncClient
     assert stages["chunker"]["config"]["strategy"] == "recursive_character"
     assert stages["chunker"]["config"]["chunk_size"] == 500
     assert stages["chunker"]["config"]["chunk_overlap"] == 50
-    assert stages["image_understanding"]["status"] == "planned"
+    assert stages["image_understanding"]["status"] == "disabled"
     assert stages["image_understanding"]["metadata"]["enabled"] is False
     assert stages["image_understanding"]["config"]["enabled"] is False
 

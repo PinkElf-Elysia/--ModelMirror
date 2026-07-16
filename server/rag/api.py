@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
@@ -50,6 +51,9 @@ class DocumentPayload(BaseModel):
     filename: str
     size: int
     chunk_count: int
+    content_type: str = "application/octet-stream"
+    ingestion_status: str = "indexed_legacy"
+    visual_candidate: bool = False
     created_at: float
 
 
@@ -73,6 +77,9 @@ class RagSourcePayload(BaseModel):
     chunk_type: str = "standard"
     start_char: int = 0
     end_char: int = 0
+    page_number: int | None = None
+    visual_kind: str | None = None
+    source_block_id: str | None = None
 
 
 class RetrievalOptionsPayload(BaseModel):
@@ -110,6 +117,8 @@ class FileAssetPayload(BaseModel):
     size: int
     extension: str
     mime_type: str | None = None
+    ingestion_status: str = "indexed_legacy"
+    visual_candidate: bool = False
     created_at: float
 
 
@@ -125,6 +134,8 @@ class ArtifactPayload(BaseModel):
     knowledge_base_id: str
     title: str
     chunk_count: int
+    status: str = "indexed_legacy"
+    visual_candidate: bool = False
     created_at: float
 
 
@@ -353,6 +364,15 @@ class PipelineDocumentResultPayload(BaseModel):
     warnings: list[str] = Field(default_factory=list)
     error: str | None = None
     duration_ms: float | None = None
+    vision_status: str = "skipped"
+    vision_attempt: int = 0
+    vision_page_count: int = 0
+    vision_selected_page_count: int = 0
+    vision_processed_page_count: int = 0
+    vision_failed_page_count: int = 0
+    vision_block_count: int = 0
+    vision_warnings: list[str] = Field(default_factory=list)
+    vision_error: str | None = None
 
 
 class PipelineJobPayload(BaseModel):
@@ -410,6 +430,11 @@ class PipelineVersionPayload(BaseModel):
     retrieval_profile: dict[str, Any] = Field(default_factory=dict)
     vector_index_ready: bool = True
     lexical_index_ready: bool = False
+    vision_profile: dict[str, Any] = Field(default_factory=dict)
+    vision_page_count: int = 0
+    vision_processed_page_count: int = 0
+    vision_failed_page_count: int = 0
+    vision_block_count: int = 0
 
 
 class PipelineVersionListResponse(BaseModel):
@@ -441,6 +466,9 @@ class CitationAnchorPayload(BaseModel):
     document_name: str
     score: float
     snippet: str
+    page_number: int | None = None
+    visual_kind: str | None = None
+    source_block_id: str | None = None
 
 
 class CitationAnchorRequest(BaseModel):
@@ -506,6 +534,11 @@ async def get_processor_capabilities() -> dict[str, Any]:
     return get_rag_service().processor_capabilities()
 
 
+@router.get("/vision-capabilities")
+async def get_vision_capabilities() -> dict[str, Any]:
+    return get_rag_service().vision_capabilities()
+
+
 @router.post("/knowledge_bases", response_model=KnowledgeBasePayload)
 async def create_knowledge_base(payload: KnowledgeBaseCreateRequest) -> dict[str, Any]:
     try:
@@ -539,6 +572,26 @@ async def upload_document(kb_id: str, file: UploadFile = File(...)) -> dict[str,
     content = await file.read(MAX_UPLOAD_BYTES + 1)
     if len(content) > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail="文件过大，请上传 10MB 以内的文档。")
+
+    extension = Path(filename).suffix.lower()
+    declared_type = str(file.content_type or "").lower().strip()
+    expected_types = {
+        ".png": {"image/png"},
+        ".jpg": {"image/jpeg"},
+        ".jpeg": {"image/jpeg"},
+        ".webp": {"image/webp"},
+        ".pdf": {"application/pdf"},
+    }
+    if (
+        extension in expected_types
+        and declared_type
+        and declared_type != "application/octet-stream"
+        and declared_type not in expected_types[extension]
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="The uploaded MIME type does not match the file extension.",
+        )
 
     try:
         return await get_rag_service().upload_document(kb_id, filename, content)

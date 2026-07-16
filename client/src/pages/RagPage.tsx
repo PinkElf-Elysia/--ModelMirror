@@ -20,6 +20,9 @@ interface RagDocument {
   filename: string;
   size: number;
   chunk_count: number;
+  content_type?: string;
+  ingestion_status?: string;
+  visual_candidate?: boolean;
   created_at: number;
 }
 
@@ -1195,7 +1198,7 @@ export default function RagPage() {
               </div>
 
               <input
-                accept=".txt,.md,.markdown,.pdf,text/plain,text/markdown,application/pdf"
+                accept=".txt,.md,.markdown,.pdf,.png,.jpg,.jpeg,.webp,text/plain,text/markdown,application/pdf,image/png,image/jpeg,image/webp"
                 className="hidden"
                 onChange={(event) => {
                   const file = event.target.files?.[0];
@@ -1223,7 +1226,7 @@ export default function RagPage() {
                   {isUploading ? "正在入库并生成索引..." : "拖拽文档到这里，或点击上传"}
                 </p>
                 <p className="mt-2 text-xs text-slate-400">
-                  支持 .txt / .md / .pdf，上传后会自动切块、向量化并写入检索索引。
+                  支持 .txt / .md / .pdf / .png / .jpg / .webp。图片和扫描 PDF 需在知识流水线中完成视觉理解后再激活索引。
                 </p>
                 <button
                   className="mt-4 rounded-full bg-white/[0.08] px-4 py-2 text-sm font-semibold text-slate-100 transition hover:bg-white/[0.12] disabled:cursor-not-allowed disabled:opacity-50"
@@ -2080,9 +2083,10 @@ export default function RagPage() {
                           key={document.id}
                         >
                           <div>
-                            <h4 className="font-semibold text-white">
-                              {document.filename}
-                            </h4>
+                            <div className="flex flex-wrap items-center gap-2">
+                              <h4 className="font-semibold text-white">{document.filename}</h4>
+                              {document.ingestion_status === "pipeline_required" ? <span className="rounded-full border border-violet-300/25 bg-violet-300/10 px-2 py-0.5 text-[10px] font-semibold text-violet-100">需要执行知识流水线</span> : null}
+                            </div>
                             <p className="mt-1 text-xs text-slate-400">
                               {document.chunk_count} 个片段 · {formatFileSize(document.size)} ·{" "}
                               {formatDate(document.created_at)}
