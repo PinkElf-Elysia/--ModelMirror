@@ -6,6 +6,7 @@ from typing import Any
 from .capabilities import CapabilityRegistry
 from .middleware import MiddlewarePipeline
 from .models import MiddlewareContext, ToolCallRequest, ToolCallResponse
+from .interrupts import RuntimeInterrupt, RuntimeMiddlewareFatalError
 from .tool_policy import InMemoryToolAuditStore, ToolPermissionPolicy
 from .toolset import RuntimeToolCall, RuntimeToolError, RuntimeToolResult
 
@@ -96,6 +97,10 @@ async def run_tool_with_runtime(
 
     try:
         response = await pipeline.run_tool_call(request, handler, context)
+    except (RuntimeInterrupt, RuntimeMiddlewareFatalError):
+        # Durable approval interrupts and persistence failures must never fall
+        # through to the legacy middleware fail-open provider path.
+        raise
     except RuntimeToolError:
         raise
     except Exception as exc:

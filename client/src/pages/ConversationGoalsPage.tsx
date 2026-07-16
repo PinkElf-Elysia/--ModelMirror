@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import PageContainer from "../components/PageContainer";
+import RuntimeApprovalPanel from "../components/runtime/RuntimeApprovalPanel";
 import {
   type ConversationGoal,
   type GoalStatus,
@@ -331,6 +332,17 @@ export default function ConversationGoalsPage() {
                 {goal.steps.length > 0 ? <div className="mt-4"><div className="mb-1 flex items-center justify-between text-xs text-slate-400"><span>完成进度</span><span>{progress}%</span></div><div className="h-2 overflow-hidden rounded-full bg-white/[0.07]"><div className="h-full rounded-full bg-hire-300 transition-[width] duration-200" style={{ width: `${progress}%` }} /></div></div> : null}
                 {goal.error ? <p className="mt-3 rounded-lg border border-rose-300/25 bg-rose-300/10 px-3 py-2 text-sm text-rose-100">{goal.error}</p> : null}
               </section>
+
+              <div className="px-4 pt-4 sm:px-5">
+                <RuntimeApprovalPanel
+                  onResolved={async () => {
+                    await Promise.all([loadDetail(goal.goal_id), loadList()]);
+                  }}
+                  scopeId={goal.goal_id}
+                  scopeType="goal"
+                  title="Goal 步骤等待审批"
+                />
+              </div>
 
               {goal.status === "planning" ? (
                 <section className="p-8 text-center"><span aria-hidden="true" className="mx-auto block animate-pulse text-xl text-cyan-200">•••</span><h3 className="mt-3 text-base font-semibold text-white">Planner Xpert 正在生成计划</h3><p className="mt-2 text-sm text-slate-400">计划生成后会进入人工审核，不会自动开始执行。</p></section>

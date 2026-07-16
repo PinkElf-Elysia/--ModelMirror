@@ -9,6 +9,7 @@ import "@xyflow/react/dist/style.css";
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import PageContainer from "../components/PageContainer";
+import RuntimeApprovalPanel from "../components/runtime/RuntimeApprovalPanel";
 import WorkflowNodeCard from "../components/workflow/WorkflowNodeCard";
 import WorkflowRun from "../components/workflow/WorkflowRun";
 import { models } from "../data/models";
@@ -1196,6 +1197,19 @@ export default function MetaAgentPage() {
               >
                 应用
               </button>
+            </div>
+            <div className="mt-3">
+              <RuntimeApprovalPanel
+                compact
+                onResolved={async () => {
+                  await loadHandoffInbox();
+                  if (selectedTask?.task_id) {
+                    await loadAgentTaskHandoffs(selectedTask.task_id);
+                  }
+                }}
+                scopeType="handoff"
+                title="Handoff 审批"
+              />
             </div>
             <div className="mt-3 max-h-64 space-y-2 overflow-y-auto pr-1">
               {handoffInbox.length === 0 ? (

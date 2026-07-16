@@ -1030,7 +1030,7 @@ function AgentStudioPanel({
       </ConfigSection>
 
       <ConfigSection
-        description="画布上的 runtime_middleware 节点已经可用，节点内嵌中间件后续接入。"
+        description="通过紫色绑定边附加 Agent 级能力，按优先级稳定执行。HITL 会在工具调用或最终输出处持久暂停。"
         title="中间件"
       >
         {boundMiddlewares.length ? (
@@ -1061,7 +1061,7 @@ function AgentStudioPanel({
           </div>
         ) : (
           <p className="rounded-lg border border-dashed border-white/15 bg-white/[0.035] px-3 py-3 text-xs leading-5 text-slate-400">
-          暂未在智能体节点内嵌中间件。需要工具策略、审计或 system prompt 时，请继续使用画布上的中间件节点。
+            暂无绑定中间件。可从节点库拖入运行时中间件，并从紫色端口连接到当前 Agent。
           </p>
         )}
       </ConfigSection>

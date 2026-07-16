@@ -423,13 +423,13 @@ npm.cmd run build
 
 ## 2026-06-17 增量：人工介入节点
 
-`human_intervention` 已进入 workflow-native / classic 共享实验线。它对齐 Dify 的 Human-in-the-loop 概念，但保持 MVP 边界：仅支持文本输入、内存态暂停和 REST resume，不做持久化审批流、多人协作或权限系统。
+`human_intervention` 已进入 workflow-native / classic 共享实验线。它继续支持文本输入、既有 SSE 与 REST resume，同时底层暂停状态已统一写入 `WorkflowExecutionStore` / `RuntimeApprovalStore`，页面刷新或容器重启后可以恢复。当前仍不提供多人协作或用户权限体系。
 
 ### 节点映射
 
 | Native 节点 | Dify 概念 | 当前差异 |
 | --- | --- | --- |
-| `human_intervention` | `human-in-the-loop` | native 运行器通过 SSE 暂停并等待 `/api/workflow/run/{task_id}/resume`，Dify 可提供更完整的人工审批和运行态管理。 |
+| `human_intervention` | `human-in-the-loop` | classic 运行器通过持久 execution 暂停并兼容 `/api/workflow/run/{task_id}/resume`；Agent 工具与最终输出审批由绑定的 `human_in_the_loop` middleware 提供。 |
 | `question_classifier` | `question-classifier` / 问题分类器 | native 仅支持关键词规则分类文本到预设类别，可选 LLM 回退；Dify 可扩展为分类模型。 |
 | `agent` | `agent` | native 当前提供 ReAct-Lite：模型用 JSON 决策直接回答或调用已注册 MCP 工具；复杂多 Agent 编排后续独立设计。 |
 
@@ -514,8 +514,9 @@ curl http://localhost:8000/api/workflow/run/<task_id>/status
 
 ### 运行态与回退
 
-- 任务状态仅存放在后端内存中，TTL 为 30 分钟。
-- 工作流结束、SSE 连接断开或 TTL 过期都会清理任务。
+- 兼容内存 task state 仍服务于活动连接，持久 execution 保存恢复所需队列、变量和已执行节点。
+- SSE 连接断开不会自动取消持久等待；安全事件可通过 `/api/workflow/run/{task_id}/stream?after_sequence=` 重放。
+- 审批超时不会自动批准。直接运行可重新打开；Goal/Handoff 转为 `needs_attention`。
 - 若出现问题，可从前端隐藏 `human_intervention` 调色板条目，或在后端将 `WORKFLOW_HUMAN_INTERVENTION_ENABLED` 设为 `False` 降级。
 
 ## 2026-06-17 增量：问题分类器节点
@@ -689,3 +690,11 @@ The Xpert Studio fields `enableFileUnderstanding`, `memoryReadEnabled`, `memoryR
 每个 `workflow_agent` 会按 `middlewarePriority` 和节点 ID 编译独立 pipeline。`context_compression`、`structured_output`、`todo_planner` 和 `llm_tool_selector` 已进入真实执行：模型直答与 ReAct 决策均运行模型 hooks，工具继续走 Runtime Toolset、policy 和 audit。结构化输出仍复用既有 SSE，仅替换最终正文为 schema-valid JSON；Todo 按 conversation/goal/handoff/workflow 隔离，公共 App 只使用临时 run 作用域。
 
 节点库浮层、普通拖拽 payload、右侧 `配置 / 运行` tabs 和已有节点协议保持兼容。完整配置、顺序和安全边界见 `docs/XPERT_MIDDLEWARE.md`。
+
+## 2026-07-16 可恢复 HITL Runtime Middleware
+
+绑定到 `workflow_agent` 的 `human_in_the_loop` 已进入真实执行。工具审批发生在 allowlist / tool policy 之后和 audit / Provider 之前；支持批准、参数编辑与拒绝，编辑参数会再次通过 schema 和 policy 校验。最终答案可批准、人工替换或要求模型修订。
+
+`RuntimeInterrupt` 不属于普通可降级异常，任何审批中断或审批存储错误都不得触发工具 fallback。runner 会持久化变量、队列、已执行节点、ReAct 消息和轮次，由 `ApprovalCoordinator` 使用 lease 恢复；容器重启后不重跑已完成节点，也不重复调用已批准工具。
+
+新增 `runtime_approval_pending / runtime_approval_resolved` 兼容 SSE 事件和安全事件重放接口。GoalStep、AgentTask、Handoff 支持 `waiting_approval`；过期转 `needs_attention`。公开 Xpert App 部署预检拒绝两类交互式 HITL，普通 Workflow、私有 Xpert Chat、Goal 与 Handoff 保持可用。

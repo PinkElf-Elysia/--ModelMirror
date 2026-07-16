@@ -495,7 +495,7 @@ class GoalCoordinator:
     async def _reconcile_steps(self, goal: ConversationGoal, run: RuntimeRun) -> None:
         failed_step: GoalStep | None = None
         for step in goal.steps:
-            if step.status != "running" or not step.handoff_id:
+            if step.status not in {"running", "waiting_approval"} or not step.handoff_id:
                 continue
             handoff = await self.task_store.get_handoff(step.handoff_id)
             if handoff is None:
@@ -522,6 +522,61 @@ class GoalCoordinator:
                     "Goal step completed",
                     f"{step.step_id} result_length={len(result)}",
                     {"goal_id": goal.goal_id, "step_id": step.step_id},
+                )
+            elif handoff.status == "waiting_approval":
+                if step.status != "waiting_approval":
+                    await self.goal_store.update_step(
+                        goal.goal_id,
+                        step.step_id,
+                        status="waiting_approval",
+                        attempts=int(
+                            handoff.metadata.get("attempts") or step.attempts
+                        ),
+                    )
+                    await self._checkpoint(
+                        run,
+                        "goal.step.waiting_approval",
+                        "Goal step is waiting for approval",
+                        str(handoff.metadata.get("approval_id") or ""),
+                        {
+                            "goal_id": goal.goal_id,
+                            "step_id": step.step_id,
+                            "approval_id": handoff.metadata.get("approval_id"),
+                        },
+                        severity="warning",
+                    )
+            elif handoff.status == "needs_attention":
+                await self.goal_store.update_step(
+                    goal.goal_id,
+                    step.step_id,
+                    status="waiting_approval",
+                    error=str(
+                        handoff.metadata.get("last_error")
+                        or "Runtime approval requires attention."
+                    )[:2000],
+                )
+
+                def apply_approval_attention(current: ConversationGoal) -> None:
+                    current.status = "needs_attention"
+                    current.error = (
+                        f"Step {step.step_id} has an expired runtime approval."
+                    )
+
+                await self.goal_store.mutate_steps(
+                    goal.goal_id,
+                    apply_approval_attention,
+                )
+                await self._checkpoint(
+                    run,
+                    "goal.needs_attention",
+                    "Goal approval needs attention",
+                    step.step_id,
+                    {
+                        "goal_id": goal.goal_id,
+                        "step_id": step.step_id,
+                        "approval_id": handoff.metadata.get("approval_id"),
+                    },
+                    severity="warning",
                 )
             elif handoff.status in {"dead_letter", "rejected"}:
                 error = str(
@@ -580,7 +635,11 @@ class GoalCoordinator:
             )
 
     async def _dispatch_ready_steps(self, goal: ConversationGoal, run: RuntimeRun) -> None:
-        active = sum(1 for step in goal.steps if step.status == "running")
+        active = sum(
+            1
+            for step in goal.steps
+            if step.status in {"running", "waiting_approval"}
+        )
         slots = max(0, goal.max_parallel - active)
         if slots == 0:
             return

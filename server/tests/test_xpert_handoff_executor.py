@@ -163,6 +163,61 @@ async def test_handoff_executor_retries_then_completes() -> None:
 
 
 @pytest.mark.asyncio
+async def test_handoff_executor_preserves_waiting_approval_without_reclaim() -> None:
+    store = AgentTaskStore()
+    registry = RunRegistry()
+    task = await store.create_task("Approval task", "payload")
+    handoff = await store.create_handoff(
+        task.task_id,
+        "manager",
+        "xpert:specialist",
+        "delegate",
+        metadata={"execution_mode": "xpert_auto", "ready_for_execution": True},
+    )
+    task_run = await registry.create_run(
+        "agent_task",
+        task.title,
+        source_id=task.task_id,
+    )
+    handoff_run = await registry.create_run(
+        "agent_handoff",
+        "manager -> specialist",
+        source_id=handoff.handoff_id,
+        parent_run_id=task_run.run_id,
+    )
+
+    async def execute_target(*_args: Any) -> HandoffExecutionResult:
+        return HandoffExecutionResult(
+            output="",
+            run_id="xpert-run-waiting",
+            xpert_id="xpert-1",
+            xpert_slug="specialist",
+            xpert_version=1,
+            waiting_approval=True,
+            approval_id="approval-1",
+            task_id="workflow-task-1",
+        )
+
+    executor = HandoffExecutor(store, registry, execute_target, worker_id="worker")
+    waiting = await executor.execute_handoff(handoff.handoff_id)
+
+    assert waiting.status == "waiting_approval"
+    assert waiting.metadata["approval_id"] == "approval-1"
+    assert waiting.metadata["lease_token"] == ""
+    updated_task = await store.get_task(task.task_id)
+    assert updated_task is not None
+    assert updated_task.status == "waiting_approval"
+    assert await store.list_executable_handoffs() == []
+    assert (await registry.get_run(task_run.run_id)).status == "waiting"
+    assert (await registry.get_run(handoff_run.run_id)).status == "waiting"
+    checkpoints = await registry.list_checkpoints(handoff_run.run_id)
+    assert any(
+        item.event_type == "agent_handoff.waiting_approval"
+        for item in checkpoints
+    )
+
+
+@pytest.mark.asyncio
 async def test_handoff_executor_dead_letters_permanent_failure() -> None:
     store = AgentTaskStore()
     registry = RunRegistry()

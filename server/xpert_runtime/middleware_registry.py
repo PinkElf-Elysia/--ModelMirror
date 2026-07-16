@@ -382,6 +382,76 @@ def register_builtin_middleware_nodes(
         )
     )
 
+    registry.register(
+        RuntimeMiddlewareNode(
+            id="human_in_the_loop",
+            kind="runtime_middleware.human_in_the_loop",
+            title="人机审批",
+            description="在工具调用或最终输出前持久化暂停，等待人工批准、编辑或拒绝。",
+            category="agent",
+            icon="ShieldCheck",
+            fields=[
+                RuntimeMiddlewareField(
+                    name="interrupt_on_tools",
+                    label="需审批工具",
+                    type="textarea",
+                    default="",
+                    rows=3,
+                    placeholder="search, write_file，或 * 表示全部工具",
+                    description="逗号或换行分隔；未列出的工具自动放行。",
+                ),
+                RuntimeMiddlewareField(
+                    name="final_confirmation",
+                    label="最终输出确认",
+                    type="boolean",
+                    default=False,
+                ),
+                RuntimeMiddlewareField(
+                    name="allow_edit",
+                    label="允许编辑工具参数",
+                    type="boolean",
+                    default=True,
+                ),
+                RuntimeMiddlewareField(
+                    name="allow_reject",
+                    label="允许拒绝工具调用",
+                    type="boolean",
+                    default=True,
+                ),
+                RuntimeMiddlewareField(
+                    name="description_prefix",
+                    label="审批说明",
+                    type="textarea",
+                    default="工具调用需要人工审批",
+                    rows=2,
+                ),
+                RuntimeMiddlewareField(
+                    name="timeout_seconds",
+                    label="审批超时（秒）",
+                    type="number",
+                    default=3600,
+                    min_value=30,
+                    max_value=86400,
+                ),
+                RuntimeMiddlewareField(
+                    name="max_revision_rounds",
+                    label="最大修订轮次",
+                    type="number",
+                    default=1,
+                    min_value=0,
+                    max_value=5,
+                ),
+            ],
+            tags=["agent", "approval", "hitl", "interrupt"],
+            metadata={
+                "middleware_name": "human_in_the_loop",
+                "runtime_hook": "wrap_tool_call,after_agent",
+                "durable": True,
+                "fail_open": False,
+            },
+        )
+    )
+
 
 runtime_middleware_registry = RuntimeMiddlewareRegistry()
 register_builtin_middleware_nodes(runtime_middleware_registry)

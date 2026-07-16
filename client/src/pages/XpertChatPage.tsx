@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import PageContainer from "../components/PageContainer";
+import RuntimeApprovalPanel from "../components/runtime/RuntimeApprovalPanel";
 import {
   type XpertConversationMessage,
   type XpertConversation,
@@ -39,6 +40,11 @@ interface XpertRunEvent {
   message?: string;
   xpert_id?: string;
   xpert_version?: number;
+  approval_id?: string;
+  approval_status?: string;
+  request_type?: "tool_call" | "final_output" | "manual_input";
+  tool_name?: string;
+  sequence?: number;
 }
 
 interface RuntimeRunSummary {
@@ -534,6 +540,7 @@ export default function XpertChatPage() {
       let finalOutput = "";
       let nextRunId = "";
       let nextTaskId = "";
+      let approvalPending = false;
 
       const processBlock = (block: string) => {
         for (const line of block.split(/\r?\n/)) {
@@ -553,6 +560,9 @@ export default function XpertChatPage() {
           if (event.event === "workflow_end") {
             finalOutput = event.final_output || "";
           }
+          if (event.event === "runtime_approval_pending") {
+            approvalPending = true;
+          }
           if (event.event === "error") {
             throw new Error(event.message || "Xpert 运行失败");
           }
@@ -571,10 +581,12 @@ export default function XpertChatPage() {
         if (done) break;
       }
       if (buffer.trim()) processBlock(buffer);
-      setMessages((current) => [
-        ...current,
-        { role: "assistant", content: finalOutput || "运行完成，但没有返回文本输出。" },
-      ]);
+      if (!approvalPending) {
+        setMessages((current) => [
+          ...current,
+          { role: "assistant", content: finalOutput || "运行完成，但没有返回文本输出。" },
+        ]);
+      }
       if (nextRunId) await loadTrace(nextRunId, nextTaskId);
       window.setTimeout(() => void refreshContext(), 800);
       window.setTimeout(() => void refreshKnowledgeProposals(), 800);
@@ -582,6 +594,64 @@ export default function XpertChatPage() {
       const messageText = caught instanceof Error ? caught.message : "Xpert 运行失败";
       setError(messageText);
       setMessages((current) => [...current, { role: "assistant", content: `运行失败：${messageText}` }]);
+    } finally {
+      setRunning(false);
+    }
+  }
+
+  async function resumeApprovalExecution() {
+    if (!taskId || running) return;
+    setRunning(true);
+    setError("");
+    try {
+      const response = await fetch(`/api/workflow/run/${taskId}/stream?after_sequence=0`);
+      if (!response.ok) throw new Error(await responseError(response));
+      if (!response.body) throw new Error("浏览器未收到恢复执行流。");
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let finalOutput = "";
+      let approvalPending = false;
+      let nextRunId = runId;
+      setEvents([]);
+
+      const processBlock = (block: string) => {
+        for (const line of block.split(/\r?\n/)) {
+          if (!line.startsWith("data:")) continue;
+          const raw = line.slice(5).trim();
+          if (!raw) continue;
+          const event = JSON.parse(raw) as XpertRunEvent;
+          setEvents((current) => [...current.slice(-79), event]);
+          if (event.run_id) {
+            nextRunId = event.run_id;
+            setRunId(event.run_id);
+          }
+          if (event.event === "workflow_end") finalOutput = event.final_output || "";
+          if (event.event === "runtime_approval_pending") approvalPending = true;
+          if (event.event === "error") throw new Error(event.message || "Xpert 恢复执行失败");
+        }
+      };
+
+      while (true) {
+        const { done, value } = await reader.read();
+        buffer += decoder.decode(value, { stream: !done });
+        let match = buffer.match(/\r?\n\r?\n/);
+        while (match?.index !== undefined) {
+          processBlock(buffer.slice(0, match.index));
+          buffer = buffer.slice(match.index + match[0].length);
+          match = buffer.match(/\r?\n\r?\n/);
+        }
+        if (done) break;
+      }
+      if (buffer.trim()) processBlock(buffer);
+      if (!approvalPending && finalOutput) {
+        setMessages((current) => [...current, { role: "assistant", content: finalOutput }]);
+      }
+      if (nextRunId) await loadTrace(nextRunId, taskId);
+      window.setTimeout(() => void refreshContext(), 800);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Xpert 恢复执行失败");
     } finally {
       setRunning(false);
     }
@@ -750,6 +820,16 @@ export default function XpertChatPage() {
           </div>
 
           <footer className="border-t border-white/10 p-4">
+            {taskId ? (
+              <div className="mb-3">
+                <RuntimeApprovalPanel
+                  compact
+                  onResolved={() => resumeApprovalExecution()}
+                  taskId={taskId}
+                  title="Xpert 等待审批"
+                />
+              </div>
+            ) : null}
             {error ? <p className="mb-3 rounded-lg border border-rose-300/25 bg-rose-300/10 px-3 py-2 text-xs text-rose-100">{error}</p> : null}
             {selectedFileIds.length > 0 ? (
               <div className="mb-2 flex flex-wrap gap-2">

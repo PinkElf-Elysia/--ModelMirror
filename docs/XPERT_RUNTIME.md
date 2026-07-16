@@ -36,9 +36,19 @@ The first chat release requires:
 - exactly one output node whose variable matches output_variable;
 - at least one workflow_agent with modelId, rolePrompt, taskInput, and outputVariable;
 - reachable template variables, except the configured history variable injected by the published-chat runtime;
-- no human_intervention node, because the v1 chat entry has no pause/resume UI.
+- private Xpert Chat may use `human_intervention` or bound `human_in_the_loop` because it exposes durable approval and resume UI; public Xpert App deployments reject both interactive forms.
 
 Existing middleware, MCP Toolset, knowledge, AgentTask, Handoff, and RunRegistry validation remains in force.
+
+## Durable Human Approval And Resume
+
+Interactive private runs persist approval requests in `RuntimeApprovalStore` and continuation state in `WorkflowExecutionStore`, both under the Runtime storage directory. A continuation includes the bounded workflow queue, variables, executed-node set, and current workflow-agent ReAct state. Public APIs expose only redacted approval arguments and a safe sequenced event journal.
+
+Tool execution is ordered as policy, approval, audit start, Provider, then audit completion. Approval interrupts are fatal control signals rather than ordinary middleware errors, so fail-open handling can never invoke the Provider while approval is pending. Edited arguments are schema-validated and policy-checked again before execution. A rejected tool returns an artificial tool result to the model without invoking the Provider.
+
+`ApprovalCoordinator` claims resumable executions with a lease and continues from the suspended Agent action. Restart recovery clears stale process leases. Completed workflow nodes and approved tool calls are not repeated. Approval timeout never implies consent: direct Workflow/Xpert runs remain reopenable, while Goal/Handoff work moves to `needs_attention`.
+
+The safe event stream is available at `GET /api/workflow/run/{task_id}/stream?after_sequence=`. Existing workflow SSE remains compatible and adds only `runtime_approval_pending` and `runtime_approval_resolved`. The legacy `/resume` endpoint remains valid for `human_intervention`.
 
 ## Public API
 

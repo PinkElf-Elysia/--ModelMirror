@@ -1574,6 +1574,44 @@ def validate_node_configuration(
                 20,
                 integer=True,
             )
+        if middleware_id == "human_in_the_loop":
+            _validate_middleware_number(
+                issues,
+                node.id,
+                config,
+                "timeout_seconds",
+                30,
+                86400,
+                integer=True,
+            )
+            _validate_middleware_number(
+                issues,
+                node.id,
+                config,
+                "max_revision_rounds",
+                0,
+                5,
+                integer=True,
+            )
+            interrupt_on_tools = str(
+                config.get("interrupt_on_tools") or ""
+            ).strip()
+            final_confirmation_raw = config.get("final_confirmation", False)
+            if isinstance(final_confirmation_raw, str):
+                final_confirmation = final_confirmation_raw.lower() == "true"
+            else:
+                final_confirmation = bool(final_confirmation_raw)
+            if not interrupt_on_tools and not final_confirmation:
+                issues.append(
+                    ValidationIssue(
+                        code="inactive_runtime_middleware_hitl",
+                        message=(
+                            "human_in_the_loop must configure interrupt_on_tools "
+                            "or enable final_confirmation."
+                        ),
+                        node_id=node.id,
+                    )
+                )
 
     return issues
 

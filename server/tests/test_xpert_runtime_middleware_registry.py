@@ -28,6 +28,7 @@ def test_registry_list_returns_builtin_nodes() -> None:
         "structured_output",
         "todo_planner",
         "llm_tool_selector",
+        "human_in_the_loop",
     }
     for node in nodes:
         assert node.id

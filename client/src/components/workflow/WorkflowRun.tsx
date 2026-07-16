@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import RuntimeApprovalPanel from "../runtime/RuntimeApprovalPanel";
 import {
   type WorkflowDefinition,
   type WorkflowRunEvent,
@@ -281,6 +282,20 @@ function buildRunSteps(events: WorkflowRunEvent[]) {
       step.variable = event.output_variable ?? step.variable;
       return;
     }
+    if (event.event === "runtime_approval_pending") {
+      step.status = "waiting";
+      step.output = appendStepOutput(
+        step.output,
+        event.message || `等待审批${event.tool_name ? `：${event.tool_name}` : ""}`,
+        step.type,
+      );
+      return;
+    }
+    if (event.event === "runtime_approval_resolved") {
+      step.status = "running";
+      step.output = appendStepOutput(step.output, event.message || "审批已处理，继续执行。", step.type);
+      return;
+    }
     if (event.event === "node_delta") {
       step.output = appendStepOutput(step.output, event.output, step.type);
       return;
@@ -350,6 +365,40 @@ export default function WorkflowRun({
 
   const runSteps = useMemo(() => buildRunSteps(events), [events]);
 
+  async function consumeWorkflowResponse(response: Response, replaceEvents = false) {
+    const reader = response.body?.getReader();
+    if (!reader) throw new Error("当前浏览器不支持流式运行结果。");
+    if (replaceEvents) setEvents([]);
+
+    const decoder = new TextDecoder("utf-8");
+    let buffer = "";
+    const acceptEvent = (event: WorkflowRunEvent) => {
+      handleRunEvent(event);
+      if (event.event !== "heartbeat") {
+        setEvents((current) => [...current, event]);
+      }
+    };
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const chunks = buffer.split(/\r?\n\r?\n/);
+      buffer = chunks.pop() ?? "";
+      for (const chunk of chunks) {
+        for (const data of readSseEvent(chunk)) {
+          acceptEvent(JSON.parse(data) as WorkflowRunEvent);
+        }
+      }
+    }
+    buffer += decoder.decode();
+    if (buffer.trim()) {
+      for (const data of readSseEvent(buffer)) {
+        acceptEvent(JSON.parse(data) as WorkflowRunEvent);
+      }
+    }
+  }
+
   async function runWorkflow() {
     onRunStart?.();
     setEvents([]);
@@ -389,41 +438,7 @@ export default function WorkflowRun({
         throw new Error(payload?.error ?? payload?.detail ?? "工作流运行失败。");
       }
 
-      const reader = response.body?.getReader();
-      if (!reader) throw new Error("当前浏览器不支持流式运行结果。");
-
-      const decoder = new TextDecoder("utf-8");
-      let buffer = "";
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const chunks = buffer.split(/\r?\n\r?\n/);
-        buffer = chunks.pop() ?? "";
-
-        for (const chunk of chunks) {
-          for (const data of readSseEvent(chunk)) {
-            const event = JSON.parse(data) as WorkflowRunEvent;
-            handleRunEvent(event);
-            if (event.event !== "heartbeat") {
-              setEvents((current) => [...current, event]);
-            }
-          }
-        }
-      }
-
-      buffer += decoder.decode();
-      if (buffer.trim()) {
-        for (const data of readSseEvent(buffer)) {
-          const event = JSON.parse(data) as WorkflowRunEvent;
-          handleRunEvent(event);
-          if (event.event !== "heartbeat") {
-            setEvents((current) => [...current, event]);
-          }
-        }
-      }
+      await consumeWorkflowResponse(response);
     } catch (runError) {
       setError(runError instanceof Error ? runError.message : "工作流运行失败。");
     } finally {
@@ -485,6 +500,26 @@ export default function WorkflowRun({
       setError(
         resumeError instanceof Error ? resumeError.message : "人工输入提交失败。",
       );
+    } finally {
+      setIsResuming(false);
+    }
+  }
+
+  async function resumeDurableExecution() {
+    if (!taskId) return;
+    setError("");
+    setIsResuming(true);
+    try {
+      const response = await fetch(`/api/workflow/run/${taskId}/stream?after_sequence=0`);
+      if (!response.ok) {
+        const payload = (await response.json().catch(() => null)) as
+          | { detail?: string }
+          | null;
+        throw new Error(payload?.detail || "恢复执行流失败");
+      }
+      await consumeWorkflowResponse(response, true);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "恢复执行流失败");
     } finally {
       setIsResuming(false);
     }
@@ -629,6 +664,18 @@ export default function WorkflowRun({
           >
             {isResuming ? "提交中..." : "提交并继续"}
           </button>
+        </div>
+      ) : null}
+
+      {taskId ? (
+        <div className="mx-4 mb-3">
+          <RuntimeApprovalPanel
+            compact
+            onResolved={() => resumeDurableExecution()}
+            requestTypes={["tool_call", "final_output"]}
+            taskId={taskId}
+            title="Agent 运行审批"
+          />
         </div>
       ) : null}
 

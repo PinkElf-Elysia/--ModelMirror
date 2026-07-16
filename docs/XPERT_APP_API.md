@@ -8,6 +8,8 @@
 
 公开 App 不允许客户端替换 workflow、模型或版本，也不开放附件、Goal 和记忆候选写入。工具、Handoff、Xpert 记忆和动态知识读取默认关闭，必须由管理端显式开启。工具调用还要求工作流包含并先执行 `tool_policy`；策略未加载时默认拒绝。
 
+公开 App 和 OpenAI 兼容 API 不支持交互式暂停。部署预检会拒绝包含 `human_intervention` 节点，或通过 middleware binding 绑定 `human_in_the_loop` 的版本。该限制仅作用于公开部署；私有 Xpert Chat、Workflow、Goal 和 Handoff 可以使用持久化审批与恢复。
+
 动态知识工具受独立 `allow_knowledge_read` 策略控制。显式开启后，App 只能读取已发布工作流中 `knowledgeBaseIds` 固定的活动知识版本；不能扩展到其他知识库。任何启用了 `knowledgeWriteEnabled` 的 Xpert 都不能部署为 App，公开运行时也永远不注册 `knowledge_propose_write`。固定的 `knowledge_retrieval` / `knowledge_citation` 节点保持兼容，并继续随部署快照运行。
 
 ## 访问凭据

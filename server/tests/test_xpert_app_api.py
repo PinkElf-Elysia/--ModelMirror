@@ -329,6 +329,115 @@ async def test_deploy_preflight_always_rejects_dynamic_knowledge_write(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("interactive_kind", ["human_intervention", "human_in_the_loop"])
+async def test_deploy_preflight_rejects_interactive_hitl(
+    client: httpx.AsyncClient,
+    stores,
+    interactive_kind: str,
+) -> None:
+    xpert_store, _ = stores
+    created = xpert_store.create_xpert(
+        name=f"Interactive {interactive_kind}",
+        slug=f"interactive-{interactive_kind.replace('_', '-')}",
+    )
+    draft = created.draft.model_copy(deep=True)
+    if interactive_kind == "human_intervention":
+        output = next(
+            node for node in draft.workflow.nodes if node.data.get("kind") == "output"
+        )
+        agent = next(
+            node
+            for node in draft.workflow.nodes
+            if node.data.get("kind") == "workflow_agent"
+        )
+        draft.workflow.edges = [
+            edge
+            for edge in draft.workflow.edges
+            if not (edge.source == agent.id and edge.target == output.id)
+        ]
+        draft.workflow.nodes.append(
+            type(agent).model_validate(
+                {
+                    "id": "human-approval",
+                    "type": "human_intervention",
+                    "data": {
+                        "kind": "human_intervention",
+                        "prompt": "Approve the final response",
+                        "outputVariable": "agent_output",
+                    },
+                }
+            )
+        )
+        draft.workflow.edges.extend(
+            [
+                type(draft.workflow.edges[0]).model_validate(
+                    {"id": "agent-human", "source": agent.id, "target": "human-approval"}
+                ),
+                type(draft.workflow.edges[0]).model_validate(
+                    {"id": "human-output", "source": "human-approval", "target": output.id}
+                ),
+            ]
+        )
+    else:
+        agent = next(
+            node
+            for node in draft.workflow.nodes
+            if node.data.get("kind") == "workflow_agent"
+        )
+        draft.workflow.nodes.append(
+            type(agent).model_validate(
+                {
+                    "id": "hitl-middleware",
+                    "type": "runtime_middleware",
+                    "data": {
+                        "kind": "runtime_middleware",
+                        "runtimeMiddlewareId": "human_in_the_loop",
+                        "runtimeMiddlewareKind": "runtime_middleware.human_in_the_loop",
+                        "middlewarePriority": "40",
+                        "runtimeMiddlewareConfig": {
+                            "interrupt_on_tools": "*",
+                            "final_confirmation": True,
+                        },
+                    },
+                }
+            )
+        )
+        draft.workflow.edges.append(
+            type(draft.workflow.edges[0]).model_validate(
+                {
+                    "id": "bind-hitl",
+                    "source": "hitl-middleware",
+                    "target": agent.id,
+                    "sourceHandle": "middleware-binding",
+                    "targetHandle": "middleware",
+                }
+            )
+        )
+
+    updated = xpert_store.update_xpert(
+        created.id,
+        {"draft": draft.model_dump(mode="json")},
+    )
+    published = xpert_store.publish_xpert(
+        created.id,
+        expected_revision=updated.draft_revision,
+    )
+    assert published.version == 1
+    create = await client.post(f"/api/xperts/{created.id}/app", json={})
+    app_payload = create.json()["app"]
+    denied = await client.post(
+        f"/api/xpert-apps/{app_payload['app_id']}/deploy",
+        json={"version": 1},
+    )
+
+    assert denied.status_code == 422
+    assert any(
+        issue["code"] == "app_interactive_hitl_forbidden"
+        for issue in denied.json()["detail"]["issues"]
+    )
+
+
+@pytest.mark.asyncio
 async def test_openai_json_and_sse_use_pinned_version_and_register_run(
     client: httpx.AsyncClient,
     stores,

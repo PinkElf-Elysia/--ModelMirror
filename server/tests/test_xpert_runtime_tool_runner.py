@@ -10,6 +10,7 @@ from server.xpert_runtime import (
     MiddlewareContext,
     MiddlewarePipeline,
     RuntimeEventStore,
+    RuntimeMiddlewareFatalError,
     RuntimeToolCall,
     RuntimeToolResult,
     ToolCallResponse,
@@ -109,6 +110,32 @@ async def test_middleware_error_falls_back_to_direct_call() -> None:
 
     assert result.output == "fallback result"
     provider.call_tool.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_fatal_middleware_error_never_falls_back_to_direct_call() -> None:
+    provider = MagicMock()
+    provider.call_tool = AsyncMock(
+        return_value=RuntimeToolResult(output="must not run")
+    )
+
+    async def fatal_wrap_tool_call(request, handler, context) -> ToolCallResponse:
+        raise RuntimeMiddlewareFatalError("approval storage unavailable")
+
+    registry = CapabilityRegistry()
+    registry.register("mcp_tools", provider)
+
+    with pytest.raises(RuntimeMiddlewareFatalError):
+        await run_tool_with_runtime(
+            RuntimeToolCall(tool_name="delete", arguments={}),
+            registry,
+            MiddlewarePipeline(
+                [AgentMiddleware(name="fatal", wrap_tool_call=fatal_wrap_tool_call)]
+            ),
+            MiddlewareContext(),
+        )
+
+    provider.call_tool.assert_not_awaited()
 
 
 @pytest.mark.asyncio
