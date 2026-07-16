@@ -158,6 +158,16 @@ The job owns a private processed artifact per source. Public payloads expose onl
 
 `GET /api/rag/processor-capabilities` returns safe parser/model readiness labels. Processor preview accepts one document and an optional config override, returns at most 20 truncated blocks or generated items, and never persists output. Active-version resolution for Chat, workflow, Xpert, Goal, and App remains unchanged.
 
+## Knowledge Agent Read And Approval Write
+
+`workflow_agent` can opt into a dedicated `knowledge_tools` capability while using the existing Runtime tool loop. `knowledgeReadEnabled`, `knowledgeWriteEnabled`, and one to five `knowledgeBaseIds` are fixed in the published workflow. The model cannot select an undeclared knowledge base. `knowledge_search`, `knowledge_get`, `knowledge_cite`, and `knowledge_propose_write` all pass through `run_tool_with_runtime`, middleware, tool policy, audit, and checkpoint handling.
+
+Read tools resolve only the active knowledge namespace. Search can merge several declared knowledge bases with stable score ordering and bounded excerpts; exact lookup requires the active namespace plus chunk ID. A single-library failure becomes a warning, while total failure becomes a runtime tool error. Tool output, audit, and checkpoints retain IDs, score diagnostics, lengths, status, and safe errors only.
+
+`knowledge_propose_write` creates a durable pending proposal. It never edits a document or index. The per-knowledge-base Inbox is the sole approval surface and uses revision-based optimistic concurrency. Approval snapshots the exact active version sources when one exists, adds a managed Markdown source, and queues the existing Pipeline executor. The resulting candidate carries `promotion_required=true`; direct activation is rejected and only a passed Evaluation Gate followed by `/promote` can change the active pointer. Rejecting a proposal creates no document, job, or version.
+
+Goal and Handoff execution reuse the same published workflow settings and attach safe source IDs to proposals. Public Xpert Apps may opt into read-only knowledge access with `allow_knowledge_read`; dynamic knowledge write is always rejected at deployment and runtime.
+
 ## Current Limits
 
 - File persistence is local and is not a workspace database.
@@ -169,5 +179,5 @@ The job owns a private processed artifact per source. Public payloads expose onl
 
 App execution uses `run_type=xpert_app` and the same classic runner. The deployment fixes one immutable XpertVersion. Tool, Handoff, and Xpert-memory capabilities are disabled by default; tool execution also requires an active `tool_policy`, otherwise the runtime denies the call. Public JSON/SSE responses expose only the final output.
 - Automatic Handoff execution is limited to a single backend process and explicit `xpert:` targets.
-- Knowledge ingestion and evaluation are local and single-process; they have no distributed lease or automatic activation. Image understanding and evaluation are available, while multimodal embeddings, layout coordinates, Knowledge Agent write approval, and GraphRAG remain out of scope.
+- Knowledge ingestion, evaluation, and approval-triggered candidate builds are local and single-process; they have no distributed lease or automatic activation. Image understanding, evaluation, and Knowledge Agent approval writes are available, while multimodal embeddings, layout coordinates, and GraphRAG remain out of scope.
 - A normal /workflow run remains unchanged and continues to use its existing local-draft behavior.

@@ -536,3 +536,26 @@ The local RAG pipeline now exposes a safe editable draft layer:
 Validation boundaries: `chunk_size` must stay between 100 and 4000, and `chunk_overlap` must be non-negative and smaller than `chunk_size`. Image understanding is optional, but enabling it requires an explicit vision model and the renderer/model-gateway preflight. Draft changes alone do not rebuild indexes or change chat/workflow retrieval until a candidate version is executed and activated. Responses must not expose local stored paths, full chunk text, images, embeddings, prompts, tool outputs, or secrets.
 
 Last updated: 2026-07-16
+
+## 2026-07-16 增量：Knowledge Agent 审批写入
+
+`workflow_agent` 现在可以在 Runtime 工具模式下显式启用知识读取或写入提议，并固定 1 至 5 个知识库作用域。`knowledge_search/get/cite/propose_write` 复用活动版本检索、Runtime policy/audit/middleware 和现有 Pipeline executor；模型不能访问节点未声明的知识库。
+
+写入采用“提议 -> Inbox 审批 -> 候选构建 -> Evaluation Gate -> Promote”流程：
+
+1. 模型调用 `knowledge_propose_write` 创建 pending 提议，活动索引不变。
+2. 管理者在 `/rag/:kbId/inbox` 编辑、批准或拒绝，修改使用 revision 乐观并发。
+3. 批准后以活动版本来源快照加受管 Markdown 文档创建候选 Job；拒绝不产生任何索引副作用。
+4. 提议候选不能直接激活，必须评估通过并由 `/promote` 切换活动版本。
+
+新增接口：
+
+```text
+GET   /api/rag/knowledge-write-proposals
+GET   /api/rag/knowledge-write-proposals/{proposal_id}
+PATCH /api/rag/knowledge-write-proposals/{proposal_id}
+POST  /api/rag/knowledge-write-proposals/{proposal_id}/approve
+POST  /api/rag/knowledge-write-proposals/{proposal_id}/reject
+```
+
+工具响应、审计和 checkpoint 只保留 ID、状态、分数诊断、长度与安全错误摘要，不保存完整知识正文、提议正文、prompt、路径、embedding 或密钥。GraphRAG、实体关系抽取、社区摘要和图检索继续暂缓。

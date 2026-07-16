@@ -1,12 +1,14 @@
 # Xpert App 与兼容 API
 
-最后更新日期：2026-07-13
+最后更新日期：2026-07-16
 
 ## 能力边界
 
 已发布 Xpert 可以创建一个未列出 App，并显式部署任意不可变 `XpertVersion`。App 固定运行部署版本；编辑草稿或发布新版本不会改变线上行为，重新部署历史版本即完成回滚。
 
-公开 App 不允许客户端替换 workflow、模型或版本，也不开放附件、Goal 和记忆候选写入。工具、Handoff 与 Xpert 记忆默认关闭，必须由管理端显式开启。工具调用还要求工作流包含并先执行 `tool_policy`；策略未加载时默认拒绝。
+公开 App 不允许客户端替换 workflow、模型或版本，也不开放附件、Goal 和记忆候选写入。工具、Handoff、Xpert 记忆和动态知识读取默认关闭，必须由管理端显式开启。工具调用还要求工作流包含并先执行 `tool_policy`；策略未加载时默认拒绝。
+
+动态知识工具受独立 `allow_knowledge_read` 策略控制。显式开启后，App 只能读取已发布工作流中 `knowledgeBaseIds` 固定的活动知识版本；不能扩展到其他知识库。任何启用了 `knowledgeWriteEnabled` 的 Xpert 都不能部署为 App，公开运行时也永远不注册 `knowledge_propose_write`。固定的 `knowledge_retrieval` / `knowledge_citation` 节点保持兼容，并继续随部署快照运行。
 
 ## 访问凭据
 

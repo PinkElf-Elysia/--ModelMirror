@@ -299,6 +299,7 @@ export default function XpertAppDeploymentPanel({ xpert }: Props) {
             <PolicyToggle checked={app.policy.allow_tools} label="允许 MCP 工具" onChange={(checked) => setApp({ ...app, policy: { ...app.policy, allow_tools: checked } })} />
             <PolicyToggle checked={app.policy.allow_handoffs} label="允许 Xpert Handoff" onChange={(checked) => setApp({ ...app, policy: { ...app.policy, allow_handoffs: checked } })} />
             <PolicyToggle checked={app.policy.allow_xpert_memory} label="允许读取 Xpert 记忆" onChange={(checked) => setApp({ ...app, policy: { ...app.policy, allow_xpert_memory: checked } })} />
+            <PolicyToggle checked={app.policy.allow_knowledge_read} label="允许只读知识工具" onChange={(checked) => setApp({ ...app, policy: { ...app.policy, allow_knowledge_read: checked } })} />
           </div>
           <p className="mt-3 text-[11px] leading-5 text-slate-500">
             工具模式还要求已发布工作流包含 tool_policy。公开 App 不上传附件，也不生成记忆候选。

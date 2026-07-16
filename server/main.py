@@ -164,6 +164,7 @@ try:
         GoalStore,
         GoalValidationError,
         InMemoryToolAuditStore,
+        KnowledgeToolsetProvider,
         MCPToolsetProvider,
         MemoryToolsetProvider,
         MiddlewareContext,
@@ -199,6 +200,7 @@ except ModuleNotFoundError:
         GoalStore,
         GoalValidationError,
         InMemoryToolAuditStore,
+        KnowledgeToolsetProvider,
         MCPToolsetProvider,
         MemoryToolsetProvider,
         MiddlewareContext,
@@ -372,6 +374,7 @@ tool_registry = ToolRegistry()
 workflow_mcp_provider = MCPToolsetProvider(tool_registry, mcp_manager)
 xpert_context_store = get_xpert_context_store()
 workflow_memory_provider = MemoryToolsetProvider(xpert_context_store)
+workflow_knowledge_provider = KnowledgeToolsetProvider(get_rag_service)
 runtime_capabilities = CapabilityRegistry()
 workflow_mcp_pipeline = MiddlewarePipeline([event_recorder])
 workflow_tool_policy = ToolPermissionPolicy(allow_by_default=True)
@@ -396,6 +399,11 @@ runtime_capabilities.register(
     "memory_tools",
     workflow_memory_provider,
     description="Persistent Xpert memory tools for workflow agents.",
+)
+runtime_capabilities.register(
+    "knowledge_tools",
+    workflow_knowledge_provider,
+    description="Active knowledge retrieval and approval-gated write tools.",
 )
 workflow_task_store: dict[str, dict[str, Any]] = {}
 chat_runtime_task_store: dict[str, dict[str, Any]] = {}
@@ -2563,10 +2571,23 @@ async def _run_workflow_response(
                 return True
             return bool(workflow_runtime_context["app_policy"].get(name, False))
 
-        def selected_workflow_tool_policy() -> ToolPermissionPolicy:
-            if not app_capability_allowed("allow_tools"):
+        def selected_workflow_tool_policy(
+            capability_name: str = "mcp_tools",
+        ) -> ToolPermissionPolicy:
+            app_policy_name = {
+                "mcp_tools": "allow_tools",
+                "memory_tools": "allow_xpert_memory",
+                "knowledge_tools": "allow_knowledge_read",
+            }.get(capability_name, "allow_tools")
+            if not app_capability_allowed(app_policy_name):
                 return ToolPermissionPolicy(allow_by_default=False)
             policy = workflow_runtime_context.get("tool_policy")
+            if runtime_run_type == "xpert_app" and capability_name == "knowledge_tools":
+                return (
+                    policy
+                    if isinstance(policy, ToolPermissionPolicy)
+                    else workflow_tool_policy
+                )
             if runtime_run_type == "xpert_app" and not isinstance(
                 policy,
                 ToolPermissionPolicy,
@@ -2653,6 +2674,9 @@ async def _run_workflow_response(
             if not matched_tool:
                 matched_tool = await workflow_memory_provider.find_tool(tool_name)
                 capability_name = "memory_tools"
+            if not matched_tool:
+                matched_tool = await workflow_knowledge_provider.find_tool(tool_name)
+                capability_name = "knowledge_tools"
             if capability_name == "mcp_tools" and not app_capability_allowed(
                 "allow_tools"
             ):
@@ -2661,6 +2685,13 @@ async def _run_workflow_response(
                 "allow_xpert_memory"
             ):
                 raise PermissionError("Xpert App memory access is disabled.")
+            if capability_name == "knowledge_tools":
+                if tool_name == "knowledge_propose_write" and runtime_run_type == "xpert_app":
+                    raise PermissionError("Xpert App knowledge write access is disabled.")
+                if tool_name != "knowledge_propose_write" and not app_capability_allowed(
+                    "allow_knowledge_read"
+                ):
+                    raise PermissionError("Xpert App knowledge read access is disabled.")
             if not matched_tool:
                 raise ValueError(f"MCP 工具未注册：{tool_name}")
             run_context = task_state.get("runtime_metadata") or {}
@@ -2674,6 +2705,8 @@ async def _run_workflow_response(
                         "node_id": node.id,
                         "xpert_id": run_context.get("xpert_id"),
                         "conversation_id": run_context.get("conversation_id"),
+                        "goal_id": run_context.get("goal_id"),
+                        "handoff_id": run_context.get("handoff_id"),
                         **dict(metadata or {}),
                     },
                 ),
@@ -2691,7 +2724,7 @@ async def _run_workflow_response(
                     },
                 ),
                 capability_name=capability_name,
-                policy=selected_workflow_tool_policy(),
+                policy=selected_workflow_tool_policy(capability_name),
                 audit_store=selected_workflow_tool_audit_store(),
             )
 
@@ -2717,6 +2750,8 @@ async def _run_workflow_response(
             *,
             include_memory_read: bool = False,
             include_memory_write: bool = False,
+            include_knowledge_read: bool = False,
+            include_knowledge_write: bool = False,
         ) -> list[Any]:
             tools = (
                 await workflow_mcp_provider.list_tools()
@@ -2747,6 +2782,19 @@ async def _run_workflow_response(
                     for tool in memory_tools
                     if tool.name == "memory_propose_write"
                 )
+            knowledge_tools = await workflow_knowledge_provider.list_tools()
+            if include_knowledge_read and app_capability_allowed("allow_knowledge_read"):
+                tools.extend(
+                    tool
+                    for tool in knowledge_tools
+                    if tool.name in {"knowledge_search", "knowledge_get", "knowledge_cite"}
+                )
+            if include_knowledge_write and runtime_run_type != "xpert_app":
+                tools.extend(
+                    tool
+                    for tool in knowledge_tools
+                    if tool.name == "knowledge_propose_write"
+                )
             return tools
 
         async def run_react_lite_agent(
@@ -2764,11 +2812,16 @@ async def _run_workflow_response(
             run_id: str | None = None,
             include_memory_read: bool = False,
             include_memory_write: bool = False,
+            include_knowledge_read: bool = False,
+            include_knowledge_write: bool = False,
+            knowledge_base_ids: list[str] | None = None,
         ) -> tuple[str, list[dict[str, Any]]]:
             available_tools = await workflow_available_tools(
                 tool_names_raw,
                 include_memory_read=include_memory_read,
                 include_memory_write=include_memory_write,
+                include_knowledge_read=include_knowledge_read,
+                include_knowledge_write=include_knowledge_write,
             )
             events: list[dict[str, Any]] = []
             if not available_tools:
@@ -2920,6 +2973,9 @@ async def _run_workflow_response(
                             "agent_node_id": node.id,
                             "iteration": iteration_index + 1,
                             "run_id": run_id,
+                            "knowledge_read_enabled": include_knowledge_read,
+                            "knowledge_write_enabled": include_knowledge_write,
+                            "knowledge_base_ids": list(knowledge_base_ids or []),
                         },
                     )
                     tool_result_text = runtime_tool_result_text(call_result)
@@ -4142,6 +4198,22 @@ async def _run_workflow_response(
                         memory_write_target = str(
                             node.data.get("memoryWriteTarget") or "xpert"
                         ).strip() or "xpert"
+                        knowledge_read_enabled = workflow_truthy(
+                            node.data.get("knowledgeReadEnabled")
+                        )
+                        knowledge_write_enabled = workflow_truthy(
+                            node.data.get("knowledgeWriteEnabled")
+                        )
+                        knowledge_base_ids = list(
+                            dict.fromkeys(
+                                item.strip()
+                                for item in re.split(
+                                    r"[,\n]",
+                                    str(node.data.get("knowledgeBaseIds") or ""),
+                                )
+                                if item.strip()
+                            )
+                        )
                         if memory_read_scope not in {"conversation", "xpert", "both"}:
                             raise ValueError(
                                 "workflow_agent memoryReadScope must be conversation, xpert, or both."
@@ -4150,6 +4222,17 @@ async def _run_workflow_response(
                             raise ValueError(
                                 "workflow_agent memoryWriteTarget must be conversation or xpert."
                             )
+                        if knowledge_read_enabled or knowledge_write_enabled:
+                            if tool_mode != "mcp_tools":
+                                raise ValueError(
+                                    "workflow_agent knowledge tools require Runtime tool mode."
+                                )
+                            if not 1 <= len(knowledge_base_ids) <= 5:
+                                raise ValueError(
+                                    "workflow_agent knowledge tools require between 1 and 5 knowledge bases."
+                                )
+                            for knowledge_base_id in knowledge_base_ids:
+                                get_rag_service().get_pipeline_draft(knowledge_base_id)
                         run_context = task_state.get("runtime_metadata") or {}
                         if enable_file_understanding:
                             file_context = variables.get("xpert_file_context", "").strip()
@@ -4230,6 +4313,9 @@ async def _run_workflow_response(
                                 "memory_read_scope": memory_read_scope,
                                 "memory_write_enabled": memory_write_enabled,
                                 "memory_write_target": memory_write_target,
+                                "knowledge_read_enabled": knowledge_read_enabled,
+                                "knowledge_write_enabled": knowledge_write_enabled,
+                                "knowledge_base_ids": knowledge_base_ids,
                             },
                         )
                         await run_registry.record_checkpoint(
@@ -4252,6 +4338,9 @@ async def _run_workflow_response(
                                 "memory_read_enabled": memory_read_enabled,
                                 "memory_read_scope": memory_read_scope,
                                 "memory_write_enabled": memory_write_enabled,
+                                "knowledge_read_enabled": knowledge_read_enabled,
+                                "knowledge_write_enabled": knowledge_write_enabled,
+                                "knowledge_base_count": len(knowledge_base_ids),
                             },
                         )
                         if enable_file_understanding and run_context.get("file_count"):
@@ -4380,6 +4469,9 @@ async def _run_workflow_response(
                                         run_id=workflow_agent_run.run_id,
                                         include_memory_read=memory_read_enabled,
                                         include_memory_write=memory_write_enabled,
+                                        include_knowledge_read=knowledge_read_enabled,
+                                        include_knowledge_write=knowledge_write_enabled,
+                                        knowledge_base_ids=knowledge_base_ids,
                                     )
                                     for agent_event in agent_events:
                                         yield sse_payload(agent_event)

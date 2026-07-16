@@ -160,6 +160,7 @@ export interface XpertAppPolicy {
   allow_tools: boolean;
   allow_handoffs: boolean;
   allow_xpert_memory: boolean;
+  allow_knowledge_read: boolean;
 }
 
 export interface XpertAppLimits {

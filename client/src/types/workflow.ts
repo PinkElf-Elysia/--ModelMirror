@@ -102,6 +102,9 @@ export interface WorkflowNodeData extends Record<string, unknown> {
   memoryReadScope?: string;
   memoryWriteEnabled?: string;
   memoryWriteTarget?: string;
+  knowledgeReadEnabled?: string;
+  knowledgeWriteEnabled?: string;
+  knowledgeBaseIds?: string;
   nodeParametersJson?: string;
   toolName?: string;
   argumentsJson?: string;

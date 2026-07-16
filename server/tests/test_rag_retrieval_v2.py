@@ -121,6 +121,10 @@ async def test_v2_candidate_builds_dual_index_and_lifts_parent_context(tmp_path:
     assert source["parent_lifted"] is True
     assert "CELESTIAL-ORCA" in source["matched_text"]
     assert len(source["text"]) >= len(source["matched_text"])
+    exact = service.vector_store.get_chunk(version["namespace"], source["chunk_id"])
+    assert exact is not None
+    assert exact.chunk_id == source["chunk_id"]
+    assert service.vector_store.get_chunk("other-namespace", source["chunk_id"]) is None
     assert result["retrieval"]["vector_candidate_count"] > 0
     assert result["retrieval"]["fulltext_candidate_count"] > 0
 

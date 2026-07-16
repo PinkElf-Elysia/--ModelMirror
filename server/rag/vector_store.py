@@ -82,6 +82,9 @@ class VectorStore(Protocol):
     def list_document_chunks(self, doc_id: str) -> list[StoredVectorChunk]:
         """List stored chunks for one document without exposing embeddings."""
 
+    def get_chunk(self, kb_id: str, chunk_id: str) -> StoredVectorChunk | None:
+        """Read one chunk from an explicit knowledge-base namespace."""
+
 
 class LocalJsonVectorStore:
     """Small persistent vector store used as a no-network fallback and in tests."""
@@ -156,6 +159,27 @@ class LocalJsonVectorStore:
             if record.get("doc_id") == doc_id
         ]
         return sorted(chunks, key=lambda item: item.chunk_index)
+
+    def get_chunk(self, kb_id: str, chunk_id: str) -> StoredVectorChunk | None:
+        for record in self._read_records():
+            if record.get("kb_id") != kb_id or record.get("id") != chunk_id:
+                continue
+            return StoredVectorChunk(
+                chunk_id=str(record["id"]),
+                kb_id=str(record["kb_id"]),
+                doc_id=str(record["doc_id"]),
+                document_name=str(record["document_name"]),
+                text=str(record["text"]),
+                chunk_index=int(record.get("chunk_index", 0)),
+                parent_chunk_id=record.get("parent_chunk_id"),
+                chunk_type=str(record.get("chunk_type", "standard")),
+                start_char=int(record.get("start_char", 0)),
+                end_char=int(record.get("end_char", 0)),
+                page_number=_optional_int(record.get("page_number")),
+                visual_kind=str(record.get("visual_kind") or "") or None,
+                source_block_id=str(record.get("source_block_id") or "") or None,
+            )
+        return None
 
     def _read_records(self) -> list[dict[str, Any]]:
         if not self.storage_path.exists():
@@ -286,6 +310,34 @@ class ChromaVectorStore:
                 )
             )
         return sorted(chunks, key=lambda item: item.chunk_index)
+
+    def get_chunk(self, kb_id: str, chunk_id: str) -> StoredVectorChunk | None:
+        response = self._collection.get(
+            ids=[chunk_id],
+            where={"kb_id": kb_id},
+            include=["documents", "metadatas"],
+        )
+        ids = response.get("ids") or []
+        if not ids:
+            return None
+        documents = response.get("documents") or []
+        metadatas = response.get("metadatas") or []
+        metadata = (metadatas[0] if metadatas else {}) or {}
+        return StoredVectorChunk(
+            chunk_id=str(ids[0]),
+            kb_id=str(metadata.get("kb_id", kb_id)),
+            doc_id=str(metadata.get("doc_id", "")),
+            document_name=str(metadata.get("document_name", "")),
+            text=str(documents[0] if documents else ""),
+            chunk_index=int(metadata.get("chunk_index", 0)),
+            parent_chunk_id=str(metadata.get("parent_chunk_id") or "") or None,
+            chunk_type=str(metadata.get("chunk_type") or "standard"),
+            start_char=int(metadata.get("start_char", 0)),
+            end_char=int(metadata.get("end_char", 0)),
+            page_number=_optional_int(metadata.get("page_number")),
+            visual_kind=str(metadata.get("visual_kind") or "") or None,
+            source_block_id=str(metadata.get("source_block_id") or "") or None,
+        )
 
 
 def create_vector_store(storage_dir: Path) -> VectorStore:

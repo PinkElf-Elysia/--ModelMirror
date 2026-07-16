@@ -44,6 +44,10 @@ from .middleware_registry import (
     runtime_middleware_registry,
 )
 from .memory_toolset import MemoryToolsetProvider, register_memory_toolset_capability
+from .knowledge_toolset import (
+    KnowledgeToolsetProvider,
+    register_knowledge_toolset_capability,
+)
 from .workflow_node_registry import (
     KnowledgePipelinePalette,
     WorkflowNodeRegistry,
@@ -117,6 +121,7 @@ __all__ = [
     "validate_goal_plan",
     "InMemoryToolAuditStore",
     "MCPToolsetProvider",
+    "KnowledgeToolsetProvider",
     "MemoryToolsetProvider",
     "MiddlewareContext",
     "MiddlewarePipeline",
@@ -157,5 +162,6 @@ __all__ = [
     "register_builtin_middleware_nodes",
     "register_builtin_workflow_nodes",
     "register_mcp_toolset_capability",
+    "register_knowledge_toolset_capability",
     "register_memory_toolset_capability",
 ]
