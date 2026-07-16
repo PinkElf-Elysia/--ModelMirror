@@ -9,12 +9,14 @@ from .rag_service import (
     DocumentNotFoundError,
     KnowledgeBaseNotFoundError,
     PipelineDraftValidationError,
+    PipelineGraphRevisionError,
     PipelineJobNotFoundError,
     PipelineJobStateError,
     PipelineVersionNotFoundError,
     RagService,
     UnsupportedDocumentError,
 )
+from .pipeline_graph import PipelineGraphValidationError
 from .pipeline_executor import KnowledgePipelineExecutor
 from .processor_generator import ProcessorGenerationError
 
@@ -181,6 +183,88 @@ class PipelineDraftUpdateRequest(BaseModel):
     retrieval_profile: RetrievalOptionsPayload | None = None
 
 
+class PipelineGraphNodePayload(BaseModel):
+    id: str = Field(min_length=1, max_length=160)
+    kind: str = Field(min_length=1, max_length=80)
+    title: str = Field(default="", max_length=120)
+    position: dict[str, float]
+    config: dict[str, Any] = Field(default_factory=dict)
+    enabled: bool = True
+
+
+class PipelineGraphEdgePayload(BaseModel):
+    id: str = Field(min_length=1, max_length=200)
+    source: str = Field(min_length=1, max_length=160)
+    target: str = Field(min_length=1, max_length=160)
+    source_port: str | None = None
+    target_port: str | None = None
+
+
+class PipelineGraphPayload(BaseModel):
+    version: str = "knowledge-pipeline-graph-v1"
+    kb_id: str = ""
+    nodes: list[PipelineGraphNodePayload] = Field(default_factory=list, max_length=50)
+    edges: list[PipelineGraphEdgePayload] = Field(default_factory=list, max_length=100)
+
+
+class PipelineGraphIssuePayload(BaseModel):
+    code: str
+    message: str
+    node_id: str | None = None
+    edge_id: str | None = None
+
+
+class PipelineGraphResponse(BaseModel):
+    kb_id: str
+    graph_id: str
+    graph_revision: int
+    compiled_draft_version: int
+    updated_at: float
+    valid: bool
+    issues: list[PipelineGraphIssuePayload] = Field(default_factory=list)
+    graph: PipelineGraphPayload
+    compiled: dict[str, Any] | None = None
+
+
+class PipelineGraphSaveRequest(BaseModel):
+    expected_revision: int = Field(ge=1)
+    graph: PipelineGraphPayload
+
+
+class PipelineGraphValidateRequest(BaseModel):
+    graph: PipelineGraphPayload
+
+
+class PipelineGraphValidationResponse(BaseModel):
+    kb_id: str
+    valid: bool
+    issues: list[PipelineGraphIssuePayload] = Field(default_factory=list)
+    compiled: dict[str, Any] | None = None
+
+
+class PipelineGraphPreviewRequest(BaseModel):
+    graph: PipelineGraphPayload
+    node_id: str = Field(min_length=1, max_length=160)
+    document_id: str | None = Field(default=None, max_length=200)
+
+
+class PipelineGraphPreviewResponse(BaseModel):
+    node_id: str
+    kind: str
+    preview_type: str
+    item_count: int
+    items: list[dict[str, Any]] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    warnings: list[str] = Field(default_factory=list)
+    truncated: bool = False
+
+
+class PipelineGraphExecuteRequest(BaseModel):
+    graph_revision: int = Field(ge=1)
+    draft_version: int = Field(ge=1)
+    source_document_ids: list[str] | None = None
+
+
 class ProcessorPreviewRequest(BaseModel):
     document_id: str = Field(min_length=1, max_length=200)
     processor: dict[str, Any] | None = None
@@ -276,6 +360,8 @@ class PipelineJobPayload(BaseModel):
     kb_id: str
     draft_id: str
     draft_version: int
+    graph_id: str | None = None
+    graph_revision: int | None = None
     status: str
     stages: list[PipelineJobStagePayload]
     sources: list[PipelineJobSourcePayload]
@@ -543,6 +629,130 @@ async def get_pipeline_draft(kb_id: str) -> PipelineDraftResponse:
         )
     except KnowledgeBaseNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/pipeline/graph", response_model=PipelineGraphResponse)
+async def get_pipeline_graph(kb_id: str) -> PipelineGraphResponse:
+    try:
+        return PipelineGraphResponse.model_validate(
+            get_rag_service().get_pipeline_graph(kb_id)
+        )
+    except KnowledgeBaseNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.put("/pipeline/graph/{kb_id}", response_model=PipelineGraphResponse)
+async def save_pipeline_graph(
+    kb_id: str,
+    payload: PipelineGraphSaveRequest,
+) -> PipelineGraphResponse:
+    try:
+        graph = payload.graph.model_dump()
+        graph["kb_id"] = kb_id
+        return PipelineGraphResponse.model_validate(
+            get_rag_service().save_pipeline_graph(
+                kb_id,
+                graph,
+                expected_revision=payload.expected_revision,
+            )
+        )
+    except KnowledgeBaseNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PipelineGraphRevisionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except PipelineGraphValidationError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": str(exc),
+                "issues": [issue.payload() for issue in exc.issues],
+            },
+        ) from exc
+
+
+@router.post(
+    "/pipeline/graph/{kb_id}/validate",
+    response_model=PipelineGraphValidationResponse,
+)
+async def validate_pipeline_graph_endpoint(
+    kb_id: str,
+    payload: PipelineGraphValidateRequest,
+) -> PipelineGraphValidationResponse:
+    try:
+        graph = payload.graph.model_dump()
+        graph["kb_id"] = kb_id
+        return PipelineGraphValidationResponse.model_validate(
+            get_rag_service().validate_pipeline_graph_config(kb_id, graph)
+        )
+    except KnowledgeBaseNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post(
+    "/pipeline/graph/{kb_id}/preview-node",
+    response_model=PipelineGraphPreviewResponse,
+)
+async def preview_pipeline_graph_node(
+    kb_id: str,
+    payload: PipelineGraphPreviewRequest,
+) -> PipelineGraphPreviewResponse:
+    try:
+        graph = payload.graph.model_dump()
+        graph["kb_id"] = kb_id
+        result = await get_rag_service().preview_pipeline_graph_node(
+            kb_id,
+            graph=graph,
+            node_id=payload.node_id,
+            document_id=payload.document_id,
+        )
+        return PipelineGraphPreviewResponse.model_validate(result)
+    except (KnowledgeBaseNotFoundError, DocumentNotFoundError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PipelineGraphValidationError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": str(exc),
+                "issues": [issue.payload() for issue in exc.issues],
+            },
+        ) from exc
+    except (PipelineDraftValidationError, ProcessorGenerationError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post(
+    "/pipeline/graph/{kb_id}/execute",
+    response_model=PipelineJobPayload,
+)
+async def execute_pipeline_graph(
+    kb_id: str,
+    payload: PipelineGraphExecuteRequest,
+) -> PipelineJobPayload:
+    try:
+        job = get_rag_service().create_pipeline_job(
+            kb_id,
+            draft_version=payload.draft_version,
+            graph_revision=payload.graph_revision,
+            source_document_ids=payload.source_document_ids,
+        )
+        get_pipeline_executor().notify()
+        return PipelineJobPayload.model_validate(job)
+    except KnowledgeBaseNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except DocumentNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (PipelineJobStateError, PipelineGraphRevisionError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except PipelineGraphValidationError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": str(exc),
+                "issues": [issue.payload() for issue in exc.issues],
+            },
+        ) from exc
+    except PipelineDraftValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.patch("/pipeline/draft/{kb_id}", response_model=PipelineDraftResponse)

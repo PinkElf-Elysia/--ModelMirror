@@ -4,6 +4,31 @@
 
 最后更新日期：2026-07-13
 
+## 2026-07-13 增量：可执行知识流水线画布
+
+新增 `/rag/:kbId/pipeline` 和服务端 Knowledge Pipeline Graph。画布不是新的索引执行系统：Graph 经过校验后编译为现有 Draft，随后仍由 `KnowledgePipelineExecutor` 按 `load / process / chunk / embed / store` 执行并生成隔离候选版本。
+
+真实节点固定为：
+
+```text
+data_source -> structured_processor -> recursive_chunker | parent_child_chunker
+            -> embedding -> dual_index -> retrieval
+```
+
+图校验要求 DAG、端口匹配、六阶段各一个、只有一种分块器、无孤立启用节点，并强制向量与 FTS5 双索引同时启用。`image_understanding` 当前仅为禁用占位，不可连接或执行。
+
+新增 API：
+
+```text
+GET  /api/rag/pipeline/graph?kb_id=
+PUT  /api/rag/pipeline/graph/{kb_id}
+POST /api/rag/pipeline/graph/{kb_id}/validate
+POST /api/rag/pipeline/graph/{kb_id}/preview-node
+POST /api/rag/pipeline/graph/{kb_id}/execute
+```
+
+Graph 使用 `graph_revision` 乐观并发。保存成功会原子生成新的 Draft version；旧 Draft PATCH 也会同步已有图节点配置并保留坐标。Graph Execute 固定 graph revision 与 draft version，再创建既有 Pipeline Job。节点预览最多返回 20 条截断项，不持久化、不写索引，并且不会返回本地路径、完整正文、embedding、prompt 或密钥。
+
 ## 2026-07-13 增量：成熟文档处理与生成式索引
 
 Advanced RAG V2 的候选构建现在先执行结构感知 Processor，再进入分块和向量/FTS5 双索引。TXT、Markdown 和 PDF 统一转换为 `ProcessedDocument / DocumentBlock`；块保留稳定 ID、字符偏移、标题路径和页码。Markdown 表格与代码围栏保持原结构，PDF 可移除跨页重复页眉页脚。

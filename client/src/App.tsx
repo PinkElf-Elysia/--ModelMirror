@@ -20,6 +20,7 @@ import XpertStudioIndexPage from "./pages/XpertStudioIndexPage";
 import XpertStudioPage from "./pages/XpertStudioPage";
 import XpertAppPage from "./pages/XpertAppPage";
 import ConversationGoalsPage from "./pages/ConversationGoalsPage";
+import KnowledgePipelineCanvasPage from "./pages/KnowledgePipelineCanvasPage";
 
 export default function App() {
   return (
@@ -43,6 +44,7 @@ export default function App() {
       <Route element={<RuntimeOpsPage />} path="/runtime" />
       <Route element={<ComingSoonPage resource="prompts" />} path="/prompts" />
       <Route element={<RagPage />} path="/rag" />
+      <Route element={<KnowledgePipelineCanvasPage />} path="/rag/:kbId/pipeline" />
       <Route element={<ChatPage />} path="/chat/:modelId" />
       <Route element={<WorkflowClassicPage />} path="/workflow" />
       <Route element={<WorkflowClassicPage />} path="/workflow/:id" />
