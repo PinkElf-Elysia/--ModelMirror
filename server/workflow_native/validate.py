@@ -917,6 +917,40 @@ def validate_node_configuration(
                 )
             )
 
+        knowledge_read_enabled = config_truthy(data.get("knowledgeReadEnabled"))
+        knowledge_write_enabled = config_truthy(data.get("knowledgeWriteEnabled"))
+        if knowledge_read_enabled or knowledge_write_enabled:
+            if tool_mode != "mcp_tools":
+                issues.append(
+                    ValidationIssue(
+                        code="workflow_agent_knowledge_tools_require_runtime_mode",
+                        message=(
+                            "Workflow agent knowledge tools require toolMode=mcp_tools."
+                        ),
+                        node_id=node.id,
+                    )
+                )
+            knowledge_base_ids = list(
+                dict.fromkeys(
+                    item.strip()
+                    for item in re.split(
+                        r"[,\n]",
+                        str(data.get("knowledgeBaseIds") or ""),
+                    )
+                    if item.strip()
+                )
+            )
+            if not 1 <= len(knowledge_base_ids) <= 5:
+                issues.append(
+                    ValidationIssue(
+                        code="invalid_workflow_agent_knowledge_base_ids",
+                        message=(
+                            "Workflow agent knowledge tools require between 1 and 5 knowledge base IDs."
+                        ),
+                        node_id=node.id,
+                    )
+                )
+
         max_iterations = str(data.get("maxIterations") or "").strip()
         if max_iterations:
             try:

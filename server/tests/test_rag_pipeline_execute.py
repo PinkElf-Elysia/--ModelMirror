@@ -13,7 +13,7 @@ from server.rag.api import (
 )
 from server.rag.embedder import EmbeddingClient
 from server.rag.pipeline_executor import KnowledgePipelineExecutor
-from server.rag.rag_service import RagService
+from server.rag.rag_service import KnowledgeWriteProposalConflictError, RagService
 from server.rag.vector_store import LocalJsonVectorStore
 from server.xpert_runtime.run_registry import RunRegistry
 from server.xperts.api import set_xpert_context_store_for_tests
@@ -82,6 +82,61 @@ async def execute_current_draft(
     completed = (await client.get(f"/api/rag/pipeline/jobs/{created['job_id']}")).json()
     assert completed["status"] == "succeeded"
     return completed
+
+
+def test_knowledge_write_proposal_persists_deduplicates_and_checks_revision(
+    tmp_path: Path,
+) -> None:
+    storage = tmp_path / "rag-storage"
+    uploads = tmp_path / "rag-uploads"
+    service = RagService(
+        storage_dir=storage,
+        uploads_dir=uploads,
+        embedder=EmbeddingClient(api_key="", dimension=64),
+        vector_store=LocalJsonVectorStore(storage / "vectors.json"),
+        llm_enabled=False,
+    )
+    kb = service.create_knowledge_base("proposal persistence")
+    created = service.create_knowledge_write_proposal(
+        kb_id=kb["id"],
+        title="Release note",
+        content="The approved release process requires an evaluation gate.",
+        tags=["release", "quality"],
+        source_xpert_id="xpert-writer",
+        source_run_id="run-1",
+    )
+    duplicate = service.create_knowledge_write_proposal(
+        kb_id=kb["id"],
+        title="Duplicate title is ignored",
+        content="The approved release process requires an evaluation gate.",
+        tags=[],
+        source_xpert_id="xpert-writer",
+        source_run_id="run-1",
+    )
+    assert duplicate["proposal_id"] == created["proposal_id"]
+
+    reloaded = RagService(
+        storage_dir=storage,
+        uploads_dir=uploads,
+        embedder=EmbeddingClient(api_key="", dimension=64),
+        vector_store=LocalJsonVectorStore(storage / "vectors.json"),
+        llm_enabled=False,
+    )
+    persisted = reloaded.get_knowledge_write_proposal(created["proposal_id"])
+    assert persisted["status"] == "pending"
+    assert persisted["content"] == created["content"]
+    updated = reloaded.update_knowledge_write_proposal(
+        created["proposal_id"],
+        expected_revision=created["revision"],
+        title="Reviewed release note",
+    )
+    assert updated["revision"] == created["revision"] + 1
+    with pytest.raises(KnowledgeWriteProposalConflictError):
+        reloaded.update_knowledge_write_proposal(
+            created["proposal_id"],
+            expected_revision=created["revision"],
+            title="Stale update",
+        )
 
 
 @pytest.mark.asyncio
@@ -161,6 +216,117 @@ async def test_candidate_version_requires_manual_activation_and_supports_rollbac
         "knowledge_pipeline.version_ready",
         "knowledge_pipeline.version_activated",
     }
+
+
+@pytest.mark.asyncio
+async def test_knowledge_write_approval_inherits_active_snapshot_and_requires_promotion(
+    pipeline_runtime,
+) -> None:
+    client, service, executor, _, _ = pipeline_runtime
+    kb_id = await create_kb(client, "knowledge inbox")
+    alpha_id = await upload_text(
+        client,
+        kb_id,
+        "alpha.txt",
+        "Alpha remains part of the active source snapshot.",
+    )
+    baseline_job = await execute_current_draft(
+        client,
+        executor,
+        kb_id,
+        source_document_ids=[alpha_id],
+    )
+    baseline_version_id = str(baseline_job["candidate_version_id"])
+    activated = await client.post(
+        f"/api/rag/pipeline/versions/{baseline_version_id}/activate"
+    )
+    assert activated.status_code == 200, activated.text
+
+    proposal = service.create_knowledge_write_proposal(
+        kb_id,
+        title="Beta correction",
+        content="Beta is approved only after evaluation and promotion.",
+        tags=["release"],
+        source_xpert_id="xpert_writer",
+        source_run_id="run_writer",
+    )
+    update = await client.patch(
+        f"/api/rag/knowledge-write-proposals/{proposal['proposal_id']}",
+        json={
+            "expected_revision": proposal["revision"],
+            "title": "Beta release correction",
+        },
+    )
+    assert update.status_code == 200, update.text
+
+    approved = await client.post(
+        f"/api/rag/knowledge-write-proposals/{proposal['proposal_id']}/approve",
+        json={"expected_revision": update.json()["revision"]},
+    )
+    assert approved.status_code == 200, approved.text
+    approved_payload = approved.json()
+    assert approved_payload["status"] == "approved"
+    assert approved_payload["build_status"] == "queued"
+    assert service.get_active_pipeline_version(kb_id)["version_id"] == baseline_version_id
+
+    assert await executor.run_once() is True
+    refreshed = (
+        await client.get(
+            f"/api/rag/knowledge-write-proposals/{proposal['proposal_id']}"
+        )
+    ).json()
+    assert refreshed["build_status"] == "succeeded"
+    assert refreshed["candidate_ready"] is True
+    candidate_id = str(refreshed["candidate_version_id"])
+    candidate = service.get_pipeline_version(candidate_id)
+    assert candidate["promotion_required"] is True
+    assert candidate["base_version_id"] == baseline_version_id
+    assert len(candidate["source_summary"]) == 2
+
+    preview = await client.post(
+        f"/api/rag/pipeline/versions/{candidate_id}/query",
+        json={"question": "Beta release", "top_k": 5},
+    )
+    assert preview.status_code == 200, preview.text
+    names = {item["document_name"] for item in preview.json()["sources"]}
+    assert any(name.startswith("knowledge_proposal_") for name in names)
+    inherited_preview = await client.post(
+        f"/api/rag/pipeline/versions/{candidate_id}/query",
+        json={"question": "Alpha source snapshot", "top_k": 5},
+    )
+    assert inherited_preview.status_code == 200, inherited_preview.text
+    assert "alpha.txt" in {
+        item["document_name"] for item in inherited_preview.json()["sources"]
+    }
+
+    blocked = await client.post(
+        f"/api/rag/pipeline/versions/{candidate_id}/activate"
+    )
+    assert blocked.status_code == 409
+    assert service.get_active_pipeline_version(kb_id)["version_id"] == baseline_version_id
+
+
+@pytest.mark.asyncio
+async def test_rejected_knowledge_write_proposal_creates_no_document_or_job(
+    pipeline_runtime,
+) -> None:
+    client, service, _, _, _ = pipeline_runtime
+    kb_id = await create_kb(client, "reject proposal")
+    proposal = service.create_knowledge_write_proposal(
+        kb_id,
+        title="Reject me",
+        content="This content must never become a document.",
+    )
+
+    response = await client.post(
+        f"/api/rag/knowledge-write-proposals/{proposal['proposal_id']}/reject",
+        json={"expected_revision": proposal["revision"], "reason": "Not verified"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "rejected"
+    assert service.list_documents(kb_id) == []
+    assert service.list_pipeline_jobs(kb_id=kb_id) == []
 
 
 @pytest.mark.asyncio

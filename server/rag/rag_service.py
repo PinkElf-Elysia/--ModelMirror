@@ -76,6 +76,14 @@ class PipelineGraphRevisionError(RagError):
     """Raised when a graph save uses a stale optimistic revision."""
 
 
+class KnowledgeWriteProposalNotFoundError(RagError):
+    """Raised when a knowledge write proposal does not exist."""
+
+
+class KnowledgeWriteProposalConflictError(RagError):
+    """Raised when a proposal revision or state no longer matches."""
+
+
 PIPELINE_STAGE_IDS = {
     "data_source": "stage_data_source",
     "processor": "stage_processor",
@@ -190,6 +198,11 @@ class RagService:
         metadata["pipeline_drafts"].pop(kb_id, None)
         metadata["pipeline_graphs"].pop(kb_id, None)
         metadata["pipeline_active_versions"].pop(kb_id, None)
+        metadata["knowledge_write_proposals"] = {
+            proposal_id: item
+            for proposal_id, item in metadata["knowledge_write_proposals"].items()
+            if item.get("kb_id") != kb_id
+        }
         version_namespaces = [
             str(item.get("namespace") or "")
             for item in metadata["pipeline_versions"].values()
@@ -324,6 +337,226 @@ class RagService:
             if document["kb_id"] == kb_id
         ]
         return sorted(documents, key=lambda item: item["created_at"], reverse=True)
+
+    def create_knowledge_write_proposal(
+        self,
+        kb_id: str,
+        *,
+        title: str,
+        content: str,
+        tags: list[str] | None = None,
+        source_xpert_id: str | None = None,
+        source_conversation_id: str | None = None,
+        source_goal_id: str | None = None,
+        source_handoff_id: str | None = None,
+        source_run_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Create a durable write proposal without mutating the active index."""
+
+        clean_title = self._required_proposal_text(title, "title", 160)
+        clean_content = self._required_proposal_text(content, "content", 20_000)
+        clean_tags = self._proposal_tags(tags)
+        content_hash = hashlib.sha256(clean_content.encode("utf-8")).hexdigest()
+        with self._metadata_lock:
+            metadata = self._read_metadata_unlocked()
+            self._ensure_kb_exists(metadata, kb_id)
+            for existing in metadata["knowledge_write_proposals"].values():
+                if (
+                    existing.get("kb_id") == kb_id
+                    and existing.get("status") == "pending"
+                    and existing.get("content_hash") == content_hash
+                    and str(existing.get("source_run_id") or "")
+                    == str(source_run_id or "")
+                ):
+                    return self._knowledge_write_proposal_payload(existing, metadata)
+            now = time.time()
+            proposal = {
+                "proposal_id": f"kwp_{uuid.uuid4().hex}",
+                "kb_id": kb_id,
+                "title": clean_title,
+                "content": clean_content,
+                "tags": clean_tags,
+                "content_hash": content_hash,
+                "source_xpert_id": self._optional_proposal_text(source_xpert_id, 200),
+                "source_conversation_id": self._optional_proposal_text(source_conversation_id, 200),
+                "source_goal_id": self._optional_proposal_text(source_goal_id, 200),
+                "source_handoff_id": self._optional_proposal_text(source_handoff_id, 200),
+                "source_run_id": self._optional_proposal_text(source_run_id, 200),
+                "status": "pending",
+                "revision": 1,
+                "approval_in_progress": False,
+                "document_id": None,
+                "job_id": None,
+                "candidate_version_id": None,
+                "last_error": None,
+                "decision_reason": None,
+                "created_at": now,
+                "updated_at": now,
+                "decided_at": None,
+            }
+            metadata["knowledge_write_proposals"][proposal["proposal_id"]] = proposal
+            self._write_metadata_unlocked(metadata)
+            return self._knowledge_write_proposal_payload(proposal, metadata)
+
+    def list_knowledge_write_proposals(
+        self,
+        *,
+        kb_id: str | None = None,
+        status: str | None = None,
+        source_xpert_id: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        metadata = self._read_metadata()
+        if kb_id is not None:
+            self._ensure_kb_exists(metadata, kb_id)
+        if status is not None and status not in {"pending", "approved", "rejected"}:
+            raise ValueError("Invalid knowledge write proposal status.")
+        items = [
+            item
+            for item in metadata["knowledge_write_proposals"].values()
+            if (kb_id is None or item.get("kb_id") == kb_id)
+            and (status is None or item.get("status") == status)
+            and (
+                source_xpert_id is None
+                or item.get("source_xpert_id") == source_xpert_id
+            )
+        ]
+        items.sort(key=lambda item: float(item.get("created_at", 0)), reverse=True)
+        return [
+            self._knowledge_write_proposal_payload(item, metadata)
+            for item in items[: max(1, min(limit, 200))]
+        ]
+
+    def get_knowledge_write_proposal(self, proposal_id: str) -> dict[str, Any]:
+        metadata = self._read_metadata()
+        proposal = metadata["knowledge_write_proposals"].get(proposal_id)
+        if not isinstance(proposal, dict):
+            raise KnowledgeWriteProposalNotFoundError("Knowledge write proposal not found.")
+        return self._knowledge_write_proposal_payload(proposal, metadata)
+
+    def update_knowledge_write_proposal(
+        self,
+        proposal_id: str,
+        *,
+        expected_revision: int,
+        title: str | None = None,
+        content: str | None = None,
+        tags: list[str] | None = None,
+    ) -> dict[str, Any]:
+        with self._metadata_lock:
+            metadata = self._read_metadata_unlocked()
+            proposal = self._knowledge_write_proposal_or_raise(metadata, proposal_id)
+            self._assert_pending_proposal(proposal, expected_revision)
+            if title is not None:
+                proposal["title"] = self._required_proposal_text(title, "title", 160)
+            if content is not None:
+                proposal["content"] = self._required_proposal_text(content, "content", 20_000)
+                proposal["content_hash"] = hashlib.sha256(
+                    proposal["content"].encode("utf-8")
+                ).hexdigest()
+            if tags is not None:
+                proposal["tags"] = self._proposal_tags(tags)
+            proposal["revision"] = int(proposal.get("revision", 1)) + 1
+            proposal["updated_at"] = time.time()
+            proposal["last_error"] = None
+            self._write_metadata_unlocked(metadata)
+            return self._knowledge_write_proposal_payload(proposal, metadata)
+
+    def reject_knowledge_write_proposal(
+        self,
+        proposal_id: str,
+        *,
+        expected_revision: int,
+        reason: str = "",
+    ) -> dict[str, Any]:
+        with self._metadata_lock:
+            metadata = self._read_metadata_unlocked()
+            proposal = self._knowledge_write_proposal_or_raise(metadata, proposal_id)
+            self._assert_pending_proposal(proposal, expected_revision)
+            now = time.time()
+            proposal.update(
+                {
+                    "status": "rejected",
+                    "decision_reason": str(reason or "").strip()[:500] or None,
+                    "revision": int(proposal.get("revision", 1)) + 1,
+                    "updated_at": now,
+                    "decided_at": now,
+                }
+            )
+            self._write_metadata_unlocked(metadata)
+            return self._knowledge_write_proposal_payload(proposal, metadata)
+
+    def approve_knowledge_write_proposal(
+        self,
+        proposal_id: str,
+        *,
+        expected_revision: int,
+    ) -> dict[str, Any]:
+        """Materialize a proposal and queue a non-active candidate version build."""
+
+        with self._metadata_lock:
+            metadata = self._read_metadata_unlocked()
+            proposal = self._knowledge_write_proposal_or_raise(metadata, proposal_id)
+            self._assert_pending_proposal(proposal, expected_revision)
+            if proposal.get("approval_in_progress"):
+                raise KnowledgeWriteProposalConflictError("Proposal approval is already running.")
+            proposal["approval_in_progress"] = True
+            proposal["last_error"] = None
+            proposal["updated_at"] = time.time()
+            self._write_metadata_unlocked(metadata)
+
+        document_id: str | None = None
+        try:
+            draft = self.get_pipeline_draft(str(proposal["kb_id"]))
+            graph = self.get_pipeline_graph(str(proposal["kb_id"]))
+            document = self._create_managed_proposal_document(proposal)
+            document_id = str(document["id"])
+            active = self.get_active_pipeline_version(str(proposal["kb_id"]))
+            job = self.create_pipeline_job(
+                str(proposal["kb_id"]),
+                draft_version=int(draft["version"]),
+                graph_revision=int(graph["graph_revision"]),
+                source_document_ids=([document_id] if active else None),
+                base_version_id=(str(active["version_id"]) if active else None),
+                origin={
+                    "kind": "knowledge_write_proposal",
+                    "proposal_id": proposal_id,
+                    "promotion_required": True,
+                },
+            )
+        except Exception as exc:
+            if document_id:
+                try:
+                    self.delete_document(document_id)
+                except Exception:
+                    pass
+            with self._metadata_lock:
+                metadata = self._read_metadata_unlocked()
+                stored = self._knowledge_write_proposal_or_raise(metadata, proposal_id)
+                stored["approval_in_progress"] = False
+                stored["last_error"] = self._safe_pipeline_error(exc)
+                stored["updated_at"] = time.time()
+                self._write_metadata_unlocked(metadata)
+            raise
+
+        with self._metadata_lock:
+            metadata = self._read_metadata_unlocked()
+            stored = self._knowledge_write_proposal_or_raise(metadata, proposal_id)
+            now = time.time()
+            stored.update(
+                {
+                    "status": "approved",
+                    "approval_in_progress": False,
+                    "document_id": document_id,
+                    "job_id": str(job["job_id"]),
+                    "candidate_version_id": str(job["candidate_version_id"]),
+                    "revision": int(stored.get("revision", 1)) + 1,
+                    "updated_at": now,
+                    "decided_at": now,
+                }
+            )
+            self._write_metadata_unlocked(metadata)
+            return self._knowledge_write_proposal_payload(stored, metadata)
 
     def list_pipeline_assets(self, kb_id: str | None = None) -> list[dict[str, Any]]:
         """Return FileAsset views derived from uploaded documents."""
@@ -1000,6 +1233,8 @@ class RagService:
         graph_revision: int | None = None,
         source_document_ids: list[str] | None = None,
         xpert_sources: list[dict[str, Any]] | None = None,
+        base_version_id: str | None = None,
+        origin: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Create a durable job with immutable source and draft snapshots."""
 
@@ -1038,6 +1273,28 @@ class RagService:
                         f"Pipeline source document not found: {missing[0]}"
                     )
                 documents = [by_id[item] for item in requested]
+
+            inherited_sources: list[dict[str, Any]] = []
+            if base_version_id:
+                base_version = metadata["pipeline_versions"].get(base_version_id)
+                if not isinstance(base_version, dict) or base_version.get("kb_id") != kb_id:
+                    raise PipelineVersionNotFoundError(
+                        "Base knowledge pipeline version was not found for this knowledge base."
+                    )
+                base_job = metadata["pipeline_jobs"].get(str(base_version.get("job_id") or ""))
+                if not isinstance(base_job, dict):
+                    raise PipelineJobNotFoundError(
+                        "Base knowledge pipeline source snapshot is unavailable."
+                    )
+                inherited_sources = [
+                    json.loads(json.dumps(item))
+                    for item in base_job.get("sources", [])
+                    if isinstance(item, dict)
+                ]
+                if not inherited_sources:
+                    raise PipelineDraftValidationError(
+                        "Base knowledge pipeline version has no reusable source snapshot."
+                    )
             if any(bool(item.get("visual_candidate")) for item in documents) and not bool(
                 compiled.stage_updates.get("stage_image_understanding", {}).get("enabled")
             ):
@@ -1050,7 +1307,27 @@ class RagService:
             source_dir.mkdir(parents=True, exist_ok=True)
             manifest: list[dict[str, Any]] = []
             try:
+                seen_source_ids: set[str] = set()
+                for index, source in enumerate(inherited_sources):
+                    source_id = str(source.get("source_id") or "")
+                    snapshot_key = str(source.get("snapshot_key") or "")
+                    source_path = self.storage_dir / snapshot_key
+                    if not source_id or not source_path.is_file():
+                        raise DocumentNotFoundError(
+                            "Base knowledge pipeline source snapshot is unavailable."
+                        )
+                    suffix = source_path.suffix or ".txt"
+                    snapshot = source_dir / f"base_{index}{suffix.lower()}"
+                    shutil.copyfile(source_path, snapshot)
+                    copied = json.loads(json.dumps(source))
+                    copied["snapshot_key"] = snapshot.relative_to(self.storage_dir).as_posix()
+                    copied["content_hash"] = self._file_sha256(snapshot)
+                    manifest.append(copied)
+                    seen_source_ids.add(source_id)
+
                 for index, document in enumerate(documents):
+                    if str(document["id"]) in seen_source_ids:
+                        continue
                     source_path = Path(str(document.get("stored_path") or ""))
                     if not source_path.is_file():
                         raise DocumentNotFoundError(
@@ -1070,6 +1347,7 @@ class RagService:
                             "content_mode": "document",
                         }
                     )
+                    seen_source_ids.add(str(document["id"]))
 
                 seen_external: set[tuple[str, str, str]] = set()
                 for index, source in enumerate(xpert_sources or []):
@@ -1085,10 +1363,13 @@ class RagService:
                     if not text.strip():
                         continue
                     snapshot = source_dir / f"xpert_file_{index}.txt"
+                    source_id = f"xpert_{key[2]}"
+                    if source_id in seen_source_ids:
+                        continue
                     snapshot.write_text(text, encoding="utf-8")
                     manifest.append(
                         {
-                            "source_id": f"xpert_{key[2]}",
+                            "source_id": source_id,
                             "source_kind": "xpert_file",
                             "filename": str(source.get("filename") or f"attachment_{index}.txt"),
                             "size": len(text.encode("utf-8")),
@@ -1100,6 +1381,7 @@ class RagService:
                             "asset_id": key[2],
                         }
                     )
+                    seen_source_ids.add(source_id)
                 if not manifest:
                     raise PipelineDraftValidationError(
                         "A knowledge pipeline job requires at least one document or Xpert file."
@@ -1183,6 +1465,8 @@ class RagService:
                     "embedding_profile": json.loads(json.dumps(draft["embedding_profile"])),
                     "retrieval_profile": json.loads(json.dumps(draft["retrieval_profile"])),
                 },
+                "origin": self._safe_pipeline_origin(origin),
+                "base_version_id": base_version_id,
                 "sources": manifest,
                 "document_results": document_results,
                 "status": "queued",
@@ -1871,6 +2155,11 @@ class RagService:
                     int(item.get("vision_block_count", 0)) for item in document_results
                 ),
                 "warnings": list(job.get("warnings") or []),
+                "origin": json.loads(json.dumps(job.get("origin") or {})),
+                "promotion_required": bool(
+                    (job.get("origin") or {}).get("promotion_required")
+                ),
+                "base_version_id": job.get("base_version_id"),
                 "job_id": job_id,
                 "created_at": now,
                 "activated_at": None,
@@ -2118,6 +2407,203 @@ class RagService:
         value = re.sub(r"(?i)(bearer\s+|api[_-]?key[=:]\s*)\S+", r"\1[redacted]", value)
         return value[:500]
 
+    def _safe_pipeline_origin(self, origin: dict[str, Any] | None) -> dict[str, Any]:
+        if not isinstance(origin, dict):
+            return {}
+        return {
+            key: value
+            for key, value in origin.items()
+            if key in {"kind", "proposal_id", "promotion_required", "source_run_id"}
+            and isinstance(value, (str, bool, int, float, type(None)))
+        }
+
+    def _required_proposal_text(self, value: Any, field_name: str, limit: int) -> str:
+        text = str(value or "").strip()
+        if not text:
+            raise ValueError(f"Knowledge write proposal {field_name} is required.")
+        if len(text) > limit:
+            raise ValueError(
+                f"Knowledge write proposal {field_name} must be at most {limit} characters."
+            )
+        return text
+
+    def _optional_proposal_text(self, value: Any, limit: int) -> str | None:
+        text = str(value or "").strip()
+        return text[:limit] if text else None
+
+    def _proposal_tags(self, tags: list[str] | None) -> list[str]:
+        if tags is None:
+            return []
+        if not isinstance(tags, list) or len(tags) > 20:
+            raise ValueError("Knowledge write proposal tags must contain at most 20 items.")
+        result: list[str] = []
+        for value in tags:
+            tag = str(value or "").strip()[:50]
+            if tag and tag not in result:
+                result.append(tag)
+        return result
+
+    def _knowledge_write_proposal_or_raise(
+        self,
+        metadata: dict[str, Any],
+        proposal_id: str,
+    ) -> dict[str, Any]:
+        proposal = metadata["knowledge_write_proposals"].get(proposal_id)
+        if not isinstance(proposal, dict):
+            raise KnowledgeWriteProposalNotFoundError("Knowledge write proposal not found.")
+        return proposal
+
+    def _assert_pending_proposal(
+        self,
+        proposal: dict[str, Any],
+        expected_revision: int,
+    ) -> None:
+        if proposal.get("status") != "pending":
+            raise KnowledgeWriteProposalConflictError(
+                "Only pending knowledge write proposals can be changed."
+            )
+        if int(proposal.get("revision", 0)) != int(expected_revision):
+            raise KnowledgeWriteProposalConflictError(
+                "Knowledge write proposal changed; reload before continuing."
+            )
+
+    def _knowledge_write_proposal_payload(
+        self,
+        proposal: dict[str, Any],
+        metadata: dict[str, Any],
+    ) -> dict[str, Any]:
+        payload = json.loads(json.dumps(proposal))
+        job_id = str(proposal.get("job_id") or "")
+        job = metadata["pipeline_jobs"].get(job_id) if job_id else None
+        payload["build_status"] = (
+            str(job.get("status") or "unknown") if isinstance(job, dict) else None
+        )
+        candidate_id = str(proposal.get("candidate_version_id") or "")
+        version = metadata["pipeline_versions"].get(candidate_id) if candidate_id else None
+        payload["candidate_ready"] = isinstance(version, dict)
+        payload["candidate_active"] = (
+            isinstance(version, dict)
+            and metadata["pipeline_active_versions"].get(str(proposal.get("kb_id")))
+            == candidate_id
+        )
+        return payload
+
+    def _create_managed_proposal_document(
+        self,
+        proposal: dict[str, Any],
+    ) -> dict[str, Any]:
+        kb_id = str(proposal["kb_id"])
+        doc_id = f"doc_{uuid.uuid4().hex}"
+        filename = f"knowledge_proposal_{proposal['proposal_id']}.md"
+        target_dir = self.uploads_dir / kb_id
+        target_dir.mkdir(parents=True, exist_ok=True)
+        stored_path = target_dir / f"{doc_id}_{filename}"
+        title = str(proposal["title"])
+        tags = [str(item) for item in proposal.get("tags", [])]
+        tag_line = f"\n\nTags: {', '.join(tags)}" if tags else ""
+        body = f"# {title}\n\n{proposal['content']}{tag_line}\n"
+        stored_path.write_text(body, encoding="utf-8")
+        now = time.time()
+        document = {
+            "id": doc_id,
+            "kb_id": kb_id,
+            "filename": filename,
+            "stored_path": str(stored_path),
+            "size": len(body.encode("utf-8")),
+            "chunk_count": 0,
+            "content_type": "text/markdown",
+            "ingestion_status": "pipeline_required",
+            "visual_candidate": False,
+            "visual_metadata": {},
+            "managed_origin": "knowledge_write_proposal",
+            "proposal_id": str(proposal["proposal_id"]),
+            "created_at": now,
+        }
+        with self._metadata_lock:
+            metadata = self._read_metadata_unlocked()
+            self._ensure_kb_exists(metadata, kb_id)
+            metadata["documents"][doc_id] = document
+            metadata["knowledge_bases"][kb_id]["updated_at"] = now
+            self._write_metadata_unlocked(metadata)
+        return self._document_payload(document)
+
+    async def search_knowledge(
+        self,
+        kb_id: str,
+        question: str,
+        *,
+        top_k: int = 5,
+        retrieval: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Retrieve from the active namespace without generating an answer."""
+
+        metadata = self._read_metadata()
+        self._ensure_kb_exists(metadata, kb_id)
+        active_version_id = metadata["pipeline_active_versions"].get(kb_id)
+        version = (
+            metadata["pipeline_versions"].get(active_version_id)
+            if active_version_id
+            else None
+        )
+        namespace = str(version.get("namespace") or kb_id) if isinstance(version, dict) else kb_id
+        config = self._retrieval_config_for_version(
+            version if isinstance(version, dict) else None,
+            retrieval,
+            top_k=max(1, min(int(top_k), 10)),
+        )
+        result = await self._query_namespace(
+            kb_id,
+            namespace,
+            question,
+            config=config,
+            lexical_ready=bool(isinstance(version, dict) and version.get("lexical_index_ready")),
+            generate_answer=False,
+        )
+        version_id = str(version.get("version_id") or "") if isinstance(version, dict) else None
+        result = self._with_source_document_ids(result, version_id)
+        result["version_id"] = version_id
+        return result
+
+    def get_knowledge_chunk(self, kb_id: str, chunk_id: str) -> dict[str, Any]:
+        """Read one chunk from the active namespace only."""
+
+        metadata = self._read_metadata()
+        self._ensure_kb_exists(metadata, kb_id)
+        active_version_id = metadata["pipeline_active_versions"].get(kb_id)
+        version = (
+            metadata["pipeline_versions"].get(active_version_id)
+            if active_version_id
+            else None
+        )
+        namespace = str(version.get("namespace") or kb_id) if isinstance(version, dict) else kb_id
+        chunk = self.vector_store.get_chunk(namespace, chunk_id)
+        if chunk is None:
+            raise DocumentNotFoundError("Knowledge chunk was not found in the active version.")
+        indexed_document_id = str(chunk.doc_id)
+        version_id = str(version.get("version_id") or "") if isinstance(version, dict) else ""
+        prefix = f"{version_id}_" if version_id else ""
+        source_document_id = (
+            indexed_document_id[len(prefix) :]
+            if prefix and indexed_document_id.startswith(prefix)
+            else indexed_document_id
+        )
+        return {
+            "kb_id": kb_id,
+            "version_id": version_id or None,
+            "chunk_id": chunk.chunk_id,
+            "document_id": source_document_id,
+            "document_name": chunk.document_name,
+            "text": chunk.text[:8000],
+            "text_length": len(chunk.text),
+            "truncated": len(chunk.text) > 8000,
+            "chunk_index": chunk.chunk_index,
+            "parent_chunk_id": chunk.parent_chunk_id,
+            "chunk_type": chunk.chunk_type,
+            "page_number": chunk.page_number,
+            "visual_kind": chunk.visual_kind,
+            "source_block_id": chunk.source_block_id,
+        }
+
     def list_pipeline_artifact_chunks(self, artifact_id: str) -> list[dict[str, Any]]:
         """Return chunk metadata for one artifact without exposing embeddings."""
 
@@ -2146,7 +2632,12 @@ class RagService:
     ) -> list[dict[str, Any]]:
         """Return citation anchors using the existing RAG retrieval path."""
 
-        result = await self.query(kb_id, question, top_k=top_k, retrieval=retrieval)
+        result = await self.search_knowledge(
+            kb_id,
+            question,
+            top_k=top_k,
+            retrieval=retrieval,
+        )
         citations: list[dict[str, Any]] = []
         for source in result.get("sources", []):
             chunk_id = str(source.get("chunk_id", ""))
@@ -3091,6 +3582,7 @@ class RagService:
             "pipeline_jobs": {},
             "pipeline_versions": {},
             "pipeline_active_versions": {},
+            "knowledge_write_proposals": {},
         }
 
     def _read_metadata(self) -> dict[str, dict[str, Any]]:
@@ -3114,6 +3606,7 @@ class RagService:
             "pipeline_jobs": data.get("pipeline_jobs") if isinstance(data.get("pipeline_jobs"), dict) else {},
             "pipeline_versions": data.get("pipeline_versions") if isinstance(data.get("pipeline_versions"), dict) else {},
             "pipeline_active_versions": data.get("pipeline_active_versions") if isinstance(data.get("pipeline_active_versions"), dict) else {},
+            "knowledge_write_proposals": data.get("knowledge_write_proposals") if isinstance(data.get("knowledge_write_proposals"), dict) else {},
         }
         for document in metadata["documents"].values():
             if not isinstance(document, dict):

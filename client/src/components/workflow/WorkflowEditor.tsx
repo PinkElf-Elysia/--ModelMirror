@@ -328,6 +328,9 @@ function createNodeData(
       memoryReadScope: "both",
       memoryWriteEnabled: "false",
       memoryWriteTarget: "xpert",
+      knowledgeReadEnabled: "false",
+      knowledgeWriteEnabled: "false",
+      knowledgeBaseIds: "",
       nodeParametersJson: "[]",
     };
   }
@@ -815,6 +818,55 @@ function AgentStudioPanel({
   registryToolsError: string;
 }) {
   const isWorkflowAgent = data.kind === "workflow_agent";
+  const [knowledgeBases, setKnowledgeBases] = useState<
+    Array<{ id: string; name: string }>
+  >([]);
+  const [knowledgeBasesError, setKnowledgeBasesError] = useState("");
+  const selectedKnowledgeBaseIds = useMemo(
+    () =>
+      new Set(
+        String(data.knowledgeBaseIds ?? "")
+          .split(/[,\n]/)
+          .map((item) => item.trim())
+          .filter(Boolean),
+      ),
+    [data.knowledgeBaseIds],
+  );
+
+  useEffect(() => {
+    if (!isWorkflowAgent) return;
+    let cancelled = false;
+    void fetch("/api/rag/knowledge_bases")
+      .then(async (response) => {
+        if (!response.ok) throw new Error("知识库列表暂不可用。");
+        return (await response.json()) as {
+          knowledge_bases?: Array<{ id: string; name: string }>;
+        };
+      })
+      .then((payload) => {
+        if (!cancelled) {
+          setKnowledgeBases(payload.knowledge_bases ?? []);
+          setKnowledgeBasesError("");
+        }
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) {
+          setKnowledgeBasesError(
+            error instanceof Error ? error.message : "知识库列表暂不可用。",
+          );
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isWorkflowAgent]);
+
+  function toggleKnowledgeBase(kbId: string, checked: boolean) {
+    const next = new Set(selectedKnowledgeBaseIds);
+    if (checked) next.add(kbId);
+    else next.delete(kbId);
+    update({ knowledgeBaseIds: Array.from(next).slice(0, 5).join(",") });
+  }
   const setStringBoolean = (
     key:
       | "disableOutput"
@@ -822,7 +874,9 @@ function AgentStudioPanel({
       | "parallelToolCalls"
       | "retryOnFailure"
       | "memoryReadEnabled"
-      | "memoryWriteEnabled",
+      | "memoryWriteEnabled"
+      | "knowledgeReadEnabled"
+      | "knowledgeWriteEnabled",
     checked: boolean,
   ) => update({ [key]: checked ? "true" : "false" });
   const toolNamesPlaceholder = registryTools.length
@@ -980,17 +1034,76 @@ function AgentStudioPanel({
       </ConfigSection>
 
       <ConfigSection
-        description="当前知识引用仍通过知识检索和知识引用锚点节点完成。"
+        description="知识工具读取活动版本；写入只创建待审批提议，不会直接修改活动索引。"
         title="知识库"
       >
-        <p className="rounded-lg border border-dashed border-white/15 bg-white/[0.035] px-3 py-3 text-xs leading-5 text-slate-400">
-          知识库召回设置将在后续版本接入。当前可在画布中连接 knowledge_retrieval 或 knowledge_citation 节点。
-        </p>
+        {isWorkflowAgent ? (
+          <div className="space-y-3">
+            <ConfigSwitch
+              checked={workflowBooleanValue(data.knowledgeReadEnabled)}
+              label="启用知识检索、原文与引用工具"
+              onChange={(checked) => {
+                setStringBoolean("knowledgeReadEnabled", checked);
+                if (checked && data.toolMode !== "mcp_tools") {
+                  update({ toolMode: "mcp_tools" });
+                }
+              }}
+            />
+            <ConfigSwitch
+              checked={workflowBooleanValue(data.knowledgeWriteEnabled)}
+              description="模型只能提出写入，必须在 Knowledge Inbox 中人工审批。"
+              label="允许提出知识写入"
+              onChange={(checked) => {
+                setStringBoolean("knowledgeWriteEnabled", checked);
+                if (checked && data.toolMode !== "mcp_tools") {
+                  update({ toolMode: "mcp_tools" });
+                }
+              }}
+            />
+            <div className="space-y-2">
+              <p className="text-xs font-semibold text-slate-300">
+                可访问知识库（最多 5 个）
+              </p>
+              {knowledgeBases.length ? (
+                knowledgeBases.map((kb) => (
+                  <label
+                    className="flex items-center gap-2 rounded-md border border-white/10 bg-white/[0.035] px-3 py-2 text-xs text-slate-300"
+                    key={kb.id}
+                  >
+                    <input
+                      checked={selectedKnowledgeBaseIds.has(kb.id)}
+                      disabled={
+                        !selectedKnowledgeBaseIds.has(kb.id) &&
+                        selectedKnowledgeBaseIds.size >= 5
+                      }
+                      onChange={(event) =>
+                        toggleKnowledgeBase(kb.id, event.target.checked)
+                      }
+                      type="checkbox"
+                    />
+                    <span className="min-w-0 flex-1 truncate">{kb.name}</span>
+                    <span className="font-mono text-[10px] text-slate-500">
+                      {kb.id}
+                    </span>
+                  </label>
+                ))
+              ) : (
+                <p className="rounded-md border border-dashed border-white/15 px-3 py-2 text-xs text-slate-400">
+                  {knowledgeBasesError || "暂无知识库，请先在 RAG 页面创建。"}
+                </p>
+              )}
+            </div>
+          </div>
+        ) : (
+          <p className="rounded-lg border border-dashed border-white/15 bg-white/[0.035] px-3 py-3 text-xs leading-5 text-slate-400">
+            动态知识工具仅对 workflow_agent 开放；普通 Agent 可继续连接知识节点。
+          </p>
+        )}
       </ConfigSection>
 
       <ConfigSection title="工具">
         {isWorkflowAgent ? (
-          <Field label="工具模式">
+          <Field label="Runtime 工具模式">
             <select
               className={textInputClass()}
               onChange={(event) => update({ toolMode: event.target.value })}
@@ -1000,7 +1113,7 @@ function AgentStudioPanel({
                 none：直接调用模型
               </option>
               <option className="bg-slate-950" value="mcp_tools">
-                mcp_tools：允许调用 MCP 工具
+                mcp_tools：启用 MCP / Memory / Knowledge 工具
               </option>
             </select>
           </Field>

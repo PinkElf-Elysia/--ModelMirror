@@ -116,13 +116,27 @@ def _deployment_preflight(version: XpertVersion, policy: XpertAppPolicy) -> dict
     has_tool_policy = False
     has_handoff = False
     has_knowledge = False
+    has_dynamic_knowledge_read = False
+    has_dynamic_knowledge_write = False
     for node in version.workflow.nodes:
         data = node.data if isinstance(node.data, dict) else {}
         kind = str(data.get("kind") or node.type)
         if kind == "mcp_tool":
             has_tool_call = True
         if kind in {"agent", "workflow_agent"} and data.get("toolMode") == "mcp_tools":
-            has_tool_call = True
+            dynamic_knowledge = kind == "workflow_agent" and (
+                _truthy(data.get("knowledgeReadEnabled"))
+                or _truthy(data.get("knowledgeWriteEnabled"))
+            )
+            if str(data.get("toolNames") or "").strip() or not dynamic_knowledge:
+                has_tool_call = True
+        if kind == "workflow_agent":
+            has_dynamic_knowledge_read = has_dynamic_knowledge_read or _truthy(
+                data.get("knowledgeReadEnabled")
+            )
+            has_dynamic_knowledge_write = has_dynamic_knowledge_write or _truthy(
+                data.get("knowledgeWriteEnabled")
+            )
         if kind == "runtime_middleware" and data.get("runtimeMiddlewareId") == "tool_policy":
             has_tool_policy = True
         if kind in {"agent_handoff", "handoff_router"}:
@@ -150,7 +164,23 @@ def _deployment_preflight(version: XpertVersion, policy: XpertAppPolicy) -> dict
                 "message": "This Xpert version uses Handoff, but App Handoff access is disabled.",
             }
         )
-    if has_knowledge:
+    if has_dynamic_knowledge_read and not policy.allow_knowledge_read:
+        issues.append(
+            {
+                "code": "app_knowledge_read_not_allowed",
+                "message": (
+                    "This Xpert version uses dynamic knowledge tools, but App knowledge read access is disabled."
+                ),
+            }
+        )
+    if has_dynamic_knowledge_write:
+        issues.append(
+            {
+                "code": "app_knowledge_write_forbidden",
+                "message": "Public Xpert Apps cannot deploy knowledge write proposal tools.",
+            }
+        )
+    if has_knowledge or has_dynamic_knowledge_read:
         warnings.append(
             {
                 "code": "app_knowledge_visibility",
@@ -158,6 +188,14 @@ def _deployment_preflight(version: XpertVersion, policy: XpertAppPolicy) -> dict
             }
         )
     return {"valid": not issues, "issues": issues, "warnings": warnings}
+
+
+def _truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
 
 
 def _public_app_payload(app: Any) -> dict:

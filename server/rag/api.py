@@ -12,6 +12,8 @@ from pydantic import BaseModel, Field
 from .rag_service import (
     DocumentNotFoundError,
     KnowledgeBaseNotFoundError,
+    KnowledgeWriteProposalConflictError,
+    KnowledgeWriteProposalNotFoundError,
     PipelineDraftValidationError,
     PipelineGraphRevisionError,
     PipelineJobNotFoundError,
@@ -563,6 +565,18 @@ class EvaluationGateUpdateRequest(BaseModel):
 
 class PipelineActivationRequest(BaseModel):
     evaluation_run_id: str | None = Field(default=None, max_length=200)
+
+
+class KnowledgeWriteProposalUpdateRequest(BaseModel):
+    expected_revision: int = Field(ge=1)
+    title: str | None = Field(default=None, min_length=1, max_length=160)
+    content: str | None = Field(default=None, min_length=1, max_length=20_000)
+    tags: list[str] | None = None
+
+
+class KnowledgeWriteProposalDecisionRequest(BaseModel):
+    expected_revision: int = Field(ge=1)
+    reason: str = Field(default="", max_length=500)
 
 
 def get_rag_service() -> RagService:
@@ -1130,6 +1144,101 @@ async def retry_pipeline_job(job_id: str) -> PipelineJobPayload:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
+@router.get("/knowledge-write-proposals")
+async def list_knowledge_write_proposals(
+    kb_id: str | None = None,
+    status: str | None = None,
+    source_xpert_id: str | None = None,
+    limit: int = 50,
+) -> dict[str, Any]:
+    try:
+        items = get_rag_service().list_knowledge_write_proposals(
+            kb_id=kb_id,
+            status=status,
+            source_xpert_id=source_xpert_id,
+            limit=limit,
+        )
+        return {"proposals": items, "proposal_count": len(items)}
+    except KnowledgeBaseNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/knowledge-write-proposals/{proposal_id}")
+async def get_knowledge_write_proposal(proposal_id: str) -> dict[str, Any]:
+    try:
+        return get_rag_service().get_knowledge_write_proposal(proposal_id)
+    except KnowledgeWriteProposalNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.patch("/knowledge-write-proposals/{proposal_id}")
+async def update_knowledge_write_proposal(
+    proposal_id: str,
+    payload: KnowledgeWriteProposalUpdateRequest,
+) -> dict[str, Any]:
+    try:
+        return get_rag_service().update_knowledge_write_proposal(
+            proposal_id,
+            expected_revision=payload.expected_revision,
+            title=payload.title,
+            content=payload.content,
+            tags=payload.tags,
+        )
+    except KnowledgeWriteProposalNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except KnowledgeWriteProposalConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/knowledge-write-proposals/{proposal_id}/approve")
+async def approve_knowledge_write_proposal(
+    proposal_id: str,
+    payload: KnowledgeWriteProposalDecisionRequest,
+) -> dict[str, Any]:
+    try:
+        proposal = get_rag_service().approve_knowledge_write_proposal(
+            proposal_id,
+            expected_revision=payload.expected_revision,
+        )
+        get_pipeline_executor().notify()
+        return proposal
+    except KnowledgeWriteProposalNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except KnowledgeWriteProposalConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (
+        KnowledgeBaseNotFoundError,
+        PipelineDraftValidationError,
+        PipelineGraphRevisionError,
+        PipelineJobNotFoundError,
+        PipelineJobStateError,
+        PipelineVersionNotFoundError,
+        DocumentNotFoundError,
+    ) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/knowledge-write-proposals/{proposal_id}/reject")
+async def reject_knowledge_write_proposal(
+    proposal_id: str,
+    payload: KnowledgeWriteProposalDecisionRequest,
+) -> dict[str, Any]:
+    try:
+        return get_rag_service().reject_knowledge_write_proposal(
+            proposal_id,
+            expected_revision=payload.expected_revision,
+            reason=payload.reason,
+        )
+    except KnowledgeWriteProposalNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except KnowledgeWriteProposalConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @router.get("/evaluation-sets")
 async def list_evaluation_sets(kb_id: str) -> dict[str, Any]:
     _require_knowledge_base(kb_id)
@@ -1447,7 +1556,7 @@ async def activate_pipeline_version(
             kb_id=str(stored["kb_id"]),
             version_id=version_id,
             evaluation_run_id=payload.evaluation_run_id if payload else None,
-            require_passed_run=False,
+            require_passed_run=bool(stored.get("promotion_required")),
         )
         version = get_rag_service().activate_pipeline_version(version_id)
         await get_pipeline_executor().record_job_event(

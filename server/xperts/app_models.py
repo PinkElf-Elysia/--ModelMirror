@@ -13,6 +13,7 @@ class XpertAppPolicy(BaseModel):
     allow_tools: bool = False
     allow_handoffs: bool = False
     allow_xpert_memory: bool = False
+    allow_knowledge_read: bool = False
 
 
 class XpertAppLimits(BaseModel):

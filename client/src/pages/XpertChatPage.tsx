@@ -84,6 +84,13 @@ interface KnowledgeBaseSummary {
   document_count: number;
 }
 
+interface KnowledgeWriteProposalSummary {
+  proposal_id: string;
+  kb_id: string;
+  title: string;
+  status: string;
+}
+
 async function responseError(response: Response) {
   try {
     const payload = (await response.json()) as { detail?: string; error?: string };
@@ -136,6 +143,7 @@ export default function XpertChatPage() {
   const [showContext, setShowContext] = useState(false);
   const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBaseSummary[]>([]);
   const [knowledgeTargetId, setKnowledgeTargetId] = useState("");
+  const [knowledgeProposals, setKnowledgeProposals] = useState<KnowledgeWriteProposalSummary[]>([]);
   const [promotingFiles, setPromotingFiles] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -164,6 +172,11 @@ export default function XpertChatPage() {
       .then((payload) => setPublishedXperts(payload.items))
       .catch(() => setPublishedXperts([]));
   }, []);
+
+  useEffect(() => {
+    if (!xpert?.id) return;
+    void refreshKnowledgeProposals(xpert.id);
+  }, [xpert?.id]);
 
   useEffect(() => {
     fetch("/api/rag/knowledge_bases")
@@ -243,6 +256,22 @@ export default function XpertChatPage() {
     );
     setMemories(memoryPayload.items);
     setMemoryCandidates(candidatePayload.items);
+  }
+
+  async function refreshKnowledgeProposals(selectedXpertId = xpert?.id) {
+    if (!selectedXpertId) return;
+    try {
+      const response = await fetch(
+        `/api/rag/knowledge-write-proposals?status=pending&source_xpert_id=${encodeURIComponent(selectedXpertId)}&limit=100`,
+      );
+      if (!response.ok) throw new Error(await responseError(response));
+      const payload = (await response.json()) as {
+        proposals: KnowledgeWriteProposalSummary[];
+      };
+      setKnowledgeProposals(payload.proposals ?? []);
+    } catch {
+      setKnowledgeProposals([]);
+    }
   }
 
   async function startConversation() {
@@ -447,6 +476,7 @@ export default function XpertChatPage() {
       ]);
       if (nextRunId) await loadTrace(nextRunId, nextTaskId);
       window.setTimeout(() => void refreshContext(), 800);
+      window.setTimeout(() => void refreshKnowledgeProposals(), 800);
     } catch (caught) {
       const messageText = caught instanceof Error ? caught.message : "Xpert 运行失败";
       setError(messageText);
@@ -739,6 +769,32 @@ export default function XpertChatPage() {
                       {promotingFiles ? "提交中..." : "创建候选"}
                     </button>
                   </div>
+                </div>
+              </section>
+
+              <section>
+                <div className="flex items-center justify-between">
+                  <h3 className="text-xs font-semibold text-white">知识写入待审批</h3>
+                  <span className="text-[10px] text-slate-500">{knowledgeProposals.length}</span>
+                </div>
+                <p className="mt-1 text-[10px] leading-4 text-slate-500">
+                  Xpert 只能提出写入，正式审批统一在对应资料库 Inbox 完成。
+                </p>
+                <div className="mt-2 space-y-2">
+                  {knowledgeProposals.length ? knowledgeProposals.slice(0, 5).map((proposal) => (
+                    <Link
+                      className="block rounded-lg border border-amber-300/20 bg-amber-300/[0.06] p-2.5 transition hover:bg-amber-300/[0.1]"
+                      key={proposal.proposal_id}
+                      to={`/rag/${encodeURIComponent(proposal.kb_id)}/inbox?proposal_id=${encodeURIComponent(proposal.proposal_id)}`}
+                    >
+                      <p className="truncate text-[11px] font-semibold text-amber-100">{proposal.title}</p>
+                      <p className="mt-1 text-[10px] text-slate-500">打开 Knowledge Inbox 审批</p>
+                    </Link>
+                  )) : (
+                    <p className="rounded-lg border border-dashed border-white/10 p-3 text-center text-xs text-slate-500">
+                      暂无待审批知识写入
+                    </p>
+                  )}
                 </div>
               </section>
 

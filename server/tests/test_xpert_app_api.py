@@ -252,6 +252,83 @@ async def test_deploy_preflight_requires_app_tool_policy(
 
 
 @pytest.mark.asyncio
+async def test_deploy_preflight_requires_explicit_read_only_knowledge_policy(
+    client: httpx.AsyncClient,
+    stores,
+) -> None:
+    xpert_store, _ = stores
+    created = xpert_store.create_xpert(name="Knowledge App", slug="knowledge-app")
+    draft = created.draft.model_copy(deep=True)
+    agent = _workflow_agent_data(draft.workflow)
+    agent["toolMode"] = "mcp_tools"
+    agent["knowledgeReadEnabled"] = "true"
+    agent["knowledgeBaseIds"] = "kb-public"
+    updated = xpert_store.update_xpert(
+        created.id,
+        {"draft": draft.model_dump(mode="json")},
+    )
+    xpert_store.publish_xpert(created.id, expected_revision=updated.draft_revision)
+    create = await client.post(f"/api/xperts/{created.id}/app", json={})
+    app_payload = create.json()["app"]
+
+    denied = await client.post(
+        f"/api/xpert-apps/{app_payload['app_id']}/deploy",
+        json={"version": 1},
+    )
+    assert denied.status_code == 422
+    assert any(
+        issue["code"] == "app_knowledge_read_not_allowed"
+        for issue in denied.json()["detail"]["issues"]
+    )
+
+    update = await client.patch(
+        f"/api/xpert-apps/{app_payload['app_id']}",
+        json={"policy": {"allow_knowledge_read": True}},
+    )
+    assert update.status_code == 200, update.text
+    deployed = await client.post(
+        f"/api/xpert-apps/{app_payload['app_id']}/deploy",
+        json={"version": 1},
+    )
+    assert deployed.status_code == 200, deployed.text
+
+
+@pytest.mark.asyncio
+async def test_deploy_preflight_always_rejects_dynamic_knowledge_write(
+    client: httpx.AsyncClient,
+    stores,
+) -> None:
+    xpert_store, _ = stores
+    created = xpert_store.create_xpert(name="Writer App", slug="writer-app")
+    draft = created.draft.model_copy(deep=True)
+    agent = _workflow_agent_data(draft.workflow)
+    agent["toolMode"] = "mcp_tools"
+    agent["knowledgeWriteEnabled"] = "true"
+    agent["knowledgeBaseIds"] = "kb-private"
+    updated = xpert_store.update_xpert(
+        created.id,
+        {"draft": draft.model_dump(mode="json")},
+    )
+    xpert_store.publish_xpert(created.id, expected_revision=updated.draft_revision)
+    create = await client.post(f"/api/xperts/{created.id}/app", json={})
+    app_payload = create.json()["app"]
+    await client.patch(
+        f"/api/xpert-apps/{app_payload['app_id']}",
+        json={"policy": {"allow_knowledge_read": True, "allow_tools": True}},
+    )
+
+    denied = await client.post(
+        f"/api/xpert-apps/{app_payload['app_id']}/deploy",
+        json={"version": 1},
+    )
+    assert denied.status_code == 422
+    assert any(
+        issue["code"] == "app_knowledge_write_forbidden"
+        for issue in denied.json()["detail"]["issues"]
+    )
+
+
+@pytest.mark.asyncio
 async def test_openai_json_and_sse_use_pinned_version_and_register_run(
     client: httpx.AsyncClient,
     stores,

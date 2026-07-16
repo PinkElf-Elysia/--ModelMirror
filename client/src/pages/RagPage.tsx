@@ -1182,6 +1182,12 @@ export default function RagPage() {
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
                   <Link
+                    className="rounded-lg border border-amber-300/25 bg-amber-300/10 px-4 py-2 text-sm font-semibold text-amber-100 transition hover:bg-amber-300/15"
+                    to={`/rag/${encodeURIComponent(selectedKnowledgeBase.id)}/inbox`}
+                  >
+                    知识审批 Inbox
+                  </Link>
+                  <Link
                     className="rounded-lg border border-cyan-300/25 bg-cyan-300/10 px-4 py-2 text-sm font-semibold text-cyan-100 transition hover:bg-cyan-300/15"
                     to={`/rag/${encodeURIComponent(selectedKnowledgeBase.id)}/pipeline`}
                   >

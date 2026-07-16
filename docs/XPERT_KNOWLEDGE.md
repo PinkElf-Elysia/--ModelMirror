@@ -77,6 +77,21 @@ Promotion Gate 有两种模式：
 
 默认门禁检查 Recall@5、MRR@10、Citation Hit、无结果率、错误率、P95 延迟及相对基线回归。`POST /pipeline/versions/{version_id}/promote` 是带评估证明的激活入口；历史 ready 版本仍可通过相同门禁回滚。
 
+## Knowledge Agent 与审批写入
+
+已发布 `workflow_agent` 可显式配置 1 至 5 个知识库并启用 Runtime 知识工具：
+
+- `knowledge_search`：按活动版本 profile 执行向量、全文或混合检索，多库结果稳定融合，每库失败只返回 warning。
+- `knowledge_get`：以知识库和 chunk ID 精确读取活动 namespace 的受限上下文，禁止跨 namespace 获取。
+- `knowledge_cite`：返回稳定 CitationAnchor，不额外调用模型生成回答。
+- `knowledge_propose_write`：创建待审批提议，不直接写文档或索引。
+
+搜索最多返回 10 条、每条正文最多 2,000 字符；精确读取最多 8,000 字符。工具只能访问节点 `knowledgeBaseIds` 的显式作用域，并继续通过 Runtime policy、audit、middleware 和 checkpoint。
+
+`KnowledgeWriteProposal` 持久化标题、内容、标签、来源 Xpert/conversation/Goal/Handoff/run、revision 和审批/构建状态。同一知识库、来源 run 与内容 hash 的 pending 提议会去重。`/rag/:kbId/inbox` 是唯一审批中心；聊天页只显示数量与跳转入口。
+
+批准提议会创建受管 Markdown 文档，并以当前活动版本的精确来源快照作为基础语料；没有活动版本时使用当前资料库文档。系统随后复用已保存且通过预检的 Draft/Graph 创建 Pipeline Job。候选版本不会自动激活，且标记 `promotion_required=true`：必须运行 Evaluation Gate 并调用 `/promote`。拒绝不会创建文档、Job 或版本；Job 创建失败会回滚受管文档并保持提议 pending。
+
 ## API
 
 - `GET /api/rag/pipeline/graph`
@@ -101,6 +116,11 @@ Promotion Gate 有两种模式：
 - `GET /api/rag/evaluation-runs`
 - `GET /api/rag/evaluation-runs/{run_id}`
 - `POST /api/rag/evaluation-runs/{run_id}/cancel`
+- `GET /api/rag/knowledge-write-proposals`
+- `GET /api/rag/knowledge-write-proposals/{proposal_id}`
+- `PATCH /api/rag/knowledge-write-proposals/{proposal_id}`
+- `POST /api/rag/knowledge-write-proposals/{proposal_id}/approve`
+- `POST /api/rag/knowledge-write-proposals/{proposal_id}/reject`
 
 - `POST /api/rag/pipeline/draft/{kb_id}/execute`
 - `GET /api/rag/pipeline/jobs`
@@ -117,6 +137,7 @@ Promotion Gate 有两种模式：
 
 - 不自动激活候选索引。
 - required Promotion Gate 不允许使用失败、跨知识库、跨版本或过期评估集 revision 的运行结果激活候选。
+- 知识写入提议不得绕过 Inbox；批准只构建候选，提议候选禁止直接 activate，必须评估通过后 promote。
 - Graph 保存必须校验当前 revision；非法图和过期 revision 不得修改 Draft 或创建 Job。
 - Graph 节点预览不持久化，最多返回 20 条截断摘要；Embedding/索引/检索节点只返回能力与 profile，不返回向量或正文。
 - Processor preview 不持久化，最多返回 20 个截断块或生成项。

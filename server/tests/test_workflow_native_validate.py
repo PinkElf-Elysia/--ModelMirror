@@ -1363,6 +1363,73 @@ async def test_workflow_agent_mcp_tool_mode_is_valid(
 
 
 @pytest.mark.asyncio
+async def test_workflow_agent_knowledge_tools_are_valid(
+    client: httpx.AsyncClient,
+) -> None:
+    workflow = linear_workflow()
+    workflow["nodes"][1] = {
+        "id": "workflow_agent",
+        "type": "workflow_agent",
+        "data": {
+            "kind": "workflow_agent",
+            "agentName": "knowledge-agent",
+            "modelId": "deepseek/deepseek-chat",
+            "rolePrompt": "Use approved knowledge only.",
+            "taskInput": "{{user_input}}",
+            "toolMode": "mcp_tools",
+            "knowledgeReadEnabled": "true",
+            "knowledgeWriteEnabled": "true",
+            "knowledgeBaseIds": "kb-one, kb-two",
+            "outputVariable": "agent_output",
+        },
+    }
+    workflow["nodes"][2]["data"]["outputVariable"] = "agent_output"
+    workflow["edges"] = [
+        {"id": "e1", "source": "input", "target": "workflow_agent"},
+        {"id": "e2", "source": "workflow_agent", "target": "output"},
+    ]
+
+    data = await validate(client, workflow)
+
+    assert data["valid"] is True
+    assert "workflow_agent_knowledge_tools_require_runtime_mode" not in issue_codes(data)
+    assert "invalid_workflow_agent_knowledge_base_ids" not in issue_codes(data)
+
+
+@pytest.mark.asyncio
+async def test_workflow_agent_knowledge_tools_require_runtime_mode_and_scoped_kbs(
+    client: httpx.AsyncClient,
+) -> None:
+    workflow = linear_workflow()
+    workflow["nodes"][1] = {
+        "id": "workflow_agent",
+        "type": "workflow_agent",
+        "data": {
+            "kind": "workflow_agent",
+            "agentName": "knowledge-agent",
+            "modelId": "deepseek/deepseek-chat",
+            "rolePrompt": "Use approved knowledge only.",
+            "taskInput": "{{user_input}}",
+            "toolMode": "none",
+            "knowledgeReadEnabled": "true",
+            "knowledgeBaseIds": "",
+            "outputVariable": "agent_output",
+        },
+    }
+    workflow["nodes"][2]["data"]["outputVariable"] = "agent_output"
+    workflow["edges"] = [
+        {"id": "e1", "source": "input", "target": "workflow_agent"},
+        {"id": "e2", "source": "workflow_agent", "target": "output"},
+    ]
+
+    data = await validate(client, workflow)
+
+    assert data["valid"] is False
+    assert "workflow_agent_knowledge_tools_require_runtime_mode" in issue_codes(data)
+    assert "invalid_workflow_agent_knowledge_base_ids" in issue_codes(data)
+
+
+@pytest.mark.asyncio
 async def test_workflow_agent_invalid_tool_mode_and_iterations(
     client: httpx.AsyncClient,
 ) -> None:
