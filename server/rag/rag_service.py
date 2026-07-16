@@ -22,7 +22,16 @@ from .lexical_store import LexicalSearchResult, SqliteLexicalStore
 from .reranker import RerankDocument, RerankService
 from .retrieval import RetrievalCandidate, RetrievalConfig, fuse_rankings
 from .processor_generator import ProcessorGenerationService
-from .splitter import DEFAULT_SEPARATORS, TextSplitter
+from .pipeline_graph import (
+    GraphValidationIssue,
+    KnowledgePipelineCompileResult,
+    PipelineGraphValidationError,
+    compile_pipeline_graph,
+    default_pipeline_graph,
+    sync_graph_from_draft,
+    validate_pipeline_graph,
+)
+from .splitter import DEFAULT_SEPARATORS, ParentChildTextSplitter, TextSplitter
 from .vector_store import SearchResult, VectorChunk, VectorStore, create_vector_store
 
 
@@ -56,6 +65,10 @@ class PipelineVersionNotFoundError(RagError):
 
 class PipelineJobStateError(RagError):
     """Raised when a pipeline job operation is invalid for its current state."""
+
+
+class PipelineGraphRevisionError(RagError):
+    """Raised when a graph save uses a stale optimistic revision."""
 
 
 PIPELINE_STAGE_IDS = {
@@ -165,6 +178,7 @@ class RagService:
             metadata["documents"].pop(doc_id, None)
         metadata["knowledge_bases"].pop(kb_id, None)
         metadata["pipeline_drafts"].pop(kb_id, None)
+        metadata["pipeline_graphs"].pop(kb_id, None)
         metadata["pipeline_active_versions"].pop(kb_id, None)
         version_namespaces = [
             str(item.get("namespace") or "")
@@ -381,6 +395,201 @@ class RagService:
             stage["config"] = configs.get(str(stage["id"]), {})
         return payload
 
+    def get_pipeline_graph(self, kb_id: str) -> dict[str, Any]:
+        metadata = self._read_metadata()
+        self._ensure_kb_exists(metadata, kb_id)
+        draft = self._pipeline_draft_record(metadata, kb_id)
+        record = self._pipeline_graph_record(metadata, kb_id, draft)
+        issues, compiled = self._validate_and_compile_pipeline_graph(
+            kb_id,
+            record["graph"],
+            draft,
+        )
+        return {
+            "kb_id": kb_id,
+            "graph_id": str(record["graph_id"]),
+            "graph_revision": int(record["graph_revision"]),
+            "compiled_draft_version": int(record["compiled_draft_version"]),
+            "updated_at": float(record["updated_at"]),
+            "valid": not issues,
+            "issues": [issue.payload() for issue in issues],
+            "graph": json.loads(json.dumps(record["graph"])),
+            "compiled": compiled.payload() if compiled else None,
+        }
+
+    def validate_pipeline_graph_config(
+        self,
+        kb_id: str,
+        graph: dict[str, Any],
+    ) -> dict[str, Any]:
+        metadata = self._read_metadata()
+        self._ensure_kb_exists(metadata, kb_id)
+        draft = self._pipeline_draft_record(metadata, kb_id)
+        issues, compiled = self._validate_and_compile_pipeline_graph(kb_id, graph, draft)
+        return {
+            "kb_id": kb_id,
+            "valid": not issues,
+            "issues": [issue.payload() for issue in issues],
+            "compiled": compiled.payload() if compiled else None,
+        }
+
+    def save_pipeline_graph(
+        self,
+        kb_id: str,
+        graph: dict[str, Any],
+        *,
+        expected_revision: int,
+    ) -> dict[str, Any]:
+        with self._metadata_lock:
+            metadata = self._read_metadata_unlocked()
+            self._ensure_kb_exists(metadata, kb_id)
+            draft = self._pipeline_draft_record(metadata, kb_id)
+            current = self._pipeline_graph_record(metadata, kb_id, draft)
+            if int(expected_revision) != int(current["graph_revision"]):
+                raise PipelineGraphRevisionError(
+                    "Knowledge pipeline graph changed; reload before saving."
+                )
+            issues, compiled = self._validate_and_compile_pipeline_graph(kb_id, graph, draft)
+            if issues or compiled is None:
+                raise PipelineGraphValidationError(issues)
+
+            now = time.time()
+            next_draft_version = int(draft["version"]) + 1
+            metadata["pipeline_drafts"][kb_id] = {
+                "draft_id": str(draft["draft_id"]),
+                "version": next_draft_version,
+                "updated_at": now,
+                "index_schema_version": 2,
+                "embedding_profile": json.loads(json.dumps(compiled.embedding_profile)),
+                "retrieval_profile": json.loads(json.dumps(compiled.retrieval_profile)),
+                "stages": json.loads(json.dumps(compiled.stage_updates)),
+            }
+            metadata["pipeline_graphs"][kb_id] = {
+                "graph_id": str(current["graph_id"]),
+                "graph_revision": int(current["graph_revision"]) + 1,
+                "compiled_draft_version": next_draft_version,
+                "updated_at": now,
+                "graph": json.loads(json.dumps(compiled.graph)),
+            }
+            self._write_metadata_unlocked(metadata)
+        return self.get_pipeline_graph(kb_id)
+
+    async def preview_pipeline_graph_node(
+        self,
+        kb_id: str,
+        *,
+        graph: dict[str, Any],
+        node_id: str,
+        document_id: str | None = None,
+    ) -> dict[str, Any]:
+        validation = self.validate_pipeline_graph_config(kb_id, graph)
+        if not validation["valid"]:
+            issues = [
+                GraphValidationIssue(
+                    str(item.get("code") or "invalid_graph"),
+                    str(item.get("message") or "Invalid graph."),
+                    node_id=item.get("node_id"),
+                    edge_id=item.get("edge_id"),
+                )
+                for item in validation["issues"]
+            ]
+            raise PipelineGraphValidationError(issues)
+        node = next(
+            (
+                item
+                for item in graph.get("nodes", [])
+                if isinstance(item, dict) and str(item.get("id")) == node_id
+            ),
+            None,
+        )
+        if not isinstance(node, dict):
+            raise PipelineGraphValidationError(
+                [GraphValidationIssue("node_not_found", "Graph node not found.", node_id=node_id)]
+            )
+        kind = str(node.get("kind") or "")
+        config = dict(node.get("config") or {})
+        if kind == "data_source":
+            documents = self.list_documents(kb_id)
+            return {
+                "node_id": node_id,
+                "kind": kind,
+                "preview_type": "source_summary",
+                "item_count": len(documents),
+                "items": [
+                    {
+                        "document_id": item["id"],
+                        "filename": item["filename"],
+                        "size": item["size"],
+                    }
+                    for item in documents[:20]
+                ],
+                "truncated": len(documents) > 20,
+            }
+        if kind == "structured_processor":
+            if not document_id:
+                raise PipelineDraftValidationError("Processor preview requires document_id.")
+            result = await self.preview_pipeline_processor(kb_id, document_id, config)
+            return {
+                "node_id": node_id,
+                "kind": kind,
+                "preview_type": "processor",
+                "item_count": int(result["generated_count"] or result["block_count"]),
+                "items": list(result["generated_items"] or result["blocks"])[:20],
+                "warnings": list(result["warnings"]),
+                "truncated": int(result["generated_count"] or result["block_count"]) > 20,
+            }
+        if kind in {"recursive_chunker", "parent_child_chunker"}:
+            if not document_id:
+                raise PipelineDraftValidationError("Chunker preview requires document_id.")
+            compiled = validation["compiled"] or {}
+            processor = dict(
+                (compiled.get("stage_updates") or {}).get("stage_processor") or {}
+            )
+            processed = await self.preview_pipeline_processor(kb_id, document_id, processor)
+            chunks = self._preview_pipeline_chunks(processed, config, kind=kind)
+            return {
+                "node_id": node_id,
+                "kind": kind,
+                "preview_type": "chunks",
+                "item_count": len(chunks),
+                "items": chunks[:20],
+                "truncated": len(chunks) > 20,
+            }
+        if kind == "embedding":
+            return {
+                "node_id": node_id,
+                "kind": kind,
+                "preview_type": "capability",
+                "item_count": 0,
+                "items": [],
+                "metadata": {
+                    "provider": config.get("provider", self._default_embedding_profile()["provider"]),
+                    "model": config.get("model", self.embedder.model),
+                    "dimension": self.embedder.dimension,
+                    "degraded": self._default_embedding_profile()["degraded"],
+                },
+            }
+        if kind == "dual_index":
+            return {
+                "node_id": node_id,
+                "kind": kind,
+                "preview_type": "capability",
+                "item_count": 2,
+                "items": [
+                    {"id": "vector", "backend": self.vector_store.__class__.__name__, "enabled": True},
+                    {"id": "fulltext", "backend": "sqlite_fts5", "enabled": True},
+                ],
+            }
+        if kind == "retrieval":
+            return {
+                "node_id": node_id,
+                "kind": kind,
+                "preview_type": "retrieval_profile",
+                "item_count": 1,
+                "items": [RetrievalConfig.from_mapping(config).payload()],
+            }
+        raise PipelineDraftValidationError("This graph node cannot be previewed.")
+
     def update_pipeline_draft(
         self,
         kb_id: str,
@@ -433,7 +642,7 @@ class RagService:
             latest = self._read_metadata_unlocked()
             self._ensure_kb_exists(latest, kb_id)
             current = self._pipeline_draft_record(latest, kb_id)
-            latest["pipeline_drafts"][kb_id] = {
+            next_draft = {
                 "draft_id": current["draft_id"],
                 "version": int(current.get("version", 1)) + 1,
                 "updated_at": now,
@@ -442,6 +651,21 @@ class RagService:
                 "retrieval_profile": next_retrieval,
                 "stages": configs,
             }
+            latest["pipeline_drafts"][kb_id] = next_draft
+            existing_graph = latest["pipeline_graphs"].get(kb_id)
+            if isinstance(existing_graph, dict):
+                current_graph = self._pipeline_graph_record(latest, kb_id, current)
+                latest["pipeline_graphs"][kb_id] = {
+                    "graph_id": str(current_graph["graph_id"]),
+                    "graph_revision": int(current_graph["graph_revision"]) + 1,
+                    "compiled_draft_version": int(next_draft["version"]),
+                    "updated_at": now,
+                    "graph": sync_graph_from_draft(
+                        current_graph["graph"],
+                        next_draft,
+                        kb_id=kb_id,
+                    ),
+                }
             self._write_metadata_unlocked(latest)
         return self.get_pipeline_draft(kb_id)
 
@@ -612,6 +836,7 @@ class RagService:
         kb_id: str,
         *,
         draft_version: int,
+        graph_revision: int | None = None,
         source_document_ids: list[str] | None = None,
         xpert_sources: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
@@ -625,6 +850,18 @@ class RagService:
                 raise PipelineJobStateError(
                     f"Pipeline draft changed. Expected v{draft_version}, current v{draft['version']}."
                 )
+            graph = self._pipeline_graph_record(metadata, kb_id, draft)
+            if graph_revision is not None and int(graph_revision) != int(graph["graph_revision"]):
+                raise PipelineGraphRevisionError(
+                    "Knowledge pipeline graph changed; reload before executing."
+                )
+            issues, compiled = self._validate_and_compile_pipeline_graph(
+                kb_id,
+                graph["graph"],
+                draft,
+            )
+            if issues or compiled is None:
+                raise PipelineGraphValidationError(issues)
 
             documents = [
                 item
@@ -749,8 +986,12 @@ class RagService:
                 "kb_id": kb_id,
                 "draft_id": str(draft["draft_id"]),
                 "draft_version": int(draft["version"]),
+                "graph_id": str(graph["graph_id"]),
+                "graph_revision": int(graph["graph_revision"]),
                 "config_snapshot": {
                     "index_schema_version": int(draft.get("index_schema_version", 2)),
+                    "graph_id": str(graph["graph_id"]),
+                    "graph_revision": int(graph["graph_revision"]),
                     "stages": json.loads(json.dumps(draft["stages"])),
                     "processor_profile": processor_profile,
                     "embedding_profile": json.loads(json.dumps(draft["embedding_profile"])),
@@ -1952,6 +2193,152 @@ class RagService:
             "stages": stages,
         }
 
+    def _pipeline_graph_record(
+        self,
+        metadata: dict[str, Any],
+        kb_id: str,
+        draft: dict[str, Any],
+    ) -> dict[str, Any]:
+        record = metadata["pipeline_graphs"].get(kb_id)
+        if not isinstance(record, dict) or not isinstance(record.get("graph"), dict):
+            return {
+                "graph_id": f"kpgraph_{kb_id}",
+                "graph_revision": 1,
+                "compiled_draft_version": int(draft["version"]),
+                "updated_at": float(draft["updated_at"]),
+                "graph": default_pipeline_graph(kb_id, draft),
+            }
+        graph = json.loads(json.dumps(record["graph"]))
+        graph["kb_id"] = kb_id
+        return {
+            "graph_id": str(record.get("graph_id") or f"kpgraph_{kb_id}"),
+            "graph_revision": max(1, int(record.get("graph_revision") or 1)),
+            "compiled_draft_version": int(
+                record.get("compiled_draft_version") or draft["version"]
+            ),
+            "updated_at": float(record.get("updated_at") or draft["updated_at"]),
+            "graph": graph,
+        }
+
+    def _validate_and_compile_pipeline_graph(
+        self,
+        kb_id: str,
+        graph: dict[str, Any],
+        draft: dict[str, Any],
+    ) -> tuple[list[GraphValidationIssue], KnowledgePipelineCompileResult | None]:
+        issues = validate_pipeline_graph(graph)
+        if issues:
+            return issues, None
+        try:
+            compiled = compile_pipeline_graph(graph)
+            stages: dict[str, dict[str, Any]] = {}
+            for stage_id, patch in compiled.stage_updates.items():
+                current = dict(draft["stages"].get(stage_id) or {})
+                stages[stage_id] = self._validated_pipeline_stage_config(
+                    stage_id,
+                    current,
+                    patch,
+                )
+            embedding = self._validated_embedding_profile(
+                draft.get("embedding_profile"),
+                compiled.embedding_profile,
+            )
+            retrieval = RetrievalConfig.from_mapping(
+                compiled.retrieval_profile,
+                base=RetrievalConfig.from_mapping(draft.get("retrieval_profile")),
+            ).payload()
+            processor = stages["stage_processor"]
+            if str(processor.get("mode") or "general") in {"qa", "summary"}:
+                capabilities = self.processor_generator.capabilities()
+                if not bool(capabilities.get("llm_configured")):
+                    processor_node = next(
+                        (
+                            str(item.get("id"))
+                            for item in graph.get("nodes", [])
+                            if isinstance(item, dict)
+                            and item.get("kind") == "structured_processor"
+                        ),
+                        None,
+                    )
+                    return [
+                        GraphValidationIssue(
+                            "processor_model_unavailable",
+                            "QA and Summary modes require a configured model gateway.",
+                            node_id=processor_node,
+                        )
+                    ], None
+            normalized_graph = json.loads(json.dumps(compiled.graph))
+            normalized_graph["kb_id"] = kb_id
+            return [], KnowledgePipelineCompileResult(
+                graph=normalized_graph,
+                stage_updates=stages,
+                embedding_profile=embedding,
+                retrieval_profile=retrieval,
+            )
+        except (PipelineGraphValidationError, PipelineDraftValidationError, ValueError) as exc:
+            if isinstance(exc, PipelineGraphValidationError):
+                return list(exc.issues), None
+            return [GraphValidationIssue("invalid_node_config", str(exc))], None
+
+    def _preview_pipeline_chunks(
+        self,
+        processed: dict[str, Any],
+        config: dict[str, Any],
+        *,
+        kind: str,
+    ) -> list[dict[str, Any]]:
+        generated = processed.get("generated_items")
+        if isinstance(generated, list) and generated:
+            return [
+                {
+                    "index": index,
+                    "chunk_type": str(item.get("item_type") or "generated"),
+                    "text_preview": str(item.get("index_text") or "")[:600],
+                    "context_preview": str(item.get("context_text") or "")[:600],
+                    "source_block_ids": list(item.get("source_block_ids") or []),
+                    "truncated": bool(item.get("truncated")),
+                }
+                for index, item in enumerate(generated)
+                if isinstance(item, dict)
+            ]
+
+        if kind == "parent_child_chunker":
+            splitter: TextSplitter | ParentChildTextSplitter = ParentChildTextSplitter(
+                parent_chunk_size=int(config.get("parent_chunk_size", 1500)),
+                parent_chunk_overlap=int(config.get("parent_chunk_overlap", 100)),
+                child_chunk_size=int(config.get("child_chunk_size", 400)),
+                child_chunk_overlap=int(config.get("child_chunk_overlap", 50)),
+                parent_separators=list(config.get("parent_separators") or DEFAULT_SEPARATORS),
+                child_separators=list(config.get("child_separators") or DEFAULT_SEPARATORS),
+            )
+        else:
+            splitter = TextSplitter(
+                chunk_size=int(config.get("chunk_size", self.splitter.chunk_size)),
+                chunk_overlap=int(config.get("chunk_overlap", self.splitter.chunk_overlap)),
+                separators=list(config.get("separators") or DEFAULT_SEPARATORS),
+            )
+        chunks: list[dict[str, Any]] = []
+        for block in processed.get("blocks", []):
+            if not isinstance(block, dict):
+                continue
+            text = str(block.get("text") or "").strip()
+            if not text:
+                continue
+            for segment in splitter.split_segments(text):
+                chunks.append(
+                    {
+                        "index": len(chunks),
+                        "chunk_type": segment.chunk_type,
+                        "text_preview": segment.text[:600],
+                        "parent_preview": (segment.parent_text or "")[:600] or None,
+                        "parent_chunk_id": segment.parent_chunk_id,
+                        "start_char": int(block.get("start_char", 0)) + segment.start_char,
+                        "end_char": int(block.get("start_char", 0)) + segment.end_char,
+                        "truncated": len(segment.text) > 600,
+                    }
+                )
+        return chunks
+
     def _normalize_pipeline_stage_id(self, value: str) -> str | None:
         if value in self._default_pipeline_draft_stages():
             return value
@@ -2176,6 +2563,7 @@ class RagService:
             "knowledge_bases": {},
             "documents": {},
             "pipeline_drafts": {},
+            "pipeline_graphs": {},
             "pipeline_jobs": {},
             "pipeline_versions": {},
             "pipeline_active_versions": {},
@@ -2198,6 +2586,7 @@ class RagService:
             "knowledge_bases": data.get("knowledge_bases") if isinstance(data.get("knowledge_bases"), dict) else {},
             "documents": data.get("documents") if isinstance(data.get("documents"), dict) else {},
             "pipeline_drafts": data.get("pipeline_drafts") if isinstance(data.get("pipeline_drafts"), dict) else {},
+            "pipeline_graphs": data.get("pipeline_graphs") if isinstance(data.get("pipeline_graphs"), dict) else {},
             "pipeline_jobs": data.get("pipeline_jobs") if isinstance(data.get("pipeline_jobs"), dict) else {},
             "pipeline_versions": data.get("pipeline_versions") if isinstance(data.get("pipeline_versions"), dict) else {},
             "pipeline_active_versions": data.get("pipeline_active_versions") if isinstance(data.get("pipeline_active_versions"), dict) else {},

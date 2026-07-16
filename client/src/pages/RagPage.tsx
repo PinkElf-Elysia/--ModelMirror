@@ -1,5 +1,5 @@
 import { type DragEvent, useEffect, useMemo, useRef, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import PageContainer from "../components/PageContainer";
 
 interface KnowledgeBase {
@@ -1177,13 +1177,21 @@ export default function RagPage() {
                     {formatDate(selectedKnowledgeBase.created_at)}
                   </p>
                 </div>
-                <button
-                  className="rounded-full border border-hire-300/30 bg-hire-300/10 px-4 py-2 text-sm font-semibold text-hire-100 transition hover:bg-hire-300/20"
-                  onClick={() => fileInputRef.current?.click()}
-                  type="button"
-                >
-                  上传文档
-                </button>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Link
+                    className="rounded-lg border border-cyan-300/25 bg-cyan-300/10 px-4 py-2 text-sm font-semibold text-cyan-100 transition hover:bg-cyan-300/15"
+                    to={`/rag/${encodeURIComponent(selectedKnowledgeBase.id)}/pipeline`}
+                  >
+                    打开流水线画布
+                  </Link>
+                  <button
+                    className="rounded-lg border border-hire-300/30 bg-hire-300/10 px-4 py-2 text-sm font-semibold text-hire-100 transition hover:bg-hire-300/20"
+                    onClick={() => fileInputRef.current?.click()}
+                    type="button"
+                  >
+                    上传文档
+                  </button>
+                </div>
               </div>
 
               <input
