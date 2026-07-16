@@ -16,6 +16,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
+COPY THIRD_PARTY_NOTICES.md /usr/share/doc/modelmirror/THIRD_PARTY_NOTICES.md
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY main.py .

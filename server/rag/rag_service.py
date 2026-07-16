@@ -33,6 +33,11 @@ from .pipeline_graph import (
 )
 from .splitter import DEFAULT_SEPARATORS, ParentChildTextSplitter, TextSplitter
 from .vector_store import SearchResult, VectorChunk, VectorStore, create_vector_store
+from .vision_processor import (
+    SUPPORTED_IMAGE_EXTENSIONS,
+    VisionProcessingError,
+    VisionUnderstandingService,
+)
 
 
 class RagError(RuntimeError):
@@ -80,6 +85,7 @@ PIPELINE_STAGE_IDS = {
 
 PIPELINE_JOB_STAGES = (
     ("load", "读取来源"),
+    ("vision", "视觉理解"),
     ("process", "解析文档"),
     ("chunk", "生成分块"),
     ("embed", "生成向量"),
@@ -102,6 +108,7 @@ class RagService:
         splitter: TextSplitter | None = None,
         document_processor: StructuredDocumentProcessor | None = None,
         processor_generator: ProcessorGenerationService | None = None,
+        vision_processor: VisionUnderstandingService | None = None,
         llm_enabled: bool | None = None,
     ) -> None:
         root = Path(__file__).resolve().parent
@@ -114,6 +121,8 @@ class RagService:
         self.pipeline_sources_dir.mkdir(parents=True, exist_ok=True)
         self.pipeline_processed_dir = self.storage_dir / "pipeline_processed"
         self.pipeline_processed_dir.mkdir(parents=True, exist_ok=True)
+        self.pipeline_vision_dir = self.storage_dir / "pipeline_vision"
+        self.pipeline_vision_dir.mkdir(parents=True, exist_ok=True)
         self._metadata_lock = threading.RLock()
         self.embedder = embedder or EmbeddingClient()
         self.vector_store = vector_store or create_vector_store(self.storage_dir)
@@ -123,6 +132,7 @@ class RagService:
         self.reranker = reranker or RerankService()
         self.document_processor = document_processor or StructuredDocumentProcessor()
         self.processor_generator = processor_generator or ProcessorGenerationService()
+        self.vision_processor = vision_processor or VisionUnderstandingService()
         self.splitter = splitter or TextSplitter(
             chunk_size=int(os.getenv("RAG_CHUNK_SIZE", "500")),
             chunk_overlap=int(os.getenv("RAG_CHUNK_OVERLAP", "50")),
@@ -210,6 +220,7 @@ class RagService:
         for job_id in job_ids:
             shutil.rmtree(self.pipeline_sources_dir / job_id, ignore_errors=True)
             shutil.rmtree(self.pipeline_processed_dir / job_id, ignore_errors=True)
+            shutil.rmtree(self.pipeline_vision_dir / job_id, ignore_errors=True)
         shutil.rmtree(self.uploads_dir / kb_id, ignore_errors=True)
 
     async def upload_document(self, kb_id: str, filename: str, content: bytes) -> dict[str, Any]:
@@ -220,8 +231,16 @@ class RagService:
             raise KnowledgeBaseNotFoundError("知识库不存在。")
 
         extension = Path(filename).suffix.lower()
-        if extension not in supported_extensions():
+        if extension not in {*supported_extensions(), *SUPPORTED_IMAGE_EXTENSIONS}:
             raise UnsupportedDocumentError(f"暂不支持该文件格式：{extension or filename}")
+
+        is_image = extension in SUPPORTED_IMAGE_EXTENSIONS
+        visual_metadata: dict[str, Any] = {}
+        if is_image:
+            try:
+                visual_metadata = self.vision_processor.validate_image_bytes(content, filename)
+            except VisionProcessingError as exc:
+                raise UnsupportedDocumentError(str(exc)) from exc
 
         doc_id = f"doc_{uuid.uuid4().hex}"
         safe_name = _safe_filename(filename)
@@ -230,15 +249,29 @@ class RagService:
         stored_path = target_dir / f"{doc_id}_{safe_name}"
         stored_path.write_bytes(content)
 
-        try:
-            text = parse_document(stored_path, filename)
-            chunks = self.splitter.split_text(text)
-            if not chunks:
-                raise UnsupportedDocumentError("文档没有可索引的文本片段。")
-            embeddings = await self.embedder.embed_texts(chunks)
-        except (DocumentParseError, EmbeddingError, UnsupportedDocumentError) as exc:
-            stored_path.unlink(missing_ok=True)
-            raise UnsupportedDocumentError(str(exc)) from exc
+        pipeline_required = is_image
+        chunks: list[str] = []
+        embeddings: list[list[float]] = []
+        if not is_image:
+            try:
+                text = parse_document(stored_path, filename)
+                chunks = self.splitter.split_text(text)
+                if not chunks:
+                    raise UnsupportedDocumentError("文档没有可索引的文本片段。")
+                embeddings = await self.embedder.embed_texts(chunks)
+            except (DocumentParseError, UnsupportedDocumentError) as exc:
+                if extension != ".pdf":
+                    stored_path.unlink(missing_ok=True)
+                    raise UnsupportedDocumentError(str(exc)) from exc
+                try:
+                    visual_metadata = self.vision_processor.validate_pdf_bytes(content)
+                except VisionProcessingError:
+                    stored_path.unlink(missing_ok=True)
+                    raise UnsupportedDocumentError(str(exc)) from exc
+                pipeline_required = True
+            except EmbeddingError as exc:
+                stored_path.unlink(missing_ok=True)
+                raise UnsupportedDocumentError(str(exc)) from exc
 
         vector_chunks = [
             VectorChunk(
@@ -252,7 +285,8 @@ class RagService:
             )
             for index, chunk in enumerate(chunks)
         ]
-        self.vector_store.add_chunks(vector_chunks)
+        if vector_chunks:
+            self.vector_store.add_chunks(vector_chunks)
 
         document = {
             "id": doc_id,
@@ -261,6 +295,10 @@ class RagService:
             "stored_path": str(stored_path),
             "size": len(content),
             "chunk_count": len(chunks),
+            "content_type": mimetypes.guess_type(filename)[0] or "application/octet-stream",
+            "ingestion_status": "pipeline_required" if pipeline_required else "indexed_legacy",
+            "visual_candidate": pipeline_required,
+            "visual_metadata": visual_metadata,
             "created_at": time.time(),
         }
         with self._metadata_lock:
@@ -323,6 +361,9 @@ class RagService:
         ]
         assets = [self._file_asset_payload(document) for document in documents]
         artifacts = [self._artifact_payload(document) for document in documents]
+        visual_documents = [
+            document for document in documents if bool(document.get("visual_candidate"))
+        ]
         chunk_count = sum(int(document.get("chunk_count", 0)) for document in documents)
         draft = self._pipeline_draft_record(metadata, kb_id)
         configs = draft["stages"]
@@ -382,11 +423,20 @@ class RagService:
                     "id": "stage_image_understanding",
                     "kind": "image_understanding",
                     "title": "图像理解",
-                    "status": "planned",
-                    "item_count": 0,
-                    "summary": "视觉语言模型处理尚未接入，本阶段仅展示规划占位。",
+                    "status": (
+                        "ready"
+                        if configs["stage_image_understanding"].get("enabled")
+                        else "disabled"
+                    ),
+                    "item_count": len(visual_documents),
+                    "summary": (
+                        "Visual sources will be rendered and analyzed before structured processing."
+                        if configs["stage_image_understanding"].get("enabled")
+                        else "Image understanding is optional and currently disabled."
+                    ),
                     "metadata": {
-                        "enabled": False,
+                        "enabled": bool(configs["stage_image_understanding"].get("enabled")),
+                        "visual_document_count": len(visual_documents),
                     },
                 },
             ],
@@ -528,7 +578,16 @@ class RagService:
         if kind == "structured_processor":
             if not document_id:
                 raise PipelineDraftValidationError("Processor preview requires document_id.")
-            result = await self.preview_pipeline_processor(kb_id, document_id, config)
+            compiled = validation["compiled"] or {}
+            vision = dict(
+                (compiled.get("stage_updates") or {}).get("stage_image_understanding") or {}
+            )
+            result = await self.preview_pipeline_processor(
+                kb_id,
+                document_id,
+                config,
+                vision_override=vision if bool(vision.get("enabled")) else None,
+            )
             return {
                 "node_id": node_id,
                 "kind": kind,
@@ -545,7 +604,15 @@ class RagService:
             processor = dict(
                 (compiled.get("stage_updates") or {}).get("stage_processor") or {}
             )
-            processed = await self.preview_pipeline_processor(kb_id, document_id, processor)
+            vision = dict(
+                (compiled.get("stage_updates") or {}).get("stage_image_understanding") or {}
+            )
+            processed = await self.preview_pipeline_processor(
+                kb_id,
+                document_id,
+                processor,
+                vision_override=vision if bool(vision.get("enabled")) else None,
+            )
             chunks = self._preview_pipeline_chunks(processed, config, kind=kind)
             return {
                 "node_id": node_id,
@@ -554,6 +621,26 @@ class RagService:
                 "item_count": len(chunks),
                 "items": chunks[:20],
                 "truncated": len(chunks) > 20,
+            }
+        if kind == "image_understanding":
+            if not document_id:
+                raise PipelineDraftValidationError("Image preview requires document_id.")
+            result = await self.preview_pipeline_vision(kb_id, document_id, config)
+            items = list(result.get("blocks") or [])
+            return {
+                "node_id": node_id,
+                "kind": kind,
+                "preview_type": "vision_blocks",
+                "item_count": len(items),
+                "items": items[:20],
+                "warnings": list(result.get("warnings") or []),
+                "metadata": {
+                    "page_count": result.get("page_count", 0),
+                    "selected_page_count": result.get("selected_page_count", 0),
+                    "processed_page_count": result.get("processed_page_count", 0),
+                    "failed_page_count": result.get("failed_page_count", 0),
+                },
+                "truncated": len(items) > 20,
             }
         if kind == "embedding":
             return {
@@ -683,6 +770,12 @@ class RagService:
         processor_config = dict(stages["stage_processor"].get("config") or {})
         processor_mode = str(processor_config.get("mode") or "general")
         processor_capabilities = self.processor_generator.capabilities()
+        vision_stage = stages["stage_image_understanding"]
+        vision_config = dict(vision_stage.get("config") or {})
+        vision_capabilities = self.vision_processor.capabilities()
+        visual_document_count = int(
+            vision_stage.get("metadata", {}).get("visual_document_count", 0)
+        )
 
         if document_count == 0:
             warnings.append("当前知识库还没有上传文档，流水线只能预检配置。")
@@ -694,6 +787,17 @@ class RagService:
             "llm_configured"
         ):
             warnings.append("生成式处理模式需要先配置可用的模型网关。")
+        if visual_document_count and not bool(vision_config.get("enabled")):
+            warnings.append(
+                "Image or scanned PDF sources require an enabled image understanding stage."
+            )
+        if bool(vision_config.get("enabled")):
+            if not str(vision_config.get("vision_model_id") or "").strip():
+                warnings.append("Image understanding requires an explicit vision model.")
+            if not bool(vision_capabilities.get("configured")):
+                warnings.append(
+                    "Image understanding requires PDF/image rendering and a configured model gateway."
+                )
 
         for stage in draft["stages"]:
             severity = "info"
@@ -720,8 +824,19 @@ class RagService:
                 status = "empty"
                 summary = "分块器草稿配置有效，但当前没有已索引 chunk。"
             elif stage["id"] == "stage_image_understanding":
-                status = "planned"
-                summary = "图像理解仍为规划占位，本轮不会执行。"
+                if visual_document_count and not bool(vision_config.get("enabled")):
+                    severity = "warning"
+                    status = "blocked"
+                    summary = "Visual sources are waiting for an enabled image understanding stage."
+                elif bool(vision_config.get("enabled")) and not bool(
+                    vision_capabilities.get("configured")
+                ):
+                    severity = "warning"
+                    status = "blocked"
+                    summary = "The renderer or model gateway required by image understanding is unavailable."
+                else:
+                    status = "ready" if bool(vision_config.get("enabled")) else "disabled"
+                    summary = str(stage.get("summary") or "")
 
             stage_checks.append(
                 {
@@ -775,11 +890,48 @@ class RagService:
             },
         }
 
+    def vision_capabilities(self) -> dict[str, Any]:
+        return self.vision_processor.capabilities()
+
+    async def preview_pipeline_vision(
+        self,
+        kb_id: str,
+        document_id: str,
+        vision_override: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        metadata = self._read_metadata()
+        self._ensure_kb_exists(metadata, kb_id)
+        document = metadata["documents"].get(document_id)
+        if not isinstance(document, dict) or document.get("kb_id") != kb_id:
+            raise DocumentNotFoundError("Document not found.")
+        draft = self._pipeline_draft_record(metadata, kb_id)
+        config = self._validated_pipeline_stage_config(
+            "stage_image_understanding",
+            dict(draft["stages"]["stage_image_understanding"]),
+            {**dict(vision_override or {}), "enabled": True},
+        )
+        path = Path(str(document.get("stored_path") or ""))
+        if not path.is_file():
+            raise DocumentNotFoundError("Document source file is unavailable.")
+        try:
+            result = await self.vision_processor.analyze_source(
+                path=path,
+                filename=str(document["filename"]),
+                source_id=str(document["id"]),
+                config=config,
+            )
+        except VisionProcessingError as exc:
+            raise PipelineDraftValidationError(self._safe_pipeline_error(exc)) from exc
+        payload = result.payload(max_text=600)
+        payload.update({"kb_id": kb_id, "document_id": document_id, "config": config})
+        return payload
+
     async def preview_pipeline_processor(
         self,
         kb_id: str,
         document_id: str,
         processor_override: dict[str, Any] | None = None,
+        vision_override: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         metadata = self._read_metadata()
         self._ensure_kb_exists(metadata, kb_id)
@@ -796,6 +948,14 @@ class RagService:
         path = Path(str(document_record.get("stored_path") or ""))
         if not path.is_file():
             raise DocumentNotFoundError("文档源文件不可用。")
+        extra_blocks: list[dict[str, Any]] = []
+        if vision_override and bool(vision_override.get("enabled")):
+            visual = await self.preview_pipeline_vision(kb_id, document_id, vision_override)
+            extra_blocks = [
+                dict(item)
+                for item in visual.get("blocks", [])
+                if isinstance(item, dict)
+            ]
         try:
             processed = await asyncio.to_thread(
                 self.document_processor.process,
@@ -803,6 +963,7 @@ class RagService:
                 filename=str(document_record["filename"]),
                 source_id=str(document_record["id"]),
                 config=config,
+                extra_blocks=extra_blocks,
             )
         except (DocumentParseError, OSError, UnicodeError) as exc:
             raise PipelineDraftValidationError(self._safe_pipeline_error(exc)) from exc
@@ -877,6 +1038,12 @@ class RagService:
                         f"Pipeline source document not found: {missing[0]}"
                     )
                 documents = [by_id[item] for item in requested]
+            if any(bool(item.get("visual_candidate")) for item in documents) and not bool(
+                compiled.stage_updates.get("stage_image_understanding", {}).get("enabled")
+            ):
+                raise PipelineDraftValidationError(
+                    "Image and scanned PDF sources require an enabled image understanding node."
+                )
 
             job_id = f"kpjob_{uuid.uuid4().hex}"
             source_dir = self.pipeline_sources_dir / job_id
@@ -957,6 +1124,10 @@ class RagService:
                 json.dumps(draft["stages"]["stage_processor"])
             )
             processor_config_hash = self._mapping_sha256(processor_profile)
+            vision_profile = json.loads(
+                json.dumps(draft["stages"]["stage_image_understanding"])
+            )
+            vision_config_hash = self._mapping_sha256(vision_profile)
             document_results = [
                 {
                     "source_id": str(source["source_id"]),
@@ -964,6 +1135,7 @@ class RagService:
                     "status": "pending",
                     "content_hash": str(source["content_hash"]),
                     "processor_config_hash": processor_config_hash,
+                    "vision_config_hash": vision_config_hash,
                     "attempt": 0,
                     "block_count": 0,
                     "generated_count": 0,
@@ -973,6 +1145,19 @@ class RagService:
                     "warnings": [],
                     "error": None,
                     "duration_ms": None,
+                    "vision_status": "pending" if vision_profile.get("enabled") else "skipped",
+                    "vision_page_count": 0,
+                    "vision_selected_page_count": 0,
+                    "vision_processed_page_count": 0,
+                    "vision_failed_page_count": 0,
+                    "vision_block_count": 0,
+                    "vision_warnings": [],
+                    "vision_error": None,
+                    "vision_artifact_key": (
+                        self.pipeline_vision_dir
+                        / job_id
+                        / f"source_{index}.json"
+                    ).relative_to(self.storage_dir).as_posix(),
                     "artifact_key": (
                         self.pipeline_processed_dir
                         / job_id
@@ -994,6 +1179,7 @@ class RagService:
                     "graph_revision": int(graph["graph_revision"]),
                     "stages": json.loads(json.dumps(draft["stages"])),
                     "processor_profile": processor_profile,
+                    "vision_profile": vision_profile,
                     "embedding_profile": json.loads(json.dumps(draft["embedding_profile"])),
                     "retrieval_profile": json.loads(json.dumps(draft["retrieval_profile"])),
                 },
@@ -1059,8 +1245,10 @@ class RagService:
                 if key
                 not in {
                     "artifact_key",
+                    "vision_artifact_key",
                     "content_hash",
                     "processor_config_hash",
+                    "vision_config_hash",
                 }
             }
             for result in job.get("document_results", [])
@@ -1195,6 +1383,153 @@ class RagService:
             raise PipelineJobStateError("No pipeline sources produced readable text.")
         return parsed
 
+    async def process_pipeline_job_vision(self, job_id: str) -> list[dict[str, Any]]:
+        """Run optional visual understanding with source/page-level durable reuse."""
+
+        job = self.get_pipeline_job(job_id)
+        snapshot = job.get("config_snapshot", {})
+        profile = dict(
+            snapshot.get("vision_profile")
+            or snapshot.get("stages", {}).get("stage_image_understanding")
+            or self._default_pipeline_draft_stages()["stage_image_understanding"]
+        )
+        if not bool(profile.get("enabled")):
+            return []
+
+        config_hash = self._mapping_sha256(profile)
+        results_by_source = {
+            str(item.get("source_id")): item
+            for item in job.get("document_results", [])
+            if isinstance(item, dict)
+        }
+        completed: list[dict[str, Any]] = []
+        failed_sources: list[str] = []
+        for source in job.get("sources", []):
+            source_id = str(source["source_id"])
+            result = results_by_source.get(source_id)
+            if result is None:
+                raise PipelineJobStateError(
+                    f"Vision result state is missing for source: {source_id}"
+                )
+            artifact_path = self._pipeline_vision_path(str(result["vision_artifact_key"]))
+            reusable = (
+                result.get("vision_status") == "completed"
+                and result.get("content_hash") == source.get("content_hash")
+                and result.get("vision_config_hash") == config_hash
+                and artifact_path.is_file()
+            )
+            if reusable:
+                try:
+                    payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+                    completed.append({**source, **payload, "reused": True})
+                    continue
+                except (OSError, json.JSONDecodeError):
+                    pass
+
+            source_path = self._pipeline_snapshot_path(str(source["snapshot_key"]))
+            page_dir = artifact_path.parent / f"{artifact_path.stem}_pages"
+            page_dir.mkdir(parents=True, exist_ok=True)
+
+            def cache_get(page_number: int) -> dict[str, Any] | None:
+                page_path = page_dir / f"page_{page_number}.json"
+                if not page_path.is_file():
+                    return None
+                try:
+                    cached = json.loads(page_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    return None
+                if (
+                    cached.get("content_hash") != source.get("content_hash")
+                    or cached.get("vision_config_hash") != config_hash
+                    or cached.get("status") != "completed"
+                ):
+                    return None
+                return dict(cached.get("result") or {})
+
+            def cache_set(page_number: int, page_result: dict[str, Any]) -> None:
+                page_path = page_dir / f"page_{page_number}.json"
+                self._atomic_json_write(
+                    page_path,
+                    {
+                        "content_hash": str(source.get("content_hash") or ""),
+                        "vision_config_hash": config_hash,
+                        "status": str(page_result.get("status") or "failed"),
+                        "result": page_result,
+                    },
+                )
+
+            self._update_pipeline_document_result(
+                job_id,
+                source_id,
+                {
+                    "vision_status": "processing",
+                    "vision_attempt": int(result.get("vision_attempt", 0)) + 1,
+                    "vision_error": None,
+                    "vision_warnings": [],
+                },
+            )
+            try:
+                vision_result = await self.vision_processor.analyze_source(
+                    path=source_path,
+                    filename=str(source["filename"]),
+                    source_id=source_id,
+                    config=profile,
+                    cache_get=cache_get,
+                    cache_set=cache_set,
+                    cancel_check=lambda: self.pipeline_job_cancel_requested(job_id),
+                )
+                payload = vision_result.payload(max_text=None)
+                self._atomic_json_write(artifact_path, payload)
+                failed_pages = int(payload.get("failed_page_count", 0))
+                vision_status = "failed" if failed_pages else "completed"
+                if failed_pages:
+                    failed_sources.append(source_id)
+                self._update_pipeline_document_result(
+                    job_id,
+                    source_id,
+                    {
+                        "vision_status": vision_status,
+                        "vision_config_hash": config_hash,
+                        "vision_page_count": int(payload.get("page_count", 0)),
+                        "vision_selected_page_count": int(payload.get("selected_page_count", 0)),
+                        "vision_processed_page_count": int(payload.get("processed_page_count", 0)),
+                        "vision_failed_page_count": failed_pages,
+                        "vision_block_count": len(payload.get("blocks") or []),
+                        "vision_warnings": list(payload.get("warnings") or []),
+                        "vision_error": (
+                            f"{failed_pages} visual page(s) failed."
+                            if failed_pages
+                            else None
+                        ),
+                    },
+                )
+                completed.append({**source, **payload, "reused": False})
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                error = self._safe_pipeline_error(exc)
+                failed_sources.append(source_id)
+                self._update_pipeline_document_result(
+                    job_id,
+                    source_id,
+                    {"vision_status": "failed", "vision_error": error},
+                )
+
+        if failed_sources and str(profile.get("failure_policy")) == "strict":
+            raise PipelineJobStateError(
+                f"Strict vision policy blocked the candidate after {len(failed_sources)} source failure(s)."
+            )
+        if failed_sources:
+            def add_warning(job_record: dict[str, Any]) -> None:
+                warnings = list(job_record.get("warnings") or [])
+                warnings.append(
+                    f"{len(failed_sources)} source(s) had visual processing failures."
+                )
+                job_record["warnings"] = list(dict.fromkeys(warnings))
+
+            self._update_pipeline_job(job_id, add_warning)
+        return completed
+
     async def process_pipeline_job_sources(self, job_id: str) -> list[dict[str, Any]]:
         """Process each immutable source independently and reuse completed artifacts."""
 
@@ -1224,6 +1559,7 @@ class RagService:
             artifact_path = self._pipeline_processed_path(str(result["artifact_key"]))
             reusable = (
                 result.get("status") == "completed"
+                and result.get("vision_status") in {"completed", "skipped"}
                 and result.get("content_hash") == source.get("content_hash")
                 and result.get("processor_config_hash") == config_hash
                 and artifact_path.is_file()
@@ -1254,6 +1590,17 @@ class RagService:
                     if source.get("content_mode") == "extracted_text"
                     else None
                 )
+                visual_blocks: list[dict[str, Any]] = []
+                vision_artifact_key = str(result.get("vision_artifact_key") or "")
+                if vision_artifact_key:
+                    vision_path = self._pipeline_vision_path(vision_artifact_key)
+                    if vision_path.is_file():
+                        visual_payload = json.loads(vision_path.read_text(encoding="utf-8"))
+                        visual_blocks = [
+                            dict(item)
+                            for item in visual_payload.get("blocks", [])
+                            if isinstance(item, dict)
+                        ]
                 document = await asyncio.to_thread(
                     self.document_processor.process,
                     source_path,
@@ -1261,6 +1608,7 @@ class RagService:
                     source_id=source_id,
                     config=profile,
                     extracted_text=extracted_text,
+                    extra_blocks=visual_blocks,
                 )
                 if not isinstance(document, ProcessedDocument):
                     raise PipelineJobStateError(
@@ -1336,7 +1684,8 @@ class RagService:
 
         def finish(job_record: dict[str, Any]) -> None:
             job_record["processor_error"] = processor_error
-            job_record["warnings"] = warnings
+            existing = list(job_record.get("warnings") or [])
+            job_record["warnings"] = list(dict.fromkeys([*existing, *warnings]))
 
         self._update_pipeline_job(job_id, finish)
         return completed
@@ -1392,6 +1741,15 @@ class RagService:
             for result in job.get("document_results", []):
                 if not isinstance(result, dict):
                     continue
+                if result.get("vision_status") == "failed":
+                    result.update(
+                        {
+                            "vision_status": "pending",
+                            "vision_error": None,
+                            "vision_failed_page_count": 0,
+                            "status": "pending",
+                        }
+                    )
                 if result.get("status") != "completed":
                     result.update(
                         {
@@ -1444,8 +1802,10 @@ class RagService:
                     if key
                     not in {
                         "artifact_key",
+                        "vision_artifact_key",
                         "content_hash",
                         "processor_config_hash",
+                        "vision_config_hash",
                     }
                 }
                 for result in job.get("document_results", [])
@@ -1478,6 +1838,14 @@ class RagService:
                     for source in job["sources"]
                 ],
                 "processor_profile": processor_profile,
+                "vision_profile": json.loads(
+                    json.dumps(
+                        job["config_snapshot"].get("vision_profile")
+                        or job["config_snapshot"].get("stages", {}).get(
+                            "stage_image_understanding", {}
+                        )
+                    )
+                ),
                 "document_results": document_results,
                 "document_count": document_count,
                 "chunk_count": chunk_count,
@@ -1489,6 +1857,18 @@ class RagService:
                 ),
                 "summary_count": sum(
                     int(item.get("summary_count", 0)) for item in document_results
+                ),
+                "vision_page_count": sum(
+                    int(item.get("vision_page_count", 0)) for item in document_results
+                ),
+                "vision_processed_page_count": sum(
+                    int(item.get("vision_processed_page_count", 0)) for item in document_results
+                ),
+                "vision_failed_page_count": sum(
+                    int(item.get("vision_failed_page_count", 0)) for item in document_results
+                ),
+                "vision_block_count": sum(
+                    int(item.get("vision_block_count", 0)) for item in document_results
                 ),
                 "warnings": list(job.get("warnings") or []),
                 "job_id": job_id,
@@ -1648,6 +2028,22 @@ class RagService:
             raise PipelineJobStateError("Invalid pipeline processor artifact path.")
         return path
 
+    def _pipeline_vision_path(self, artifact_key: str) -> Path:
+        path = (self.storage_dir / artifact_key).resolve()
+        root = self.pipeline_vision_dir.resolve()
+        if path != root and root not in path.parents:
+            raise PipelineJobStateError("Invalid pipeline vision artifact path.")
+        return path
+
+    def _atomic_json_write(self, path: Path, payload: dict[str, Any]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(path.suffix + f".{uuid.uuid4().hex}.tmp")
+        temporary.write_text(
+            json.dumps(payload, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        os.replace(temporary, path)
+
     def _update_pipeline_document_result(
         self,
         job_id: str,
@@ -1763,6 +2159,9 @@ class RagService:
                     "snippet": _preview_text(
                         str(source.get("matched_text") or source.get("text", ""))
                     ),
+                    "page_number": source.get("page_number"),
+                    "visual_kind": source.get("visual_kind"),
+                    "source_block_id": source.get("source_block_id"),
                 }
             )
         return citations
@@ -1917,6 +2316,9 @@ class RagService:
                     "chunk_type": result.chunk_type,
                     "start_char": result.start_char,
                     "end_char": result.end_char,
+                    "page_number": result.page_number,
+                    "visual_kind": result.visual_kind,
+                    "source_block_id": result.source_block_id,
                 }
                 for result in results
             ],
@@ -2044,6 +2446,9 @@ class RagService:
             chunk_type=item.chunk_type,
             start_char=item.start_char,
             end_char=item.end_char,
+            page_number=item.page_number,
+            visual_kind=item.visual_kind,
+            source_block_id=item.source_block_id,
             vector_score=item.score,
         )
 
@@ -2058,6 +2463,9 @@ class RagService:
             chunk_type=item.chunk_type,
             start_char=item.start_char,
             end_char=item.end_char,
+            page_number=item.page_number,
+            visual_kind=item.visual_kind,
+            source_block_id=item.source_block_id,
             fulltext_score=item.score,
         )
 
@@ -2110,7 +2518,7 @@ class RagService:
         return {
             "stage_data_source": {
                 "source_mode": "uploaded_files",
-                "allowed_extensions": sorted(supported_extensions()),
+                "allowed_extensions": sorted({*supported_extensions(), *SUPPORTED_IMAGE_EXTENSIONS}),
             },
             "stage_processor": {
                 "parser": "structured_local_parser",
@@ -2137,7 +2545,13 @@ class RagService:
             },
             "stage_image_understanding": {
                 "enabled": False,
-                "provider": "planned",
+                "provider": "openai_compatible_vlm",
+                "vision_model_id": "",
+                "pdf_page_strategy": "auto",
+                "render_dpi": 144,
+                "max_pages": 100,
+                "max_image_edge": 2048,
+                "failure_policy": "continue_on_error",
             },
         }
 
@@ -2248,6 +2662,35 @@ class RagService:
                 base=RetrievalConfig.from_mapping(draft.get("retrieval_profile")),
             ).payload()
             processor = stages["stage_processor"]
+            vision = stages["stage_image_understanding"]
+            if bool(vision.get("enabled")):
+                capabilities = self.vision_processor.capabilities()
+                vision_node = next(
+                    (
+                        str(item.get("id"))
+                        for item in graph.get("nodes", [])
+                        if isinstance(item, dict)
+                        and item.get("kind") == "image_understanding"
+                    ),
+                    None,
+                )
+                renderer = capabilities.get("renderer")
+                if not isinstance(renderer, dict) or not bool(renderer.get("ready")) or not bool(capabilities.get("image_decoder_ready")):
+                    return [
+                        GraphValidationIssue(
+                            "vision_renderer_unavailable",
+                            "Image understanding requires pypdfium2 and Pillow.",
+                            node_id=vision_node,
+                        )
+                    ], None
+                if not bool(capabilities.get("targets")):
+                    return [
+                        GraphValidationIssue(
+                            "vision_model_unavailable",
+                            "Image understanding requires a configured model gateway.",
+                            node_id=vision_node,
+                        )
+                    ], None
             if str(processor.get("mode") or "general") in {"qa", "summary"}:
                 capabilities = self.processor_generator.capabilities()
                 if not bool(capabilities.get("llm_configured")):
@@ -2356,7 +2799,7 @@ class RagService:
             if source_mode != "uploaded_files":
                 raise PipelineDraftValidationError("data_source.source_mode must be uploaded_files.")
             config["source_mode"] = source_mode
-            config["allowed_extensions"] = sorted(supported_extensions())
+            config["allowed_extensions"] = sorted({*supported_extensions(), *SUPPORTED_IMAGE_EXTENSIONS})
             return config
 
         if stage_id == "stage_processor":
@@ -2523,12 +2966,68 @@ class RagService:
 
         if stage_id == "stage_image_understanding":
             enabled = patch.get("enabled", config.get("enabled", False))
-            if enabled not in (False, None):
+            if not isinstance(enabled, bool):
+                raise PipelineDraftValidationError("image_understanding.enabled must be boolean.")
+            model_id = str(
+                patch.get("vision_model_id", config.get("vision_model_id", "")) or ""
+            ).strip()
+            if len(model_id) > 200 or (enabled and not model_id):
                 raise PipelineDraftValidationError(
-                    "image_understanding.enabled must stay false until the stage is implemented."
+                    "image_understanding.vision_model_id is required when enabled."
                 )
-            config["enabled"] = False
-            config["provider"] = "planned"
+            strategy = str(
+                patch.get("pdf_page_strategy", config.get("pdf_page_strategy", "auto"))
+            ).strip()
+            if strategy not in {"auto", "all"}:
+                raise PipelineDraftValidationError(
+                    "image_understanding.pdf_page_strategy must be auto or all."
+                )
+            render_dpi = self._coerce_int(
+                patch.get("render_dpi", config.get("render_dpi", 144)),
+                "image_understanding.render_dpi",
+            )
+            max_pages = self._coerce_int(
+                patch.get("max_pages", config.get("max_pages", 100)),
+                "image_understanding.max_pages",
+            )
+            max_image_edge = self._coerce_int(
+                patch.get("max_image_edge", config.get("max_image_edge", 2048)),
+                "image_understanding.max_image_edge",
+            )
+            if not 72 <= render_dpi <= 300:
+                raise PipelineDraftValidationError(
+                    "image_understanding.render_dpi must be between 72 and 300."
+                )
+            if not 1 <= max_pages <= 200:
+                raise PipelineDraftValidationError(
+                    "image_understanding.max_pages must be between 1 and 200."
+                )
+            if not 512 <= max_image_edge <= 4096:
+                raise PipelineDraftValidationError(
+                    "image_understanding.max_image_edge must be between 512 and 4096."
+                )
+            failure_policy = str(
+                patch.get(
+                    "failure_policy",
+                    config.get("failure_policy", "continue_on_error"),
+                )
+            ).strip()
+            if failure_policy not in {"continue_on_error", "strict"}:
+                raise PipelineDraftValidationError(
+                    "image_understanding.failure_policy must be continue_on_error or strict."
+                )
+            config.update(
+                {
+                    "enabled": enabled,
+                    "provider": "openai_compatible_vlm",
+                    "vision_model_id": model_id,
+                    "pdf_page_strategy": strategy,
+                    "render_dpi": render_dpi,
+                    "max_pages": max_pages,
+                    "max_image_edge": max_image_edge,
+                    "failure_policy": failure_policy,
+                }
+            )
             return config
 
         raise PipelineDraftValidationError(f"Unknown pipeline stage: {stage_id}")
@@ -2582,7 +3081,7 @@ class RagService:
             return self._empty_metadata()
         if not isinstance(data, dict):
             return self._empty_metadata()
-        return {
+        metadata = {
             "knowledge_bases": data.get("knowledge_bases") if isinstance(data.get("knowledge_bases"), dict) else {},
             "documents": data.get("documents") if isinstance(data.get("documents"), dict) else {},
             "pipeline_drafts": data.get("pipeline_drafts") if isinstance(data.get("pipeline_drafts"), dict) else {},
@@ -2591,6 +3090,40 @@ class RagService:
             "pipeline_versions": data.get("pipeline_versions") if isinstance(data.get("pipeline_versions"), dict) else {},
             "pipeline_active_versions": data.get("pipeline_active_versions") if isinstance(data.get("pipeline_active_versions"), dict) else {},
         }
+        for document in metadata["documents"].values():
+            if not isinstance(document, dict):
+                continue
+            document.setdefault("content_type", mimetypes.guess_type(str(document.get("filename") or ""))[0] or "application/octet-stream")
+            document.setdefault("ingestion_status", "indexed_legacy")
+            document.setdefault("visual_candidate", False)
+        for job in metadata["pipeline_jobs"].values():
+            if not isinstance(job, dict):
+                continue
+            stages = job.get("stages")
+            if isinstance(stages, list) and not any(
+                isinstance(item, dict) and item.get("id") == "vision" for item in stages
+            ):
+                insert_at = next(
+                    (
+                        index + 1
+                        for index, item in enumerate(stages)
+                        if isinstance(item, dict) and item.get("id") == "load"
+                    ),
+                    0,
+                )
+                stages.insert(insert_at, self._new_pipeline_job_stages()[1])
+            for result in job.get("document_results", []):
+                if not isinstance(result, dict):
+                    continue
+                result.setdefault("vision_status", "skipped")
+                result.setdefault("vision_page_count", 0)
+                result.setdefault("vision_selected_page_count", 0)
+                result.setdefault("vision_processed_page_count", 0)
+                result.setdefault("vision_failed_page_count", 0)
+                result.setdefault("vision_block_count", 0)
+                result.setdefault("vision_warnings", [])
+                result.setdefault("vision_error", None)
+        return metadata
 
     def _write_metadata(self, metadata: dict[str, Any]) -> None:
         with self._metadata_lock:
@@ -2620,6 +3153,11 @@ class RagService:
             "filename": document["filename"],
             "size": document["size"],
             "chunk_count": document["chunk_count"],
+            "content_type": document.get("content_type")
+            or mimetypes.guess_type(str(document["filename"]))[0]
+            or "application/octet-stream",
+            "ingestion_status": document.get("ingestion_status", "indexed_legacy"),
+            "visual_candidate": bool(document.get("visual_candidate", False)),
             "created_at": document["created_at"],
         }
 
@@ -2646,6 +3184,8 @@ class RagService:
             "size": document["size"],
             "extension": extension,
             "mime_type": mime_type,
+            "ingestion_status": document.get("ingestion_status", "indexed_legacy"),
+            "visual_candidate": bool(document.get("visual_candidate", False)),
             "created_at": document["created_at"],
         }
 
@@ -2657,6 +3197,8 @@ class RagService:
             "knowledge_base_id": document["kb_id"],
             "title": document["filename"],
             "chunk_count": document["chunk_count"],
+            "status": document.get("ingestion_status", "indexed_legacy"),
+            "visual_candidate": bool(document.get("visual_candidate", False)),
             "created_at": document["created_at"],
         }
 

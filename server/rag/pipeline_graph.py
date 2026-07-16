@@ -53,14 +53,14 @@ NODE_SPECS: dict[str, dict[str, Any]] = {
     "image_understanding": {
         "title": "图像理解",
         "input": "documents",
-        "output": "blocks",
-        "stage": "processor",
-        "available": False,
+        "output": "documents",
+        "stage": "vision",
+        "available": True,
     },
 }
 
 REQUIRED_STAGES = ("source", "processor", "chunker", "embedding", "index", "retrieval")
-STAGE_ORDER = {stage: index for index, stage in enumerate(REQUIRED_STAGES)}
+OPTIONAL_STAGES = ("vision",)
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,21 +104,28 @@ def default_pipeline_graph(kb_id: str, draft: dict[str, Any]) -> dict[str, Any]:
     stages = draft.get("stages") if isinstance(draft.get("stages"), dict) else {}
     source_config = dict(stages.get("stage_data_source") or {})
     processor_config = dict(stages.get("stage_processor") or {})
+    vision_config = dict(stages.get("stage_image_understanding") or {})
     chunker_config = dict(stages.get("stage_chunker") or {})
     strategy = str(chunker_config.get("strategy") or "recursive_character")
     chunker_kind = (
         "parent_child_chunker" if strategy == "parent_child" else "recursive_chunker"
     )
+    vision_enabled = bool(vision_config.get("enabled", False))
     positions = {
         "source": {"x": 40.0, "y": 180.0},
-        "processor": {"x": 300.0, "y": 180.0},
-        "chunker": {"x": 560.0, "y": 180.0},
-        "embedding": {"x": 820.0, "y": 180.0},
-        "index": {"x": 1080.0, "y": 180.0},
-        "retrieval": {"x": 1340.0, "y": 180.0},
+        "vision": {"x": 260.0, "y": 180.0},
+        "processor": {"x": 480.0 if vision_enabled else 300.0, "y": 180.0},
+        "chunker": {"x": 740.0 if vision_enabled else 560.0, "y": 180.0},
+        "embedding": {"x": 1000.0 if vision_enabled else 820.0, "y": 180.0},
+        "index": {"x": 1260.0 if vision_enabled else 1080.0, "y": 180.0},
+        "retrieval": {"x": 1520.0 if vision_enabled else 1340.0, "y": 180.0},
     }
-    nodes = [
-        _node("source", "data_source", positions["source"], source_config),
+    nodes = [_node("source", "data_source", positions["source"], source_config)]
+    if vision_enabled:
+        nodes.append(
+            _node("vision", "image_understanding", positions["vision"], vision_config)
+        )
+    nodes.extend([
         _node("processor", "structured_processor", positions["processor"], processor_config),
         _node("chunker", chunker_kind, positions["chunker"], chunker_config),
         _node(
@@ -139,16 +146,20 @@ def default_pipeline_graph(kb_id: str, draft: dict[str, Any]) -> dict[str, Any]:
             positions["retrieval"],
             dict(draft.get("retrieval_profile") or {}),
         ),
-    ]
+    ])
     node_by_id = {str(node["id"]): node for node in nodes}
     edges = []
-    pairs = (
-        ("source", "processor"),
+    pairs = [
+        ("source", "vision") if vision_enabled else ("source", "processor"),
+    ]
+    if vision_enabled:
+        pairs.append(("vision", "processor"))
+    pairs.extend((
         ("processor", "chunker"),
         ("chunker", "embedding"),
         ("embedding", "index"),
         ("index", "retrieval"),
-    )
+    ))
     for source_id, target_id in pairs:
         source = node_by_id[source_id]
         target = node_by_id[target_id]
@@ -208,7 +219,9 @@ def validate_pipeline_graph(graph: dict[str, Any]) -> list[GraphValidationIssue]
         raw_edges = []
 
     nodes: dict[str, dict[str, Any]] = {}
-    stage_nodes: dict[str, list[str]] = {stage: [] for stage in REQUIRED_STAGES}
+    stage_nodes: dict[str, list[str]] = {
+        stage: [] for stage in (*REQUIRED_STAGES, *OPTIONAL_STAGES)
+    }
     enabled_nodes: set[str] = set()
     for index, raw_node in enumerate(raw_nodes):
         if not isinstance(raw_node, dict):
@@ -242,11 +255,21 @@ def validate_pipeline_graph(graph: dict[str, Any]) -> list[GraphValidationIssue]
         if not isinstance(position, dict):
             issues.append(GraphValidationIssue("invalid_position", "Node position must be an object.", node_id=node_id))
 
-    for stage, ids in stage_nodes.items():
+    for stage in REQUIRED_STAGES:
+        ids = stage_nodes[stage]
         if not ids:
             issues.append(GraphValidationIssue("missing_required_stage", f"Graph needs one enabled {stage} node."))
         elif len(ids) > 1:
             issues.append(GraphValidationIssue("duplicate_stage", f"Graph allows only one enabled {stage} node."))
+    for stage in OPTIONAL_STAGES:
+        if len(stage_nodes[stage]) > 1:
+            issues.append(GraphValidationIssue("duplicate_stage", f"Graph allows only one enabled {stage} node."))
+
+    ordered_stages = ["source"]
+    if stage_nodes["vision"]:
+        ordered_stages.append("vision")
+    ordered_stages.extend(("processor", "chunker", "embedding", "index", "retrieval"))
+    expected_stage_pairs = set(zip(ordered_stages, ordered_stages[1:]))
 
     adjacency: dict[str, set[str]] = {node_id: set() for node_id in enabled_nodes}
     incoming: dict[str, set[str]] = {node_id: set() for node_id in enabled_nodes}
@@ -277,8 +300,8 @@ def validate_pipeline_graph(graph: dict[str, Any]) -> list[GraphValidationIssue]
             issues.append(GraphValidationIssue("invalid_edge_port", f"Edge {edge_id} does not match node ports.", edge_id=edge_id))
         source_stage = str(NODE_SPECS[source_kind]["stage"])
         target_stage = str(NODE_SPECS[target_kind]["stage"])
-        if source_stage not in STAGE_ORDER or target_stage not in STAGE_ORDER or STAGE_ORDER[target_stage] != STAGE_ORDER[source_stage] + 1:
-            issues.append(GraphValidationIssue("invalid_stage_order", "Edges must follow source -> processor -> chunker -> embedding -> index -> retrieval.", edge_id=edge_id))
+        if (source_stage, target_stage) not in expected_stage_pairs:
+            issues.append(GraphValidationIssue("invalid_stage_order", "Edges must follow source -> optional vision -> processor -> chunker -> embedding -> index -> retrieval.", edge_id=edge_id))
         if (source_id, target_id) in edge_pairs:
             issues.append(GraphValidationIssue("duplicate_edge", "Duplicate graph edge.", edge_id=edge_id))
         edge_pairs.add((source_id, target_id))
@@ -304,8 +327,8 @@ def validate_pipeline_graph(graph: dict[str, Any]) -> list[GraphValidationIssue]
     if any(visit(node_id) for node_id in list(enabled_nodes) if node_id not in visited):
         issues.append(GraphValidationIssue("graph_cycle", "Knowledge pipeline graph must be acyclic."))
 
-    if all(len(ids) == 1 for ids in stage_nodes.values()):
-        ordered = [stage_nodes[stage][0] for stage in REQUIRED_STAGES]
+    if all(len(stage_nodes[stage]) == 1 for stage in REQUIRED_STAGES):
+        ordered = [stage_nodes[stage][0] for stage in ordered_stages]
         expected_pairs = set(zip(ordered, ordered[1:]))
         if edge_pairs != expected_pairs:
             issues.append(GraphValidationIssue("incomplete_chain", "Enabled nodes must form one complete pipeline chain."))
@@ -335,6 +358,7 @@ def compile_pipeline_graph(graph: dict[str, Any]) -> KnowledgePipelineCompileRes
     }
     source = by_stage["source"]
     processor = by_stage["processor"]
+    vision = by_stage.get("vision")
     chunker = by_stage["chunker"]
     embedding = by_stage["embedding"]
     index = by_stage["index"]
@@ -362,7 +386,14 @@ def compile_pipeline_graph(graph: dict[str, Any]) -> KnowledgePipelineCompileRes
             "stage_data_source": dict(source.get("config") or {}),
             "stage_processor": dict(processor.get("config") or {}),
             "stage_chunker": chunker_config,
-            "stage_image_understanding": {"enabled": False, "provider": "planned"},
+            "stage_image_understanding": (
+                {
+                    **dict(vision.get("config") or {}),
+                    "enabled": True,
+                }
+                if vision is not None
+                else {"enabled": False, "provider": "openai_compatible_vlm"}
+            ),
         },
         embedding_profile={
             "model": str((embedding.get("config") or {}).get("model") or "").strip()

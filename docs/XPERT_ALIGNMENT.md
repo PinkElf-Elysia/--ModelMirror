@@ -1,7 +1,20 @@
 # Xpert 对齐总纲
 
-最后更新日期：2026-07-13
+最后更新日期：2026-07-15
 维护人：模镜团队
+
+## 2026-07-15 增量：XPERT-MULTIMODAL-KNOWLEDGE-01
+
+Knowledge Pipeline 已补齐图片与扫描 PDF 的真实知识理解闭环。PNG、JPEG、WebP 和扫描 PDF 会先进入可选的 `image_understanding` stage，由显式选择的视觉模型生成 OCR、图片、表格与图表语义块，再继续复用 General/QA/Summary Processor、递归或父子分块以及向量/FTS5 双索引。
+
+- PDF 页面通过 `pypdfium2`/PDFium 渲染，图片通过 Pillow 校验；上传时检查格式、MIME、损坏文件和 40MP 解压像素上限。图片与扫描 PDF 标记为 `pipeline_required`，不会污染 legacy 即时索引。
+- 自动页面选择会处理文字少于 80 字符或图片覆盖率至少 12% 的页面；预览可强制全页。视觉模型固定使用 `ocr_visual_summary_v1` JSON 契约，并按现有 LLM Gateway、OpenRouter 顺序降级。
+- 视觉块统一进入 `ProcessedDocument`，块类型为 `image_ocr / image_description / visual_table / visual_chart`，保留页码、来源 block、模型 ID 与截断状态。可靠 PDF 文本层与 OCR 重复时只保留一份正文。
+- Job 现按 `load / vision / process / chunk / embed / store` 执行。逐页结果以 source hash、模型和视觉配置 hash 缓存；重试与重启只重跑失败页。`strict` 阻断候选 ready，`continue_on_error` 仅在仍有可索引内容时带 warning 完成。
+- 候选版本固定 `vision_profile` 与视觉统计，Citation 增加可选 `page_number / visual_kind / source_block_id`。激活后 Chat、Workflow、Xpert、Goal 和 App 无需新协议即可消费视觉知识。
+- 依赖许可证和归属见 `server/THIRD_PARTY_NOTICES.md`。Xpert 与 Dify 仅作行为参考，没有复制 AGPL 或许可证不明确实现。
+
+下一步进入 `XPERT-KNOWLEDGE-EVAL-01`，建立 Recall@K、MRR、引用命中率和候选版本对比；随后推进知识读写 Agent。图片向量、多模态 Embedding、版面坐标和 GraphRAG 继续暂缓。
 
 ## 2026-07-13 增量：XPERT-KNOWLEDGE-CANVAS-01
 
@@ -10,10 +23,10 @@ Knowledge Pipeline 已从表单式 Draft 推进为可执行 React Flow 画布。
 - 后端 `pipeline_graph.py` 只负责 DAG、端口、阶段完整性和配置编译；编译结果写回现有 Pipeline Draft，执行继续复用唯一的 `KnowledgePipelineExecutor`。
 - Graph 使用独立递增 `graph_revision` 和乐观并发检查；保存会原子生成新的 Draft version。旧 `/rag` 表单更新会同步图节点配置并保留位置。
 - Job 固定 `graph_id / graph_revision / draft_version`，服务重启后仍按固定快照恢复。非法图、过期 revision 或双索引不完整不会创建 Job 或污染 active version。
-- 节点预览最多返回 20 条截断摘要，不写 Draft、Job、索引或版本。图像理解仍是禁用占位，不能连线或执行。
+- 节点预览最多返回 20 条截断摘要，不写 Draft、Job、索引或版本。图像理解节点已在后续多模态增量中启用，但必须显式选择视觉模型并通过渲染器/网关预检。
 - Chat、Workflow、Xpert、Goal 和 App 不新增消费协议，继续统一读取人工激活的知识版本。
 
-下一步进入 `XPERT-MULTIMODAL-KNOWLEDGE-01`，在现有图编译契约中补 OCR/VLM 和 PDF 页面理解；随后推进检索评估与知识读写 Agent。GraphRAG 继续暂缓。
+该画布基线已由顶部多模态增量扩展为可选视觉阶段；后续推进检索评估与知识读写 Agent。GraphRAG 继续暂缓。
 
 ## 2026-07-13 增量：XPERT-RAG-PROCESSOR-01
 
@@ -136,7 +149,7 @@ EvoAgentX 只保留为历史参考：此前元智能体曾借鉴其 `goal -> sub
 | Chat Toolset | 部分实现 | `/api/chat` 可选 MCP 工具模式，chat run 与 checkpoint | 默认关闭，不改变普通聊天；无自动 handoff | 补工具偏好、安全提示和观测 UI |
 | Toolset / MCP | 部分实现 | `MCPToolsetProvider`、`run_tool_with_runtime`、tool policy/audit、MCP 管理基础、`/runtime` MCP Runtime 状态细分与只读运维，`/studio` 已提供 MCP 与 Runtime 入口 | 缺 Xpert 式 Toolset 资源模型；Runtime Ops 不执行 MCP start/stop | 后续抽象 Toolset 资源模型 |
 | Plugin / Skill | 部分实现 | `/skills` 与 Skill 安装基础，Docker 已补 git/npm/npx 依赖，`/runtime` 可查看已安装 Skill 摘要 | 尚未形成 Xpert 插件市场/Skill 工作区统一模型；运维页不执行安装/卸载 | 先补市场与安装状态，再抽象资源模型 |
-| Knowledge Pipeline | 部分实现 | FileAsset/Artifact/Chunk/CitationAnchor、结构感知 Processor、General/QA/Summary、可执行 Graph、逐文档恢复、版本化 ingestion job、递归与父子分块、向量/FTS5 双索引、混合检索、Rerank、预览、激活/回滚 | 本地单进程 worker；旧上传路径保留 vector-only legacy index；OCR/VLM 与检索评估尚未接入 | `XPERT-MULTIMODAL-KNOWLEDGE-01` |
+| Knowledge Pipeline | 部分实现 | FileAsset/Artifact/Chunk/CitationAnchor、结构感知 Processor、General/QA/Summary、可执行 Graph、逐文档/逐视觉页恢复、图片与扫描 PDF 的 OCR/VLM、版本化 ingestion job、递归与父子分块、向量/FTS5 双索引、混合检索、Rerank、预览、激活/回滚 | 本地单进程 worker；旧上传路径保留 vector-only legacy index；图片向量、版面坐标、检索评估与 GraphRAG 尚未接入 | `XPERT-KNOWLEDGE-EVAL-01` |
 | Prompt / Slash Command | 下一步 | 仅有提示词资源页雏形和聊天 prompt 使用 | 尚无 Xpert 式工作区提示词/命令配置 | 放在工作空间资源后推进 |
 | Environment / Sandbox | 部分实现 | `/runtime` 已提供脱敏环境与依赖摘要，展示模型网关、OpenRouter、git/node/npm/npx/python 是否就绪 | 不展示密钥值，不编辑环境变量，不提供沙箱实例或文件工作区语义 | 评估 Xpert 式环境变量管理和沙箱资源模型 |
 | Memory / Logs / Monitor | 部分实现 | 会话/Xpert 记忆、候选审批、RunRegistry events/checkpoints/audit 摘要 | 本地确定性召回，尚无向量记忆和组织级审计 | 基于真实使用反馈审计 |

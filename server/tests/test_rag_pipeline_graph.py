@@ -121,7 +121,7 @@ def test_graph_validation_rejects_cycles_bad_ports_missing_stages_and_orphans() 
     assert "graph_cycle" in {item.code for item in validate_pipeline_graph(cycle)}
 
 
-def test_graph_validation_rejects_dual_chunkers_and_image_placeholder() -> None:
+def test_graph_validation_rejects_dual_chunkers_and_unwired_image_stage() -> None:
     graph = default_pipeline_graph(
         "kb_test",
         {
@@ -149,7 +149,36 @@ def test_graph_validation_rejects_dual_chunkers_and_image_placeholder() -> None:
     graph["nodes"].append(image)
     codes = {item.code for item in validate_pipeline_graph(graph)}
     assert "duplicate_stage" in codes
-    assert "node_not_available" in codes
+    assert "invalid_stage_order" in codes
+
+
+def test_graph_accepts_optional_image_understanding_stage() -> None:
+    draft = {
+        "stages": {
+            "stage_data_source": {},
+            "stage_processor": {},
+            "stage_image_understanding": {
+                "enabled": True,
+                "vision_model_id": "openai/gpt-4.1-mini",
+                "pdf_page_strategy": "auto",
+                "render_dpi": 144,
+                "max_pages": 100,
+                "max_image_edge": 2048,
+                "failure_policy": "continue_on_error",
+            },
+            "stage_chunker": {"strategy": "recursive_character"},
+        },
+        "embedding_profile": {"model": "hash"},
+        "retrieval_profile": {"mode": "hybrid"},
+    }
+    graph = default_pipeline_graph("kb_visual", draft)
+    assert [node["kind"] for node in graph["nodes"]][1] == "image_understanding"
+    assert validate_pipeline_graph(graph) == []
+
+    compiled = compile_pipeline_graph(graph)
+    vision = compiled.stage_updates["stage_image_understanding"]
+    assert vision["enabled"] is True
+    assert vision["vision_model_id"] == "openai/gpt-4.1-mini"
 
 
 @pytest.mark.asyncio

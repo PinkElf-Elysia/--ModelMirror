@@ -25,6 +25,9 @@ class LexicalChunk:
     chunk_type: str = "standard"
     start_char: int = 0
     end_char: int = 0
+    page_number: int | None = None
+    visual_kind: str | None = None
+    source_block_id: str | None = None
 
 
 @dataclass(slots=True)
@@ -41,6 +44,9 @@ class LexicalSearchResult:
     chunk_type: str = "standard"
     start_char: int = 0
     end_char: int = 0
+    page_number: int | None = None
+    visual_kind: str | None = None
+    source_block_id: str | None = None
 
 
 class SqliteLexicalStore:
@@ -68,7 +74,8 @@ class SqliteLexicalStore:
                     INSERT INTO rag_chunks (
                         chunk_id, namespace, doc_id, document_name, text, chunk_index,
                         parent_chunk_id, parent_text, chunk_type, start_char, end_char
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        , page_number, visual_kind, source_block_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         chunk.chunk_id,
@@ -82,6 +89,9 @@ class SqliteLexicalStore:
                         chunk.chunk_type,
                         chunk.start_char,
                         chunk.end_char,
+                        chunk.page_number,
+                        chunk.visual_kind,
+                        chunk.source_block_id,
                     ),
                 )
                 connection.execute(
@@ -119,6 +129,9 @@ class SqliteLexicalStore:
                 chunk_type=str(row["chunk_type"] or "standard"),
                 start_char=int(row["start_char"] or 0),
                 end_char=int(row["end_char"] or 0),
+                page_number=int(row["page_number"]) if row["page_number"] else None,
+                visual_kind=str(row["visual_kind"]) if row["visual_kind"] else None,
+                source_block_id=str(row["source_block_id"]) if row["source_block_id"] else None,
             )
             for index, row in enumerate(rows)
         ]
@@ -172,9 +185,22 @@ class SqliteLexicalStore:
                     chunk_type TEXT NOT NULL,
                     start_char INTEGER NOT NULL,
                     end_char INTEGER NOT NULL
+                    , page_number INTEGER
+                    , visual_kind TEXT
+                    , source_block_id TEXT
                 )
                 """
             )
+            columns = {
+                str(row[1]) for row in connection.execute("PRAGMA table_info(rag_chunks)")
+            }
+            for name, sql_type in (
+                ("page_number", "INTEGER"),
+                ("visual_kind", "TEXT"),
+                ("source_block_id", "TEXT"),
+            ):
+                if name not in columns:
+                    connection.execute(f"ALTER TABLE rag_chunks ADD COLUMN {name} {sql_type}")
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_rag_chunks_namespace ON rag_chunks(namespace)"
             )

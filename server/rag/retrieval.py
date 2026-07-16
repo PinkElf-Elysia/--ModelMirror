@@ -104,6 +104,9 @@ class RetrievalCandidate:
     chunk_type: str = "standard"
     start_char: int = 0
     end_char: int = 0
+    page_number: int | None = None
+    visual_kind: str | None = None
+    source_block_id: str | None = None
     vector_score: float | None = None
     fulltext_score: float | None = None
     fused_score: float = 0.0

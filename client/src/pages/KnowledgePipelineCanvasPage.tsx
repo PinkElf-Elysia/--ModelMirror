@@ -19,6 +19,7 @@ import "@xyflow/react/dist/style.css";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import PageContainer from "../components/PageContainer";
+import { models } from "../data/models";
 
 type GraphNodeKind =
   | "data_source"
@@ -86,6 +87,8 @@ interface RagDocument {
   id: string;
   filename: string;
   size: number;
+  ingestion_status?: string;
+  visual_candidate?: boolean;
 }
 
 interface PipelineJob {
@@ -95,6 +98,12 @@ interface PipelineJob {
   candidate_version: number;
   error?: string | null;
   stages: Array<{ id: string; title: string; status: string; progress: number }>;
+  document_results?: Array<{
+    vision_status?: string;
+    vision_processed_page_count?: number;
+    vision_failed_page_count?: number;
+    vision_block_count?: number;
+  }>;
   created_at: number;
 }
 
@@ -104,6 +113,9 @@ interface PipelineVersion {
   status: string;
   active: boolean;
   chunk_count: number;
+  vision_processed_page_count?: number;
+  vision_failed_page_count?: number;
+  vision_block_count?: number;
   created_at: number;
 }
 
@@ -126,7 +138,7 @@ const PORTS: Record<GraphNodeKind, { input: string | null; output: string | null
   embedding: { input: "chunks", output: "embeddings" },
   dual_index: { input: "embeddings", output: "index" },
   retrieval: { input: "index", output: null },
-  image_understanding: { input: "documents", output: "blocks" },
+  image_understanding: { input: "documents", output: "documents" },
 };
 
 const NODE_META: Record<
@@ -140,10 +152,13 @@ const NODE_META: Record<
   embedding: { title: "Embedding", eyebrow: "索引", tone: "border-cyan-300/35", stage: "embedding" },
   dual_index: { title: "向量 + 全文", eyebrow: "双索引", tone: "border-indigo-300/35", stage: "index" },
   retrieval: { title: "混合检索", eyebrow: "检索", tone: "border-fuchsia-300/35", stage: "retrieval" },
-  image_understanding: { title: "图像理解", eyebrow: "待接入", tone: "border-slate-500/40", stage: "processor", disabled: true },
+  image_understanding: { title: "图像理解", eyebrow: "视觉预处理", tone: "border-violet-300/40", stage: "vision" },
 };
 
 const nodeTypes = { knowledgeNode: KnowledgePipelineNode };
+const visionModels = models
+  .filter((model) => model.active && model.input_modalities.includes("image"))
+  .sort((left, right) => left.name.localeCompare(right.name, "zh-CN"));
 
 function KnowledgePipelineNode({ data, selected }: NodeProps<GraphFlowNode>) {
   const meta = NODE_META[data.kind];
@@ -192,7 +207,7 @@ function nodeSummary(data: GraphNodeData) {
   if (data.kind === "embedding") return String(config.model || "default embedding");
   if (data.kind === "dual_index") return "vector + sqlite fts5";
   if (data.kind === "retrieval") return `${String(config.mode || "hybrid")} · top ${String(config.top_k || 5)}`;
-  if (data.kind === "image_understanding") return "disabled placeholder";
+  if (data.kind === "image_understanding") return `${String(config.vision_model_id || "选择视觉模型")} · ${String(config.pdf_page_strategy || "auto")}`;
   return "uploaded files";
 }
 
@@ -402,6 +417,33 @@ export default function KnowledgePipelineCanvasPage() {
         data: { kind, title: meta.title, config: defaultConfig(kind), enabled: true },
       },
     ]);
+    if (kind === "image_understanding") {
+      const source = nodes.find((node) => node.data.kind === "data_source");
+      const processor = nodes.find((node) => node.data.kind === "structured_processor");
+      if (source && processor) {
+        setEdges((current) => [
+          ...current.filter(
+            (edge) => !(edge.source === source.id && edge.target === processor.id),
+          ),
+          {
+            id: `edge_${source.id}_${id}`,
+            source: source.id,
+            target: id,
+            sourceHandle: "documents",
+            targetHandle: "documents",
+            animated: true,
+          },
+          {
+            id: `edge_${id}_${processor.id}`,
+            source: id,
+            target: processor.id,
+            sourceHandle: "documents",
+            targetHandle: "documents",
+            animated: true,
+          },
+        ]);
+      }
+    }
     setSelectedNodeId(id);
     setPaletteOpen(false);
   }
@@ -616,10 +658,10 @@ export default function KnowledgePipelineCanvasPage() {
                     <h2 className="text-sm font-semibold text-white">节点预览</h2>
                     <p className="mt-1 text-xs leading-5 text-slate-400">预览最多返回 20 条截断数据，不写入索引或草稿。</p>
                   </div>
-                  {selectedNode && ["structured_processor", "recursive_chunker", "parent_child_chunker"].includes(selectedNode.data.kind) ? (
+                  {selectedNode && ["image_understanding", "structured_processor", "recursive_chunker", "parent_child_chunker"].includes(selectedNode.data.kind) ? (
                     <label className="block text-xs font-semibold text-slate-300">预览文档
                       <select className="mt-2 w-full rounded-md border border-white/10 bg-surface-950 px-3 py-2 text-sm text-white" onChange={(event) => setSelectedDocumentId(event.target.value)} value={selectedDocumentId}>
-                        {documents.map((item) => <option key={item.id} value={item.id}>{item.filename}</option>)}
+                        {documents.map((item) => <option key={item.id} value={item.id}>{item.filename}{item.visual_candidate ? " · 视觉" : ""}</option>)}
                       </select>
                     </label>
                   ) : null}
@@ -698,7 +740,19 @@ function NodeConfig({ node, onChange }: { node: GraphFlowNode; onChange: (patch:
           <SelectField label="Rerank Provider" value={String(config.rerank_provider || "auto")} options={["auto", "api", "llm", "none"]} onChange={(value) => onChange({ rerank_provider: value })} />
         </>
       ) : null}
-      {kind === "image_understanding" ? <div className="rounded-md border border-dashed border-white/15 p-3 text-xs leading-5 text-slate-400">图像理解将在多模态知识轮次接入，当前节点不可执行或连线。</div> : null}
+      {kind === "image_understanding" ? (
+        <>
+          <div className="rounded-md border border-violet-300/20 bg-violet-300/[0.06] p-3 text-xs leading-5 text-violet-100/85">
+            视觉内容先转换为 OCR、图片、表格与图表语义块，再进入同一处理器和双索引。
+          </div>
+          <VisionModelField value={String(config.vision_model_id || "")} onChange={(value) => onChange({ vision_model_id: value })} />
+          <SelectField label="PDF 页面策略" value={String(config.pdf_page_strategy || "auto")} options={["auto", "all"]} onChange={(value) => onChange({ pdf_page_strategy: value })} />
+          <NumberField label="渲染 DPI" min={72} max={300} value={Number(config.render_dpi || 144)} onChange={(value) => onChange({ render_dpi: value })} />
+          <NumberField label="最大页数" min={1} max={200} value={Number(config.max_pages || 100)} onChange={(value) => onChange({ max_pages: value })} />
+          <NumberField label="最长图像边" min={512} max={4096} value={Number(config.max_image_edge || 2048)} onChange={(value) => onChange({ max_image_edge: value })} />
+          <SelectField label="失败策略" value={String(config.failure_policy || "continue_on_error")} options={["continue_on_error", "strict"]} onChange={(value) => onChange({ failure_policy: value })} />
+        </>
+      ) : null}
     </div>
   );
 }
@@ -711,7 +765,8 @@ function defaultConfig(kind: GraphNodeKind): Record<string, unknown> {
   if (kind === "embedding") return { model: "text-embedding-3-small" };
   if (kind === "dual_index") return { vector_enabled: true, fulltext_enabled: true };
   if (kind === "retrieval") return { mode: "hybrid", vector_weight: 0.7, fulltext_weight: 0.3, top_k: 5, score_threshold: 0, candidate_multiplier: 4, rerank_enabled: false, rerank_provider: "auto", rerank_top_n: 5 };
-  return { enabled: false };
+  if (kind === "image_understanding") return { enabled: true, provider: "openai_compatible_vlm", vision_model_id: "", pdf_page_strategy: "auto", render_dpi: 144, max_pages: 100, max_image_edge: 2048, failure_policy: "continue_on_error" };
+  return {};
 }
 
 function TextField({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) {
@@ -724,6 +779,18 @@ function NumberField({ label, value, min, max, onChange }: { label: string; valu
 
 function SelectField({ label, value, options, onChange }: { label: string; value: string; options: string[]; onChange: (value: string) => void }) {
   return <label className="block text-xs font-semibold text-slate-300">{label}<select className="mt-2 w-full rounded-md border border-white/10 bg-surface-950 px-3 py-2 text-sm text-white" onChange={(event) => onChange(event.target.value)} value={value}>{options.map((item) => <option key={item} value={item}>{item}</option>)}</select></label>;
+}
+
+function VisionModelField({ value, onChange }: { value: string; onChange: (value: string) => void }) {
+  return (
+    <label className="block text-xs font-semibold text-slate-300">
+      视觉模型
+      <select className="mt-2 w-full rounded-md border border-white/10 bg-surface-950 px-3 py-2 text-sm text-white" onChange={(event) => onChange(event.target.value)} value={value}>
+        <option value="">显式选择支持图像输入的模型</option>
+        {visionModels.map((model) => <option key={model.id} value={model.id}>{model.name} · {model.provider}</option>)}
+      </select>
+    </label>
+  );
 }
 
 function ToggleField({ label, checked, onChange }: { label: string; checked: boolean; onChange: (value: boolean) => void }) {
@@ -769,6 +836,11 @@ function RunPanel({ jobs, versions, onActivate }: { jobs: PipelineJob[]; version
               <div className="flex items-center justify-between gap-3"><span className="text-xs font-semibold text-white">候选 v{job.candidate_version}</span><span className={`text-[11px] font-semibold ${job.status === "failed" ? "text-rose-200" : job.status === "succeeded" ? "text-emerald-200" : "text-amber-200"}`}>{job.status}</span></div>
               <p className="mt-1 text-[10px] text-slate-500">Graph r{job.graph_revision ?? "-"} · {formatDate(job.created_at)}</p>
               <div className="mt-3 space-y-2">{job.stages.map((stage) => <div key={stage.id}><div className="flex justify-between text-[10px] text-slate-400"><span>{stage.title}</span><span>{stage.progress}%</span></div><div className="mt-1 h-1.5 overflow-hidden rounded-full bg-white/[0.06]"><div className="h-full bg-cyan-300" style={{ width: `${stage.progress}%` }} /></div></div>)}</div>
+              {job.document_results?.some((item) => Number(item.vision_processed_page_count || 0) > 0 || Number(item.vision_failed_page_count || 0) > 0) ? (
+                <p className="mt-2 text-[11px] text-violet-200/85">
+                  视觉页 {job.document_results.reduce((sum, item) => sum + Number(item.vision_processed_page_count || 0), 0)} · 失败 {job.document_results.reduce((sum, item) => sum + Number(item.vision_failed_page_count || 0), 0)} · 块 {job.document_results.reduce((sum, item) => sum + Number(item.vision_block_count || 0), 0)}
+                </p>
+              ) : null}
               {job.error ? <p className="mt-2 text-xs text-rose-200">{job.error}</p> : null}
             </article>
           )) : <EmptyPanel text="还没有流水线任务。" />}
@@ -779,7 +851,7 @@ function RunPanel({ jobs, versions, onActivate }: { jobs: PipelineJob[]; version
         <div className="mt-3 space-y-2">
           {versions.length ? versions.map((version) => (
             <article className="flex items-center justify-between gap-3 rounded-md border border-white/10 bg-white/[0.03] p-3" key={version.version_id}>
-              <div><p className="text-xs font-semibold text-white">v{version.version} · {version.chunk_count} chunks</p><p className="mt-1 text-[10px] text-slate-500">{formatDate(version.created_at)}</p></div>
+              <div><p className="text-xs font-semibold text-white">v{version.version} · {version.chunk_count} chunks</p>{Number(version.vision_processed_page_count || 0) > 0 ? <p className="mt-1 text-[10px] text-violet-200/80">视觉页 {version.vision_processed_page_count} · 块 {version.vision_block_count || 0} · 失败 {version.vision_failed_page_count || 0}</p> : null}<p className="mt-1 text-[10px] text-slate-500">{formatDate(version.created_at)}</p></div>
               {version.active ? <span className="text-[11px] font-semibold text-emerald-200">活动版本</span> : <button className="rounded-md border border-white/10 px-2 py-1 text-[11px] font-semibold text-slate-200 hover:bg-white/[0.06]" onClick={() => onActivate(version.version_id)} type="button">激活</button>}
             </article>
           )) : <EmptyPanel text="候选执行成功后会生成索引版本。" />}

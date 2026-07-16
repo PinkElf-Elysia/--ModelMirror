@@ -86,10 +86,15 @@ class StructuredDocumentProcessor:
         source_id: str,
         config: dict[str, Any] | None = None,
         extracted_text: str | None = None,
+        extra_blocks: list[DocumentBlock | dict[str, Any]] | None = None,
     ) -> ProcessedDocument:
         options = dict(config or {})
         extension = Path(filename).suffix.lower()
-        if extracted_text is not None:
+        if extension in {".png", ".jpg", ".jpeg", ".webp"} and extra_blocks:
+            text = ""
+            blocks = []
+            warnings = []
+        elif extracted_text is not None:
             text = self._clean_text(extracted_text)
             blocks = self._plain_blocks(text, source_id)
             warnings: list[str] = []
@@ -114,6 +119,12 @@ class StructuredDocumentProcessor:
             blocks = self._plain_blocks(text, source_id)
             warnings = []
 
+        blocks, text = self._merge_extra_blocks(
+            source_id=source_id,
+            blocks=blocks,
+            text=text,
+            extra_blocks=extra_blocks or [],
+        )
         if not blocks:
             raise DocumentParseError(f"Document produced no structured blocks: {filename}")
         title = Path(filename).stem
@@ -129,6 +140,59 @@ class StructuredDocumentProcessor:
             blocks=blocks,
             warnings=warnings,
         )
+
+    def _merge_extra_blocks(
+        self,
+        *,
+        source_id: str,
+        blocks: list[DocumentBlock],
+        text: str,
+        extra_blocks: list[DocumentBlock | dict[str, Any]],
+    ) -> tuple[list[DocumentBlock], str]:
+        if not extra_blocks:
+            return blocks, text
+
+        merged = list(blocks)
+        parts = [text] if text else []
+        cursor = len(text)
+        for index, value in enumerate(extra_blocks):
+            if isinstance(value, DocumentBlock):
+                raw = value.payload()
+            else:
+                raw = dict(value)
+            block_text = self._clean_text(str(raw.get("text") or ""))
+            if not block_text:
+                continue
+            if parts:
+                parts.append("\n\n")
+                cursor += 2
+            start = cursor
+            parts.append(block_text)
+            cursor += len(block_text)
+            metadata = raw.get("metadata")
+            merged.append(
+                DocumentBlock(
+                    block_id=str(raw.get("block_id") or self._stable_block_id(source_id, str(raw.get("kind") or "visual"), index)),
+                    kind=str(raw.get("kind") or "image_description"),
+                    text=block_text,
+                    start_char=start,
+                    end_char=cursor,
+                    heading_path=[str(item) for item in (raw.get("heading_path") or []) if str(item).strip()],
+                    page_number=self._optional_int(raw.get("page_number")),
+                    metadata=dict(metadata) if isinstance(metadata, dict) else {},
+                )
+            )
+        return merged, "".join(parts)
+
+    def _stable_block_id(self, source_id: str, kind: str, index: int) -> str:
+        digest = hashlib.sha256(f"{source_id}:{kind}:extra:{index}".encode("utf-8")).hexdigest()[:20]
+        return f"block_{digest}"
+
+    def _optional_int(self, value: Any) -> int | None:
+        try:
+            return int(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
 
     def _clean_text(self, text: str) -> str:
         normalized = unicodedata.normalize("NFKC", text.replace("\r\n", "\n").replace("\r", "\n"))
