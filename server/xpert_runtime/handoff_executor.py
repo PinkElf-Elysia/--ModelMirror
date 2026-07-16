@@ -33,6 +33,9 @@ class HandoffExecutionResult:
     xpert_id: str
     xpert_slug: str
     xpert_version: int
+    waiting_approval: bool = False
+    approval_id: str | None = None
+    task_id: str | None = None
 
 
 ExecuteHandoffTarget = Callable[
@@ -204,6 +207,60 @@ class HandoffExecutor:
                 )
             except Exception as exc:
                 return await self._finish_failure(claimed, task, exc)
+
+            if result.waiting_approval:
+                waiting = await self.store.update_handoff_status(
+                    claimed.handoff_id,
+                    "waiting_approval",
+                    metadata={
+                        "approval_id": result.approval_id,
+                        "workflow_task_id": result.task_id,
+                        "xpert_run_id": result.run_id,
+                        "target_xpert_id": result.xpert_id,
+                        "target_xpert_slug": result.xpert_slug,
+                        "target_xpert_version": result.xpert_version,
+                        "lease_owner": "",
+                        "lease_token": "",
+                        "lease_expires_at": 0.0,
+                    },
+                )
+                await self.store.update_task(
+                    task.task_id,
+                    status="waiting_approval",
+                    metadata={
+                        "handoff_id": waiting.handoff_id,
+                        "approval_id": result.approval_id,
+                        "workflow_task_id": result.task_id,
+                    },
+                )
+                await self._update_run(
+                    handoff_run,
+                    status="waiting",
+                    metadata={
+                        "handoff_status": "waiting_approval",
+                        "approval_id": result.approval_id,
+                    },
+                )
+                await self._update_run(
+                    task_run,
+                    status="waiting",
+                    metadata={
+                        "handoff_id": waiting.handoff_id,
+                        "approval_id": result.approval_id,
+                    },
+                )
+                await self._checkpoint(
+                    handoff_run,
+                    event_type="agent_handoff.waiting_approval",
+                    title="Xpert handoff is waiting for approval",
+                    summary=f"approval_id={result.approval_id}",
+                    severity="warning",
+                    metadata={
+                        "handoff_id": waiting.handoff_id,
+                        "approval_id": result.approval_id,
+                    },
+                )
+                return waiting
 
             completed_at = time.time()
             safe_output = str(result.output or "")[:100_000]

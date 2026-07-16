@@ -169,7 +169,7 @@ async def test_xpert_publish_preflight_rejects_invalid_chat_contract(
     codes = {item["code"] for item in issues}
     assert "xpert_workflow_agent_missing_modelId" in codes
     assert "xpert_workflow_agent_missing_taskInput" in codes
-    assert "xpert_human_intervention_not_supported" in codes
+    assert "xpert_human_intervention_not_supported" not in codes
 
     versions_response = await client.get(f"/api/xperts/{xpert['id']}/versions")
     assert versions_response.json() == []

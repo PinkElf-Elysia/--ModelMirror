@@ -151,6 +151,7 @@ try:
     from server.xpert_runtime import (
         AgentTaskStore,
         AgentMiddleware,
+        ApprovalCoordinator,
         CapabilityRegistry,
         HandoffBusyError,
         HandoffExecutionResult,
@@ -175,13 +176,23 @@ try:
         PinnedXpert,
         RunRegistry,
         RuntimeEventStore,
+        RuntimeApprovalRequest,
+        RuntimeApprovalStore,
+        RuntimeInterrupt,
+        RuntimeMiddlewareFatalError,
         RuntimeMiddlewareSpec,
         RuntimeTodoStore,
+        WorkflowExecution,
+        WorkflowExecutionStore,
         RuntimeToolCall,
         TodoToolsetProvider,
         ToolPermissionPolicy,
         bound_middleware_specs,
         build_context_compression_middleware,
+        build_human_in_the_loop_middleware,
+        configure_approval_coordinator,
+        configure_approval_decision_validator,
+        configure_runtime_approvals,
         configure_runtime_todo_store,
         control_flow_edges,
         create_default_runtime,
@@ -194,16 +205,20 @@ try:
         register_todo_toolset_capability,
         run_tool_with_runtime,
         runtime_middleware_registry,
+        runtime_approval_router,
         runtime_todo_router,
         select_runtime_tools,
         todo_planning_instruction,
         validate_structured_output,
+        create_final_output_approval,
+        human_in_the_loop_final_confirmation,
         workflow_node_registry,
     )
 except ModuleNotFoundError:
     from xpert_runtime import (
         AgentTaskStore,
         AgentMiddleware,
+        ApprovalCoordinator,
         CapabilityRegistry,
         HandoffBusyError,
         HandoffExecutionResult,
@@ -228,13 +243,23 @@ except ModuleNotFoundError:
         PinnedXpert,
         RunRegistry,
         RuntimeEventStore,
+        RuntimeApprovalRequest,
+        RuntimeApprovalStore,
+        RuntimeInterrupt,
+        RuntimeMiddlewareFatalError,
         RuntimeMiddlewareSpec,
         RuntimeTodoStore,
+        WorkflowExecution,
+        WorkflowExecutionStore,
         RuntimeToolCall,
         TodoToolsetProvider,
         ToolPermissionPolicy,
         bound_middleware_specs,
         build_context_compression_middleware,
+        build_human_in_the_loop_middleware,
+        configure_approval_coordinator,
+        configure_approval_decision_validator,
+        configure_runtime_approvals,
         configure_runtime_todo_store,
         control_flow_edges,
         create_default_runtime,
@@ -247,10 +272,13 @@ except ModuleNotFoundError:
         register_todo_toolset_capability,
         run_tool_with_runtime,
         runtime_middleware_registry,
+        runtime_approval_router,
         runtime_todo_router,
         select_runtime_tools,
         todo_planning_instruction,
         validate_structured_output,
+        create_final_output_approval,
+        human_in_the_loop_final_confirmation,
         workflow_node_registry,
     )
 
@@ -400,6 +428,7 @@ app.include_router(xperts_router)
 app.include_router(xpert_apps_router)
 app.include_router(workflow_native_router)
 app.include_router(runtime_todo_router)
+app.include_router(runtime_approval_router)
 
 request_windows: dict[str, deque[float]] = defaultdict(deque)
 mcp_connect_windows: dict[str, deque[float]] = defaultdict(deque)
@@ -425,10 +454,18 @@ agent_task_store = AgentTaskStore(
 )
 goal_store = GoalStore(storage_dir=AGENT_TASK_STORAGE_DIR or None)
 run_registry = RunRegistry()
+runtime_approval_store = RuntimeApprovalStore(
+    storage_dir=AGENT_TASK_STORAGE_DIR or None
+)
+workflow_execution_store = WorkflowExecutionStore(
+    storage_dir=AGENT_TASK_STORAGE_DIR or None
+)
+configure_runtime_approvals(runtime_approval_store, workflow_execution_store)
 knowledge_pipeline_executor = configure_pipeline_executor(run_registry=run_registry)
 knowledge_evaluation_executor = configure_evaluation_executor(run_registry=run_registry)
 handoff_executor: HandoffExecutor | None = None
 goal_coordinator: GoalCoordinator | None = None
+approval_coordinator: ApprovalCoordinator | None = None
 runtime_capabilities.register(
     "mcp_tools",
     workflow_mcp_provider,
@@ -445,6 +482,44 @@ runtime_capabilities.register(
     workflow_knowledge_provider,
     description="Active knowledge retrieval and approval-gated write tools.",
 )
+
+
+async def validate_runtime_approval_decision(
+    approval: RuntimeApprovalRequest,
+    decision_payload: Any,
+) -> None:
+    if approval.request_type != "tool_call" or decision_payload.decision != "edit":
+        return
+    edited_arguments = decision_payload.edited_arguments
+    if not isinstance(edited_arguments, dict):
+        raise HTTPException(status_code=400, detail="编辑后的工具参数必须是 JSON 对象。")
+    tool_name = str(approval.tool_name or "").strip()
+    matched_tool = None
+    for provider in (
+        workflow_mcp_provider,
+        workflow_memory_provider,
+        workflow_knowledge_provider,
+        workflow_todo_provider,
+    ):
+        matched_tool = await provider.find_tool(tool_name)
+        if matched_tool is not None:
+            break
+    if matched_tool is None:
+        raise HTTPException(status_code=400, detail=f"工具已不可用：{tool_name}")
+    schema = matched_tool.input_schema
+    if isinstance(schema, dict) and schema:
+        try:
+            from jsonschema import Draft202012Validator
+
+            Draft202012Validator(schema).validate(edited_arguments)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"编辑后的工具参数不符合 schema：{str(exc)[:300]}",
+            ) from exc
+
+
+configure_approval_decision_validator(validate_runtime_approval_decision)
 workflow_task_store: dict[str, dict[str, Any]] = {}
 chat_runtime_task_store: dict[str, dict[str, Any]] = {}
 
@@ -677,6 +752,8 @@ class WorkflowTaskStatusResponse(BaseModel):
     paused_node_id: str | None = None
     created_at: float
     ttl_seconds_left: float
+    runtime_status: str | None = None
+    approval_id: str | None = None
 
 
 def client_ip(request: Request) -> str:
@@ -2530,6 +2607,8 @@ async def _run_workflow_response(
     runtime_source_id: str | None = None,
     runtime_metadata: dict[str, Any] | None = None,
     runtime_parent_run_id: str | None = None,
+    resume_execution: WorkflowExecution | None = None,
+    resolved_approval: RuntimeApprovalRequest | None = None,
 ):
     requires_model = any(
         (node.data.get("kind") if isinstance(node.data.get("kind"), str) else node.type)
@@ -2565,7 +2644,12 @@ async def _run_workflow_response(
         start_node_ids = [order[0]]
 
     cleanup_expired_workflow_tasks()
-    task_id = uuid.uuid4().hex
+    resume_state = (
+        dict(resume_execution.continuation or {})
+        if resume_execution is not None
+        else {}
+    )
+    task_id = resume_execution.task_id if resume_execution is not None else uuid.uuid4().hex
     run_metadata = {
         "workflow_id": payload.workflow.id,
         "workflow_title": payload.workflow.title,
@@ -2573,34 +2657,80 @@ async def _run_workflow_response(
         "node_count": len(payload.workflow.nodes),
         "edge_count": len(payload.workflow.edges),
     }
-    run_metadata.update(runtime_metadata or {})
-    workflow_run = await run_registry.create_run(
-        runtime_run_type,  # type: ignore[arg-type]
-        payload.workflow.title,
-        status="running",
-        source_id=runtime_source_id or payload.workflow.id,
-        parent_run_id=runtime_parent_run_id,
-        metadata=run_metadata,
+    if runtime_parent_run_id:
+        run_metadata["runtime_parent_run_id"] = runtime_parent_run_id
+    run_metadata.update(
+        resume_execution.runtime_metadata
+        if resume_execution is not None
+        else (runtime_metadata or {})
     )
+    workflow_run = (
+        await run_registry.get_run(resume_execution.run_id)
+        if resume_execution is not None
+        else None
+    )
+    if workflow_run is None:
+        if resume_execution is not None:
+            run_metadata["recovery_run_from"] = resume_execution.run_id
+        workflow_run = await run_registry.create_run(
+            runtime_run_type,  # type: ignore[arg-type]
+            payload.workflow.title,
+            status="running",
+            source_id=runtime_source_id or payload.workflow.id,
+            parent_run_id=runtime_parent_run_id,
+            metadata=run_metadata,
+        )
+    else:
+        await run_registry.update_run(
+            workflow_run.run_id,
+            status="running",
+            clear_error=True,
+            metadata={"resumed_from_approval": True},
+        )
+    if (
+        resume_execution is not None
+        and resume_execution.run_id != workflow_run.run_id
+    ):
+        workflow_execution_store.update_run_id(
+            resume_execution.task_id,
+            run_id=workflow_run.run_id,
+        )
     await run_registry.record_checkpoint(
         workflow_run.run_id,
-        event_type=f"{runtime_run_type}.started",
-        title="Xpert started" if runtime_run_type == "xpert" else "Workflow started",
+        event_type=(
+            "runtime.approval.resumed"
+            if resume_execution is not None
+            else f"{runtime_run_type}.started"
+        ),
+        title=(
+            "Runtime approval resumed"
+            if resume_execution is not None
+            else ("Xpert started" if runtime_run_type == "xpert" else "Workflow started")
+        ),
         summary=payload.workflow.title,
         metadata=run_metadata,
     )
-    initial_queue = deque(sorted(start_node_ids, key=lambda node_id: order_index[node_id]))
+    initial_queue = deque(
+        list(resume_state.get("queue") or [])
+        if resume_execution is not None
+        else sorted(start_node_ids, key=lambda node_id: order_index[node_id])
+    )
     task_state: dict[str, Any] = {
         "task_id": task_id,
         "run_id": workflow_run.run_id,
-        "variables": {str(key): str(value) for key, value in payload.inputs.items()},
+        "variables": {
+            str(key): str(value)
+            for key, value in (
+                resume_state.get("variables") or payload.inputs
+            ).items()
+        },
         "queue": initial_queue,
-        "queued": set(initial_queue),
-        "executed": set(),
+        "queued": set(resume_state.get("queued") or initial_queue),
+        "executed": set(resume_state.get("executed") or []),
         "nodes_by_id": nodes_by_id,
         "outgoing": outgoing,
         "order_index": order_index,
-        "final_output": "",
+        "final_output": str(resume_state.get("final_output") or ""),
         "pause_event": None,
         "resume_input": None,
         "paused_node_id": None,
@@ -2614,8 +2744,21 @@ async def _run_workflow_response(
             for edge in payload.workflow.edges
             if str(edge.targetHandle or "").strip() == "middleware"
         ],
+        "agent_resume_state": dict(resume_state.get("agent_state") or {}),
+        "resolved_approval": (
+            asdict(resolved_approval) if resolved_approval is not None else None
+        ),
     }
     workflow_task_store[task_id] = task_state
+    if resume_execution is None:
+        workflow_execution_store.create(
+            task_id=task_id,
+            run_id=workflow_run.run_id,
+            run_type=runtime_run_type,
+            workflow=payload.workflow.model_dump(),
+            inputs=dict(payload.inputs),
+            runtime_metadata=run_metadata,
+        )
 
     async def workflow_stream():
         variables: dict[str, str] = task_state["variables"]
@@ -2623,12 +2766,29 @@ async def _run_workflow_response(
         queued: set[str] = task_state["queued"]
         executed: set[str] = task_state["executed"]
         final_output = ""
+        restored_runtime_context = resume_state.get("runtime_context")
+        restored_runtime_context = (
+            dict(restored_runtime_context)
+            if isinstance(restored_runtime_context, dict)
+            else {}
+        )
+        restored_global_specs: list[RuntimeMiddlewareSpec] = []
+        for raw_spec in list(restored_runtime_context.get("global_middleware_specs") or []):
+            if isinstance(raw_spec, dict):
+                try:
+                    restored_global_specs.append(RuntimeMiddlewareSpec(**raw_spec))
+                except (TypeError, ValueError):
+                    continue
         workflow_runtime_context: dict[str, Any] = {
-            "system_prompt": None,
-            "override_system_prompt": False,
-            "active_middlewares": [],
+            "system_prompt": restored_runtime_context.get("system_prompt"),
+            "override_system_prompt": bool(
+                restored_runtime_context.get("override_system_prompt", False)
+            ),
+            "active_middlewares": list(
+                restored_runtime_context.get("active_middlewares") or []
+            ),
             "tool_policy": None,
-            "global_middleware_specs": [],
+            "global_middleware_specs": restored_global_specs,
             "app_policy": (
                 dict(run_metadata.get("app_policy") or {})
                 if runtime_run_type == "xpert_app"
@@ -2756,6 +2916,14 @@ async def _run_workflow_response(
             compression = middleware_spec(specs, "context_compression")
             if compression is not None:
                 middlewares.append(build_context_compression_middleware(compression))
+            hitl = middleware_spec(specs, "human_in_the_loop")
+            if hitl is not None:
+                middlewares.append(
+                    build_human_in_the_loop_middleware(
+                        hitl,
+                        runtime_approval_store,
+                    )
+                )
             pipeline = MiddlewarePipeline(middlewares)
             scope_type, scope_id = runtime_todo_scope(node.id)
             context_metadata: dict[str, Any] = {
@@ -2770,6 +2938,17 @@ async def _run_workflow_response(
                 "todo_scope_id": scope_id,
             }
             run_context = task_state.get("runtime_metadata") or {}
+            for metadata_key in (
+                "xpert_id",
+                "conversation_id",
+                "goal_id",
+                "goal_step_id",
+                "handoff_id",
+                "agent_task_id",
+            ):
+                metadata_value = run_context.get(metadata_key)
+                if metadata_value is not None:
+                    context_metadata[metadata_key] = metadata_value
             context_metadata["conversation_messages"] = list(
                 run_context.get("conversation_messages") or []
             )
@@ -3078,6 +3257,7 @@ async def _run_workflow_response(
             middleware_specs: list[RuntimeMiddlewareSpec] | None = None,
             selector_spec: RuntimeMiddlewareSpec | None = None,
             history_messages: list[dict[str, Any]] | None = None,
+            resume_state: dict[str, Any] | None = None,
         ) -> tuple[str, list[dict[str, Any]]]:
             available_tools = await workflow_available_tools(
                 tool_names_raw,
@@ -3250,7 +3430,100 @@ async def _run_workflow_response(
                 ChatMessage(role="user", content=user_prompt),
             ]
             output_text = ""
-            for iteration_index in range(max_iterations):
+            start_iteration = 0
+            pending_state = dict(resume_state or {})
+            if (
+                pending_state.get("type") == "tool_call"
+                and str(pending_state.get("node_id") or "") == node.id
+            ):
+                stored_messages = pending_state.get("messages")
+                if isinstance(stored_messages, list) and stored_messages:
+                    messages = [
+                        ChatMessage.model_validate(message)
+                        for message in stored_messages
+                    ]
+                pending_decision = pending_state.get("decision")
+                pending_decision = (
+                    dict(pending_decision)
+                    if isinstance(pending_decision, dict)
+                    else {}
+                )
+                pending_tool_name = str(
+                    pending_state.get("tool_name")
+                    or pending_decision.get("tool")
+                    or ""
+                ).strip()
+                pending_arguments = pending_state.get("arguments")
+                pending_arguments = (
+                    dict(pending_arguments)
+                    if isinstance(pending_arguments, dict)
+                    else {}
+                )
+                pending_iteration = max(
+                    0,
+                    int(pending_state.get("iteration_index") or 0),
+                )
+                approval_payload = task_state.get("resolved_approval")
+                if not isinstance(approval_payload, dict):
+                    raise RuntimeMiddlewareFatalError(
+                        "Resolved approval is missing from the resumed execution."
+                    )
+                call_result = await call_workflow_runtime_tool(
+                    tool_name=pending_tool_name,
+                    arguments=pending_arguments,
+                    node=node,
+                    title=title,
+                    metadata={
+                        "agent_kind": kind,
+                        "agent_node_id": node.id,
+                        "iteration": pending_iteration + 1,
+                        "run_id": run_id,
+                        "knowledge_read_enabled": include_knowledge_read,
+                        "knowledge_write_enabled": include_knowledge_write,
+                        "knowledge_base_ids": list(knowledge_base_ids or []),
+                        "resolved_approval": approval_payload,
+                    },
+                    pipeline=pipeline,
+                    middleware_context=middleware_context,
+                    middleware_specs=middleware_specs,
+                )
+                pending_result_text = runtime_tool_result_text(call_result)
+                events.append(
+                    {
+                        "event": "node_delta",
+                        "node_id": node.id,
+                        "node_title": title,
+                        "node_type": kind,
+                        "output": (
+                            f"[{pending_iteration + 1}/{max_iterations}] "
+                            f"审批后执行工具 {pending_tool_name}，结果预览："
+                            f"{pending_result_text[:300]}"
+                        ),
+                        "variable": output_variable,
+                        "run_id": run_id,
+                    }
+                )
+                messages.append(
+                    ChatMessage(
+                        role="assistant",
+                        content=json.dumps(pending_decision, ensure_ascii=False),
+                    )
+                )
+                messages.append(
+                    ChatMessage(
+                        role="user",
+                        content=(
+                            f"工具 {pending_tool_name} 的执行结果：\n"
+                            f"{pending_result_text}\n\n"
+                            "请继续用 JSON 决策下一步。"
+                        ),
+                    )
+                )
+                start_iteration = pending_iteration + 1
+                task_state["agent_resume_state"] = {}
+                task_state["resolved_approval"] = None
+
+            for iteration_index in range(start_iteration, max_iterations):
                 if not get_llm_gateway_config()[0]:
                     raise ValueError(LLM_GATEWAY_NOT_CONFIGURED_MESSAGE)
                 raw_response = (await invoke_agent_model(messages)).strip()
@@ -3327,24 +3600,36 @@ async def _run_workflow_response(
                             metadata={"iteration": iteration_index + 1},
                         )
                 else:
-                    call_result = await call_workflow_runtime_tool(
-                        tool_name=tool_name,
-                        arguments=arguments,
-                        node=node,
-                        title=title,
-                        metadata={
-                            "agent_kind": kind,
-                            "agent_node_id": node.id,
-                            "iteration": iteration_index + 1,
-                            "run_id": run_id,
-                            "knowledge_read_enabled": include_knowledge_read,
-                            "knowledge_write_enabled": include_knowledge_write,
-                            "knowledge_base_ids": list(knowledge_base_ids or []),
-                        },
-                        pipeline=pipeline,
-                        middleware_context=middleware_context,
-                        middleware_specs=middleware_specs,
-                    )
+                    try:
+                        call_result = await call_workflow_runtime_tool(
+                            tool_name=tool_name,
+                            arguments=arguments,
+                            node=node,
+                            title=title,
+                            metadata={
+                                "agent_kind": kind,
+                                "agent_node_id": node.id,
+                                "iteration": iteration_index + 1,
+                                "run_id": run_id,
+                                "knowledge_read_enabled": include_knowledge_read,
+                                "knowledge_write_enabled": include_knowledge_write,
+                                "knowledge_base_ids": list(knowledge_base_ids or []),
+                            },
+                            pipeline=pipeline,
+                            middleware_context=middleware_context,
+                            middleware_specs=middleware_specs,
+                        )
+                    except RuntimeInterrupt as interrupt:
+                        interrupt.continuation["agent_state"] = {
+                            "type": "tool_call",
+                            "node_id": node.id,
+                            "iteration_index": iteration_index,
+                            "messages": [message.model_dump() for message in messages],
+                            "decision": dict(decision),
+                            "tool_name": tool_name,
+                            "arguments": dict(arguments),
+                        }
+                        raise
                     tool_result_text = runtime_tool_result_text(call_result)
                     if run_id:
                         await run_registry.record_checkpoint(
@@ -3428,6 +3713,22 @@ async def _run_workflow_response(
                     }
                 )
             yield sse_payload(meta_event)
+            workflow_execution_store.append_event(task_id, meta_event)
+            if resolved_approval is not None:
+                resolved_event = {
+                    "event": "runtime_approval_resolved",
+                    "task_id": task_id,
+                    "run_id": workflow_run.run_id,
+                    "approval_id": resolved_approval.approval_id,
+                    "approval_status": resolved_approval.status,
+                    "request_type": resolved_approval.request_type,
+                    "node_id": resolved_approval.node_id,
+                    "node_title": resolved_approval.node_title,
+                    "tool_name": resolved_approval.tool_name,
+                    "message": "审批已处理，执行已从断点恢复。",
+                }
+                workflow_execution_store.append_event(task_id, resolved_event)
+                yield sse_payload(resolved_event)
             while queue:
                 node_id = queue.popleft()
                 node = nodes_by_id[node_id]
@@ -4181,37 +4482,80 @@ async def _run_workflow_response(
                             }
                         )
                     else:
-                        pause_event = asyncio.Event()
-                        task_state["pause_event"] = pause_event
-                        task_state["resume_input"] = None
-                        task_state["paused_node_id"] = node.id
-                        yield sse_payload(
-                            {
-                                "event": "human_intervention_pending",
-                                "task_id": task_id,
-                                "node_id": node.id,
-                                "node_title": title,
-                                "node_type": kind,
-                                "prompt": prompt,
-                                "output_variable": output_variable,
-                            }
+                        manual_resume_state = task_state.get("agent_resume_state")
+                        manual_resume_state = (
+                            dict(manual_resume_state)
+                            if isinstance(manual_resume_state, dict)
+                            and manual_resume_state.get("type") == "manual_input"
+                            and str(manual_resume_state.get("node_id") or "")
+                            == node.id
+                            else {}
                         )
-                        while not pause_event.is_set():
-                            try:
-                                await asyncio.wait_for(pause_event.wait(), timeout=15)
-                            except asyncio.TimeoutError:
-                                yield sse_payload(
-                                    {
-                                        "event": "heartbeat",
-                                        "task_id": task_id,
-                                        "node_id": node.id,
-                                        "at": time.time(),
-                                    }
+                        if manual_resume_state:
+                            approval_payload = task_state.get("resolved_approval")
+                            if not isinstance(approval_payload, dict):
+                                raise RuntimeMiddlewareFatalError(
+                                    "Resolved manual-input approval is missing."
                                 )
-                        output = str(task_state.get("resume_input") or "")
-                        task_state["paused_node_id"] = None
-                        task_state["resume_input"] = None
-                        task_state["pause_event"] = None
+                            decision = str(
+                                approval_payload.get("decision") or ""
+                            ).strip()
+                            if decision == "reject":
+                                raise RuntimeError(
+                                    str(
+                                        approval_payload.get("message")
+                                        or "Human intervention was rejected."
+                                    )
+                                )
+                            if decision != "replace":
+                                raise RuntimeMiddlewareFatalError(
+                                    f"Unsupported manual-input decision: {decision}."
+                                )
+                            output = str(
+                                approval_payload.get("replacement_text") or ""
+                            )
+                            task_state["agent_resume_state"] = {}
+                            task_state["resolved_approval"] = None
+                        else:
+                            approval = runtime_approval_store.create_request(
+                                action_key=f"{task_id}:{node.id}:manual-input",
+                                request_type="manual_input",
+                                task_id=task_id,
+                                run_id=workflow_run.run_id,
+                                node_id=node.id,
+                                node_title=title,
+                                scope_type="workflow",
+                                scope_id=task_id,
+                                timeout_seconds=3600,
+                                allowed_decisions=["replace", "reject"],
+                                description=prompt,
+                                content_preview=prompt,
+                                metadata={"output_variable": output_variable},
+                            )
+                            yield sse_payload(
+                                {
+                                    "event": "human_intervention_pending",
+                                    "task_id": task_id,
+                                    "node_id": node.id,
+                                    "node_title": title,
+                                    "node_type": kind,
+                                    "prompt": prompt,
+                                    "output_variable": output_variable,
+                                    "approval_id": approval.approval_id,
+                                }
+                            )
+                            raise RuntimeInterrupt(
+                                approval.approval_id,
+                                task_id=task_id,
+                                run_id=workflow_run.run_id,
+                                continuation={
+                                    "agent_state": {
+                                        "type": "manual_input",
+                                        "node_id": node.id,
+                                        "output_variable": output_variable,
+                                    }
+                                },
+                            )
                         variables[output_variable] = output
                         yield sse_payload(
                             {
@@ -4546,6 +4890,10 @@ async def _run_workflow_response(
                         structured_spec = middleware_spec(
                             agent_specs,
                             "structured_output",
+                        )
+                        hitl_spec = middleware_spec(
+                            agent_specs,
+                            "human_in_the_loop",
                         )
                         if (
                             structured_spec is None
@@ -4965,9 +5313,119 @@ async def _run_workflow_response(
 
                         last_error: Exception | None = None
                         success = False
+                        output = ""
+                        final_resume_state = task_state.get("agent_resume_state")
+                        final_resume_state = (
+                            dict(final_resume_state)
+                            if isinstance(final_resume_state, dict)
+                            and final_resume_state.get("type") == "final_output"
+                            and str(final_resume_state.get("node_id") or "")
+                            == node.id
+                            else {}
+                        )
+                        if final_resume_state:
+                            approval_payload = task_state.get("resolved_approval")
+                            if not isinstance(approval_payload, dict):
+                                raise RuntimeMiddlewareFatalError(
+                                    "Resolved final-output approval is missing."
+                                )
+                            decision = str(
+                                approval_payload.get("decision") or ""
+                            ).strip()
+                            output = str(final_resume_state.get("output") or "")
+                            revision_round = int(
+                                final_resume_state.get("revision_round") or 0
+                            )
+                            if decision == "replace":
+                                output = str(
+                                    approval_payload.get("replacement_text") or ""
+                                )
+                            elif decision == "revise":
+                                max_rounds = middleware_config_int(
+                                    hitl_spec.config if hitl_spec is not None else {},
+                                    "max_revision_rounds",
+                                    1,
+                                    0,
+                                    5,
+                                )
+                                if revision_round >= max_rounds:
+                                    raise RuntimeError(
+                                        "Final-output revision limit has been reached."
+                                    )
+                                feedback = str(
+                                    approval_payload.get("message")
+                                    or "Revise the answer using the reviewer feedback."
+                                )
+                                output = await buffered_agent_model_text(
+                                    str(final_resume_state.get("model_id") or model_id),
+                                    base_agent_messages(
+                                        role_prompt,
+                                        (
+                                            f"{task_input}\n\nPrevious answer:\n{output}\n\n"
+                                            f"Reviewer feedback:\n{feedback}"
+                                        ),
+                                    ),
+                                    WORKFLOW_AGENT_MAX_TOKENS,
+                                    temperature=0.4,
+                                )
+                                revision_round += 1
+                            elif decision == "reject":
+                                raise RuntimeError(
+                                    str(
+                                        approval_payload.get("message")
+                                        or "Final output was rejected."
+                                    )
+                                )
+                            elif decision != "approve":
+                                raise RuntimeMiddlewareFatalError(
+                                    f"Unsupported final-output decision: {decision}."
+                                )
+                            if structured_spec is not None:
+                                output = await validate_structured_output(
+                                    output,
+                                    schema=middleware_config_schema(
+                                        structured_spec.config
+                                    ),
+                                    model_id=str(
+                                        final_resume_state.get("model_id") or model_id
+                                    ),
+                                    repair_attempts=middleware_config_int(
+                                        structured_spec.config,
+                                        "repair_attempts",
+                                        1,
+                                        0,
+                                        1,
+                                    ),
+                                    model_text=structured_repair_model_text,
+                                )
+                            task_state["agent_resume_state"] = {}
+                            task_state["resolved_approval"] = None
+                            if decision == "revise" and hitl_spec is not None:
+                                next_approval = create_final_output_approval(
+                                    hitl_spec,
+                                    runtime_approval_store,
+                                    agent_context,
+                                    output_text=output,
+                                    revision_round=revision_round,
+                                )
+                                raise RuntimeInterrupt(
+                                    next_approval.approval_id,
+                                    task_id=task_id,
+                                    run_id=workflow_run.run_id,
+                                    continuation={
+                                        "agent_state": {
+                                            "type": "final_output",
+                                            "node_id": node.id,
+                                            "output": output,
+                                            "model_id": model_id,
+                                            "revision_round": revision_round,
+                                        }
+                                    },
+                                )
+                            success = True
                         fallback_checkpoint_recorded = False
                         for attempt_index, (attempt_model_id, fallback_used) in enumerate(
-                            attempt_models,
+                            [] if success else attempt_models,
                             start=1,
                         ):
                             output = ""
@@ -5110,6 +5568,14 @@ async def _run_workflow_response(
                                         middleware_specs=agent_specs,
                                         selector_spec=selector_spec,
                                         history_messages=history_messages,
+                                        resume_state=(
+                                            task_state.get("agent_resume_state")
+                                            if isinstance(
+                                                task_state.get("agent_resume_state"),
+                                                dict,
+                                            )
+                                            else None
+                                        ),
                                     )
                                     for agent_event in agent_events:
                                         yield sse_payload(agent_event)
@@ -5177,9 +5643,36 @@ async def _run_workflow_response(
                                             "run_id": workflow_agent_run.run_id,
                                         }
                                     )
+                                if (
+                                    hitl_spec is not None
+                                    and human_in_the_loop_final_confirmation(hitl_spec)
+                                ):
+                                    final_approval = create_final_output_approval(
+                                        hitl_spec,
+                                        runtime_approval_store,
+                                        agent_context,
+                                        output_text=output,
+                                        revision_round=0,
+                                    )
+                                    raise RuntimeInterrupt(
+                                        final_approval.approval_id,
+                                        task_id=task_id,
+                                        run_id=workflow_run.run_id,
+                                        continuation={
+                                            "agent_state": {
+                                                "type": "final_output",
+                                                "node_id": node.id,
+                                                "output": output,
+                                                "model_id": attempt_model_id,
+                                                "revision_round": 0,
+                                            }
+                                        },
+                                    )
                                 success = True
                                 model_id = attempt_model_id
                                 break
+                            except RuntimeInterrupt:
+                                raise
                             except Exception as attempt_exc:
                                 last_error = attempt_exc
                                 await run_registry.record_checkpoint(
@@ -5328,6 +5821,8 @@ async def _run_workflow_response(
                                 "output_disabled": disable_output,
                             },
                         )
+                    except RuntimeInterrupt:
+                        raise
                     except Exception as exc:
                         logger.warning("Workflow workflow_agent node failed: %s", exc)
                         output = ""
@@ -6254,6 +6749,88 @@ async def _run_workflow_response(
                     "variables": variables,
                 }
             )
+            workflow_execution_store.complete(task_id, result=final_output)
+            workflow_execution_store.append_event(
+                task_id,
+                {
+                    "event": "workflow_end",
+                    "task_id": task_id,
+                    "run_id": workflow_run.run_id,
+                    "final_output": final_output,
+                },
+            )
+        except RuntimeInterrupt as interrupt:
+            current_node_id = str(locals().get("node_id") or "")
+            continuation = {
+                "variables": dict(variables),
+                "queue": [current_node_id, *list(queue)] if current_node_id else list(queue),
+                "queued": sorted(queued),
+                "executed": sorted(executed),
+                "final_output": final_output,
+                "agent_state": dict(interrupt.continuation.get("agent_state") or {}),
+                "runtime_context": {
+                    "system_prompt": workflow_runtime_context.get("system_prompt"),
+                    "override_system_prompt": workflow_runtime_context.get(
+                        "override_system_prompt", False
+                    ),
+                    "active_middlewares": list(
+                        workflow_runtime_context.get("active_middlewares") or []
+                    ),
+                    "global_middleware_specs": [
+                        asdict(spec)
+                        for spec in workflow_runtime_context.get(
+                            "global_middleware_specs", []
+                        )
+                        if isinstance(spec, RuntimeMiddlewareSpec)
+                    ],
+                },
+            }
+            approval = runtime_approval_store.require(interrupt.approval_id)
+            pending_event = {
+                "event": "runtime_approval_pending",
+                "task_id": task_id,
+                "run_id": workflow_run.run_id,
+                "approval_id": approval.approval_id,
+                "approval_status": approval.status,
+                "request_type": approval.request_type,
+                "node_id": approval.node_id,
+                "node_title": approval.node_title,
+                "tool_name": approval.tool_name,
+                "message": approval.description,
+            }
+            workflow_execution_store.suspend(
+                task_id,
+                approval_id=approval.approval_id,
+                continuation=continuation,
+                safe_event=pending_event,
+            )
+            task_state["created_at"] = time.monotonic()
+            task_state["ttl"] = max(
+                WORKFLOW_TASK_TTL_SECONDS,
+                int(max(0, approval.expires_at - time.time())) + 3600,
+            )
+            await run_registry.update_run(
+                workflow_run.run_id,
+                status="waiting",
+                metadata={
+                    "approval_id": approval.approval_id,
+                    "approval_type": approval.request_type,
+                },
+            )
+            await run_registry.record_checkpoint(
+                workflow_run.run_id,
+                event_type="runtime.approval.pending",
+                title="Runtime approval pending",
+                summary=f"approval_id={approval.approval_id}",
+                severity="warning",
+                metadata={
+                    "approval_id": approval.approval_id,
+                    "request_type": approval.request_type,
+                    "node_id": approval.node_id,
+                    "tool_name": approval.tool_name,
+                },
+            )
+            yield sse_payload(pending_event)
         except Exception as exc:
             logger.exception("Workflow run failed workflow=%s", payload.workflow.id)
             try:
@@ -6264,9 +6841,24 @@ async def _run_workflow_response(
                 )
             except Exception:
                 logger.warning("Failed to update workflow run status", exc_info=True)
+            try:
+                workflow_execution_store.fail(task_id, error=str(exc))
+                workflow_execution_store.append_event(
+                    task_id,
+                    {
+                        "event": "error",
+                        "task_id": task_id,
+                        "run_id": workflow_run.run_id,
+                        "message": str(exc),
+                    },
+                )
+            except Exception:
+                logger.warning("Failed to persist workflow failure", exc_info=True)
             yield sse_payload({"event": "error", "message": str(exc)})
         finally:
-            task_state["completed_at"] = time.monotonic()
+            durable_execution = workflow_execution_store.get(task_id)
+            if durable_execution is None or durable_execution.status != "waiting":
+                task_state["completed_at"] = time.monotonic()
 
     return StreamingResponse(
         workflow_stream(),
@@ -6297,6 +6889,7 @@ async def consume_workflow_stream(response: Any) -> dict[str, Any]:
         raise RuntimeError("Xpert workflow returned an unsupported response.")
 
     final_event: dict[str, Any] | None = None
+    pending_approval_event: dict[str, Any] | None = None
     error_message = ""
     buffer = ""
     async for chunk in response.body_iterator:
@@ -6317,8 +6910,12 @@ async def consume_workflow_stream(response: Any) -> dict[str, Any]:
                     error_message = str(event.get("message") or "Xpert run failed.")
                 elif event.get("event") == "workflow_end":
                     final_event = event
+                elif event.get("event") == "runtime_approval_pending":
+                    pending_approval_event = event
     if error_message:
         raise RuntimeError(error_message)
+    if pending_approval_event is not None:
+        return pending_approval_event
     if final_event is None:
         raise RuntimeError("Xpert workflow ended without a final result.")
     return final_event
@@ -6401,6 +6998,17 @@ async def execute_xpert_handoff_target(
         runtime_parent_run_id=handoff_run_id,
     )
     final_event = await consume_workflow_stream(response)
+    if final_event.get("event") == "runtime_approval_pending":
+        return HandoffExecutionResult(
+            output="",
+            run_id=str(final_event.get("run_id") or ""),
+            xpert_id=prepared.xpert.id,
+            xpert_slug=prepared.xpert.slug,
+            xpert_version=prepared.version.version,
+            waiting_approval=True,
+            approval_id=str(final_event.get("approval_id") or "") or None,
+            task_id=str(final_event.get("task_id") or "") or None,
+        )
     return HandoffExecutionResult(
         output=str(final_event.get("final_output") or ""),
         run_id=str(final_event.get("run_id") or ""),
@@ -6424,6 +7032,158 @@ def get_handoff_executor() -> HandoffExecutor:
             max_concurrency=HANDOFF_EXECUTOR_MAX_CONCURRENCY,
         )
     return handoff_executor
+
+
+async def resume_runtime_approval_execution(
+    execution: WorkflowExecution,
+    approval: RuntimeApprovalRequest,
+) -> None:
+    workflow = WorkflowPayload.model_validate(execution.workflow)
+    payload = WorkflowRunRequest(
+        workflow=workflow,
+        inputs={str(key): str(value) for key, value in execution.inputs.items()},
+    )
+    metadata = dict(execution.runtime_metadata or {})
+    response = await _run_workflow_response(
+        payload,
+        None,
+        runtime_run_type=execution.run_type,
+        runtime_source_id=str(
+            metadata.get("xpert_id")
+            or metadata.get("workflow_id")
+            or workflow.id
+        ),
+        runtime_metadata=metadata,
+        runtime_parent_run_id=(
+            str(metadata.get("runtime_parent_run_id"))
+            if metadata.get("runtime_parent_run_id")
+            else None
+        ),
+        resume_execution=execution,
+        resolved_approval=approval,
+    )
+    final_event = await consume_workflow_stream(response)
+    if final_event.get("event") == "runtime_approval_pending":
+        return
+    result = str(final_event.get("final_output") or "")
+    handoff_id = str(metadata.get("handoff_id") or "").strip()
+    agent_task_id = str(metadata.get("agent_task_id") or "").strip()
+    if handoff_id:
+        handoff = await agent_task_store.get_handoff(handoff_id)
+        if handoff is not None and handoff.status in {
+            "waiting_approval",
+            "needs_attention",
+        }:
+            await agent_task_store.update_handoff_status(
+                handoff_id,
+                "completed",
+                metadata={
+                    "completed_by": "approval-coordinator",
+                    "completed_at": time.time(),
+                    "result": result[:100_000],
+                    "result_length": len(result),
+                    "xpert_run_id": str(final_event.get("run_id") or ""),
+                    "approval_id": approval.approval_id,
+                    "approval_status": "resolved",
+                },
+            )
+        if agent_task_id:
+            await agent_task_store.update_task(
+                agent_task_id,
+                status="completed",
+                result=result[:100_000],
+                clear_error=True,
+                metadata={
+                    "handoff_id": handoff_id,
+                    "approval_id": approval.approval_id,
+                    "xpert_run_id": str(final_event.get("run_id") or ""),
+                },
+            )
+        for run_type, source_id in (
+            ("agent_handoff", handoff_id),
+            ("agent_task", agent_task_id),
+        ):
+            if not source_id:
+                continue
+            runs = await run_registry.list_runs(
+                run_type=run_type,  # type: ignore[arg-type]
+                source_id=source_id,
+                limit=1,
+            )
+            if runs:
+                await run_registry.update_run(
+                    runs[0].run_id,
+                    status="completed",
+                    clear_error=True,
+                    metadata={
+                        "approval_id": approval.approval_id,
+                        "result_length": len(result),
+                    },
+                )
+
+
+async def expire_runtime_approval_execution(
+    execution: WorkflowExecution,
+    approval: RuntimeApprovalRequest,
+) -> None:
+    metadata = dict(execution.runtime_metadata or {})
+    try:
+        await run_registry.update_run(
+            execution.run_id,
+            status="waiting",
+            metadata={
+                "approval_id": approval.approval_id,
+                "approval_status": "expired",
+            },
+        )
+        await run_registry.record_checkpoint(
+            execution.run_id,
+            event_type="runtime.approval.expired",
+            title="Runtime approval expired",
+            summary=f"approval_id={approval.approval_id}",
+            severity="warning",
+            metadata={"approval_id": approval.approval_id},
+        )
+    except KeyError:
+        pass
+    handoff_id = str(metadata.get("handoff_id") or "").strip()
+    agent_task_id = str(metadata.get("agent_task_id") or "").strip()
+    if handoff_id:
+        handoff = await agent_task_store.get_handoff(handoff_id)
+        if handoff is not None and handoff.status == "waiting_approval":
+            await agent_task_store.update_handoff_status(
+                handoff_id,
+                "needs_attention",
+                metadata={
+                    "approval_id": approval.approval_id,
+                    "approval_status": "expired",
+                    "last_error": "Runtime approval expired.",
+                },
+            )
+    if agent_task_id:
+        await agent_task_store.update_task(
+            agent_task_id,
+            status="needs_attention",
+            error="Runtime approval expired.",
+            metadata={
+                "handoff_id": handoff_id,
+                "approval_id": approval.approval_id,
+            },
+        )
+
+
+def get_approval_coordinator() -> ApprovalCoordinator:
+    global approval_coordinator
+    if approval_coordinator is None:
+        approval_coordinator = ApprovalCoordinator(
+            runtime_approval_store,
+            workflow_execution_store,
+            resume_runtime_approval_execution,
+            expire_execution=expire_runtime_approval_execution,
+            enabled=True,
+        )
+        configure_approval_coordinator(approval_coordinator)
+    return approval_coordinator
 
 
 async def resolve_published_xpert(reference: str) -> PinnedXpert:
@@ -6644,6 +7404,36 @@ async def resume_workflow_task(
         return JSONResponse(status_code=exc.status_code, content={"error": str(exc.detail)})
 
     task = get_workflow_task_or_none(task_id)
+    execution = workflow_execution_store.get(task_id)
+    if task is None and execution is None:
+        raise HTTPException(status_code=404, detail="工作流任务不存在或已过期。")
+
+    if execution is not None and execution.status == "waiting" and execution.approval_id:
+        approval = runtime_approval_store.require(execution.approval_id)
+        if approval.request_type != "manual_input":
+            raise HTTPException(
+                status_code=400,
+                detail="当前等待状态需要通过 Runtime Approval API 处理。",
+            )
+        runtime_approval_store.decide(
+            approval.approval_id,
+            revision=approval.revision,
+            decision="replace",
+            operator="legacy-workflow-resume",
+            replacement_text=payload.input_text,
+        )
+        workflow_execution_store.mark_ready(
+            task_id,
+            approval_id=approval.approval_id,
+        )
+        get_approval_coordinator().wake()
+        return {
+            "ok": True,
+            "task_id": task_id,
+            "node_id": approval.node_id,
+            "approval_id": approval.approval_id,
+        }
+
     if task is None:
         raise HTTPException(status_code=404, detail="工作流任务不存在或已过期。")
 
@@ -6665,8 +7455,20 @@ async def resume_workflow_task(
 @app.get("/api/workflow/run/{task_id}/status", response_model=WorkflowTaskStatusResponse)
 async def get_workflow_task_status(task_id: str):
     task = get_workflow_task_or_none(task_id)
-    if task is None:
+    execution = workflow_execution_store.get(task_id)
+    if task is None and execution is None:
         raise HTTPException(status_code=404, detail="工作流任务不存在或已过期。")
+    if task is None and execution is not None:
+        return WorkflowTaskStatusResponse(
+            task_id=task_id,
+            paused=execution.status == "waiting",
+            paused_node_id=None,
+            created_at=execution.created_at,
+            ttl_seconds_left=0,
+            runtime_status=execution.status,
+            approval_id=execution.approval_id,
+        )
+    assert task is not None
     created_at = float(task.get("created_at", time.monotonic()))
     ttl = float(task.get("ttl", WORKFLOW_TASK_TTL_SECONDS))
     ttl_seconds_left = max(0.0, ttl - (time.monotonic() - created_at))
@@ -6677,6 +7479,46 @@ async def get_workflow_task_status(task_id: str):
         paused_node_id=str(paused_node_id) if paused_node_id else None,
         created_at=created_at,
         ttl_seconds_left=ttl_seconds_left,
+        runtime_status=execution.status if execution is not None else None,
+        approval_id=execution.approval_id if execution is not None else None,
+    )
+
+
+@app.get("/api/workflow/run/{task_id}/stream")
+async def stream_persisted_workflow_execution(
+    task_id: str,
+    after_sequence: int = 0,
+):
+    execution = workflow_execution_store.get(task_id)
+    if execution is None:
+        raise HTTPException(status_code=404, detail="工作流执行不存在或已过期。")
+
+    async def event_stream():
+        cursor = max(0, int(after_sequence))
+        idle_rounds = 0
+        while True:
+            current = workflow_execution_store.get(task_id)
+            if current is None:
+                return
+            pending = [
+                event
+                for event in current.events
+                if int(event.get("sequence") or 0) > cursor
+            ]
+            for event in pending:
+                cursor = max(cursor, int(event.get("sequence") or 0))
+                yield sse_payload(event)
+            if current.status in {"waiting", "completed", "failed", "cancelled"}:
+                return
+            idle_rounds += 1
+            if idle_rounds % 30 == 0:
+                yield b": keep-alive\n\n"
+            await asyncio.sleep(0.5)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
     )
 
 
@@ -7368,6 +8210,7 @@ async def start_mcp_ttl_cleanup() -> None:
     get_evaluation_executor().start()
     get_handoff_executor().start()
     get_goal_coordinator().start()
+    get_approval_coordinator().start()
 
 
 @app.on_event("shutdown")
@@ -7378,6 +8221,8 @@ async def shutdown_mcp_sessions() -> None:
         await goal_coordinator.stop()
     if handoff_executor is not None:
         await handoff_executor.stop()
+    if approval_coordinator is not None:
+        await approval_coordinator.stop()
     await mcp_manager.stop_ttl_cleanup()
     await mcp_manager.close_all()
     await tool_registry.clear()

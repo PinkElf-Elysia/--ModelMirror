@@ -82,16 +82,6 @@ def validate_xpert_definition(xpert: XpertDefinition) -> XpertValidationResult:
                     )
                 )
 
-    for node in nodes:
-        if _node_kind(node) == "human_intervention":
-            issues.append(
-                ValidationIssue(
-                    code="xpert_human_intervention_not_supported",
-                    message="Published Xpert chat does not support human_intervention in this version.",
-                    node_id=node.id,
-                )
-            )
-
     return XpertValidationResult(
         valid=not any(issue.severity == "error" for issue in issues),
         issues=issues,

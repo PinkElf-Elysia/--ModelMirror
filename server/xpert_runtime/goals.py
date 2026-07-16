@@ -22,6 +22,7 @@ GoalStatus = Literal[
 GoalStepStatus = Literal[
     "pending",
     "running",
+    "waiting_approval",
     "completed",
     "failed",
     "blocked",

@@ -146,6 +146,8 @@ export interface WorkflowRunEvent {
     | "node_start"
     | "node_delta"
     | "human_intervention_pending"
+    | "runtime_approval_pending"
+    | "runtime_approval_resolved"
     | "heartbeat"
     | "node_end"
     | "workflow_end"
@@ -156,6 +158,11 @@ export interface WorkflowRunEvent {
   node_title?: string;
   node_type?: WorkflowNodeKind;
   prompt?: string;
+  approval_id?: string;
+  approval_status?: string;
+  request_type?: "tool_call" | "final_output" | "manual_input";
+  tool_name?: string;
+  sequence?: number;
   output?: string;
   output_variable?: string;
   variable?: string;

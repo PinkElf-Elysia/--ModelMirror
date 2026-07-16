@@ -3,6 +3,14 @@
 最后更新日期：2026-07-16
 维护人：模镜团队
 
+## 2026-07-16 增量：XPERT-MIDDLEWARE-HITL-02
+
+Agent 级中间件已补齐可恢复的人机审批闭环。`human_in_the_loop` 可在 tool policy 通过后暂停工具调用，也可在最终答案写入变量前要求确认；批准、编辑参数、拒绝反馈、人工替换与模型修订都沿用同一 classic workflow runner。
+
+Workflow execution、审批请求和安全事件序列使用文件 Store 原子持久化。`ApprovalCoordinator` 通过 lease 从原 ReAct 动作恢复，已完成节点不会重跑，待审批工具不会被 fail-open 调用。WorkflowRun、Xpert Chat、Goal 和 MetaAgent Handoff Inbox 共用审批卡片；Goal/Handoff 超时进入 `needs_attention`。旧 `human_intervention` 保持 SSE 与 `/resume` 兼容，但底层也进入持久暂停路径。
+
+公开 Xpert App 与 OpenAI 兼容 API 继续拒绝交互式 HITL 部署。下一阶段进入受控 Sandbox、命令、Skill 与浏览器工具，不把可信本地审批误表述为完整用户权限系统。详细契约见 `docs/XPERT_MIDDLEWARE.md`。
+
 ## 2026-07-16 增量：XPERT-MIDDLEWARE-CORE-01
 
 `runtime_middleware` 已从线性工作流步骤扩展为可绑定到单个 `workflow_agent` 的 Agent 级执行能力。绑定边使用 `sourceHandle="middleware-binding" -> targetHandle="middleware"`，不参与控制流拓扑、变量传播或节点调度；每个 Agent 独立编译 middleware pipeline，直接模型调用、ReAct 决策与工具调用共享一致的 policy、audit 和 checkpoint 边界。

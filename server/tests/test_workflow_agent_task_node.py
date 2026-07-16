@@ -10,7 +10,12 @@ import pytest_asyncio
 
 import server.main as main_module
 from server.main import app
-from server.xpert_runtime import RuntimeTool, RuntimeToolResult
+from server.xpert_runtime import (
+    RuntimeApprovalStore,
+    RuntimeTool,
+    RuntimeToolResult,
+    WorkflowExecutionStore,
+)
 from server.xpert_runtime.todo_store import RuntimeTodoStore
 
 
@@ -1373,3 +1378,198 @@ async def test_bound_todo_planner_creates_scoped_todo_through_runtime_toolset(
     checkpoints = await _checkpoint_types(client, agent_run["run_id"])
     assert "workflow_agent.tool_call" in checkpoints
     assert "workflow_agent.model_answer" in checkpoints
+
+
+@pytest.mark.asyncio
+async def test_bound_hitl_pauses_and_resumes_tool_call_exactly_once(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    approvals = RuntimeApprovalStore(tmp_path / "approvals")
+    executions = WorkflowExecutionStore(tmp_path / "executions")
+    monkeypatch.setattr(main_module, "runtime_approval_store", approvals)
+    monkeypatch.setattr(main_module, "workflow_execution_store", executions)
+    provider, restore_provider = _install_fake_tool_provider()
+    responses = iter(
+        [
+            '{"tool":"fetch","arguments":{"query":"approval"}}',
+            '{"answer":"approved result"}',
+        ]
+    )
+
+    async def fake_collect_chat_completion_text(*args, **kwargs):
+        return next(responses)
+
+    monkeypatch.setattr(
+        main_module,
+        "get_llm_gateway_config",
+        lambda: ("http://test-gateway.local/v1/chat/completions", "test-key"),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "collect_chat_completion_text",
+        fake_collect_chat_completion_text,
+    )
+    monkeypatch.setattr(main_module, "workflow_mcp_provider", provider)
+    workflow = _workflow_agent_strategy_workflow(
+        {"toolMode": "mcp_tools", "toolNames": "fetch", "maxIterations": 4}
+    )
+    workflow["nodes"].append(
+        {
+            "id": "hitl",
+            "type": "runtime_middleware",
+            "data": {
+                "kind": "runtime_middleware",
+                "runtimeMiddlewareId": "human_in_the_loop",
+                "runtimeMiddlewareKind": "runtime_middleware.human_in_the_loop",
+                "middlewarePriority": "40",
+                "runtimeMiddlewareConfig": {
+                    "interrupt_on_tools": "fetch",
+                    "final_confirmation": False,
+                    "timeout_seconds": 3600,
+                },
+            },
+        }
+    )
+    workflow["edges"].append(
+        {
+            "id": "bind-hitl",
+            "source": "hitl",
+            "target": "workflow_agent",
+            "sourceHandle": "middleware-binding",
+            "targetHandle": "middleware",
+        }
+    )
+
+    try:
+        response = await client.post(
+            "/api/workflow/run",
+            json={"workflow": workflow, "inputs": {"user_input": "use the tool"}},
+        )
+        assert response.status_code == 200, response.text
+        events = _parse_sse_events(response.text)
+        pending_events = [
+            event
+            for event in events
+            if event.get("event") == "runtime_approval_pending"
+        ]
+        assert pending_events, response.text
+        pending = pending_events[0]
+        task_id = pending["task_id"]
+        assert provider.calls == []
+        assert executions.require(task_id).status == "waiting"
+
+        approval = approvals.require(pending["approval_id"])
+        decided = approvals.decide(
+            approval.approval_id,
+            revision=approval.revision,
+            decision="approve",
+            operator="tester",
+        )
+        executions.mark_ready(task_id, approval_id=approval.approval_id)
+        claimed = executions.claim(task_id, worker_id="test-worker")
+        await main_module.resume_runtime_approval_execution(claimed, decided)
+
+        completed = executions.require(task_id)
+        assert completed.status == "completed"
+        assert completed.result == "approved result"
+        assert len(provider.calls) == 1
+        persisted_events = completed.events
+        assert any(event["event"] == "runtime_approval_resolved" for event in persisted_events)
+        assert any(
+            event["event"] == "workflow_end"
+            and event["final_output"] == "approved result"
+            for event in persisted_events
+        )
+    finally:
+        restore_provider()
+
+
+@pytest.mark.asyncio
+async def test_bound_hitl_final_confirmation_replaces_output_and_resumes(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    approvals = RuntimeApprovalStore(tmp_path / "approvals")
+    executions = WorkflowExecutionStore(tmp_path / "executions")
+    monkeypatch.setattr(main_module, "runtime_approval_store", approvals)
+    monkeypatch.setattr(main_module, "workflow_execution_store", executions)
+
+    async def fake_stream_workflow_llm_text(*args, **kwargs):
+        yield "draft answer"
+
+    monkeypatch.setattr(
+        main_module,
+        "get_llm_gateway_config",
+        lambda: ("http://test-gateway.local/v1/chat/completions", "test-key"),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "stream_workflow_llm_text",
+        fake_stream_workflow_llm_text,
+    )
+    workflow = _workflow_agent_strategy_workflow()
+    workflow["nodes"].append(
+        {
+            "id": "hitl-final",
+            "type": "runtime_middleware",
+            "data": {
+                "kind": "runtime_middleware",
+                "runtimeMiddlewareId": "human_in_the_loop",
+                "runtimeMiddlewareKind": "runtime_middleware.human_in_the_loop",
+                "middlewarePriority": "40",
+                "runtimeMiddlewareConfig": {
+                    "interrupt_on_tools": "",
+                    "final_confirmation": True,
+                    "max_revision_rounds": 1,
+                    "timeout_seconds": 3600,
+                },
+            },
+        }
+    )
+    workflow["edges"].append(
+        {
+            "id": "bind-hitl-final",
+            "source": "hitl-final",
+            "target": "workflow_agent",
+            "sourceHandle": "middleware-binding",
+            "targetHandle": "middleware",
+        }
+    )
+
+    response = await client.post(
+        "/api/workflow/run",
+        json={"workflow": workflow, "inputs": {"user_input": "draft"}},
+    )
+    assert response.status_code == 200, response.text
+    events = _parse_sse_events(response.text)
+    pending = next(
+        event
+        for event in events
+        if event.get("event") == "runtime_approval_pending"
+    )
+    approval = approvals.require(pending["approval_id"])
+    assert approval.request_type == "final_output"
+    assert approval.content_preview == "draft answer"
+
+    decided = approvals.decide(
+        approval.approval_id,
+        revision=approval.revision,
+        decision="replace",
+        operator="tester",
+        replacement_text="approved answer",
+    )
+    executions.mark_ready(pending["task_id"], approval_id=approval.approval_id)
+    claimed = executions.claim(pending["task_id"], worker_id="test-worker")
+    await main_module.resume_runtime_approval_execution(claimed, decided)
+
+    completed = executions.require(pending["task_id"])
+    assert completed.status == "completed"
+    assert completed.result == "approved answer"
+    assert any(
+        event.get("event") == "workflow_end"
+        and event.get("final_output") == "approved answer"
+        for event in completed.events
+    )

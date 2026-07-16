@@ -19,7 +19,14 @@ RuntimeRunType = Literal[
     "knowledge_pipeline",
     "knowledge_evaluation",
 ]
-RuntimeRunStatus = Literal["pending", "running", "completed", "failed", "cancelled"]
+RuntimeRunStatus = Literal[
+    "pending",
+    "running",
+    "waiting",
+    "completed",
+    "failed",
+    "cancelled",
+]
 
 
 @dataclass(slots=True)

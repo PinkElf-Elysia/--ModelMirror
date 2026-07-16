@@ -1269,6 +1269,41 @@ async def test_structured_output_middleware_validates_schema_and_priority(
 
 
 @pytest.mark.asyncio
+async def test_human_in_the_loop_middleware_validates_rules_and_timeout(
+    client: httpx.AsyncClient,
+) -> None:
+    workflow = middleware_binding_workflow()
+    middleware = workflow["nodes"][-1]
+    middleware["data"].update(
+        {
+            "runtimeMiddlewareId": "human_in_the_loop",
+            "runtimeMiddlewareKind": "runtime_middleware.human_in_the_loop",
+            "runtimeMiddlewareConfig": {
+                "interrupt_on_tools": "search,*",
+                "final_confirmation": True,
+                "timeout_seconds": 3600,
+                "max_revision_rounds": 2,
+            },
+        }
+    )
+
+    data = await validate(client, workflow)
+    assert data["valid"] is True
+
+    middleware["data"]["runtimeMiddlewareConfig"] = {
+        "interrupt_on_tools": "",
+        "final_confirmation": False,
+        "timeout_seconds": 10,
+        "max_revision_rounds": 6,
+    }
+    data = await validate(client, workflow)
+    codes = issue_codes(data)
+    assert data["valid"] is False
+    assert "inactive_runtime_middleware_hitl" in codes
+    assert "invalid_runtime_middleware_config" in codes
+
+
+@pytest.mark.asyncio
 async def test_validate_agent_task_node_ok(client: httpx.AsyncClient) -> None:
     workflow = linear_workflow()
     workflow["nodes"][1] = {

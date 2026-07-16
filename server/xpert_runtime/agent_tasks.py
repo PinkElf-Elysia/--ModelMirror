@@ -10,18 +10,30 @@ from typing import Any, Literal
 
 from .events import RuntimeEventStore
 
-AgentTaskStatus = Literal["pending", "running", "completed", "failed", "cancelled"]
+AgentTaskStatus = Literal[
+    "pending",
+    "running",
+    "waiting_approval",
+    "needs_attention",
+    "completed",
+    "failed",
+    "cancelled",
+]
 AgentHandoffStatus = Literal[
     "pending",
     "accepted",
     "retry_wait",
+    "waiting_approval",
+    "needs_attention",
     "rejected",
     "completed",
     "dead_letter",
 ]
 HANDOFF_TRANSITIONS: dict[AgentHandoffStatus, set[AgentHandoffStatus]] = {
     "pending": {"accepted", "rejected", "dead_letter"},
-    "accepted": {"completed", "retry_wait", "dead_letter"},
+    "accepted": {"completed", "retry_wait", "waiting_approval", "dead_letter"},
+    "waiting_approval": {"completed", "accepted", "needs_attention", "dead_letter"},
+    "needs_attention": {"completed", "accepted", "dead_letter"},
     "retry_wait": {"accepted", "dead_letter", "pending"},
     "rejected": set(),
     "completed": set(),

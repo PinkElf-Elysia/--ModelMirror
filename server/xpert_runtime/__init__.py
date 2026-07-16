@@ -51,6 +51,32 @@ from .core_middlewares import (
 )
 from .events import RuntimeEventStore
 from .middleware import AgentMiddleware, MiddlewarePipeline
+from .interrupts import RuntimeInterrupt, RuntimeMiddlewareFatalError
+from .approval_store import (
+    RuntimeApprovalConflictError,
+    RuntimeApprovalNotFoundError,
+    RuntimeApprovalRequest,
+    RuntimeApprovalStore,
+    RuntimeApprovalValidationError,
+)
+from .execution_store import (
+    WorkflowExecution,
+    WorkflowExecutionConflictError,
+    WorkflowExecutionNotFoundError,
+    WorkflowExecutionStore,
+)
+from .approval_coordinator import ApprovalCoordinator
+from .approval_api import (
+    configure_approval_decision_validator,
+    configure_approval_coordinator,
+    configure_runtime_approvals,
+    router as runtime_approval_router,
+)
+from .hitl_middleware import (
+    build_human_in_the_loop_middleware,
+    create_final_output_approval,
+    human_in_the_loop_final_confirmation,
+)
 from .middleware_registry import (
     RuntimeMiddlewareField,
     RuntimeMiddlewareNode,
@@ -117,6 +143,7 @@ from .tool_runner import run_tool_with_runtime
 
 __all__ = [
     "AgentMiddleware",
+    "ApprovalCoordinator",
     "AUTO_XPERT_TARGET_PREFIX",
     "AgentHandoff",
     "AgentTask",
@@ -157,6 +184,17 @@ __all__ = [
     "RuntimeMiddlewareSpec",
     "RuntimeEvent",
     "RuntimeEventStore",
+    "RuntimeInterrupt",
+    "RuntimeMiddlewareFatalError",
+    "RuntimeApprovalConflictError",
+    "RuntimeApprovalNotFoundError",
+    "RuntimeApprovalRequest",
+    "RuntimeApprovalStore",
+    "RuntimeApprovalValidationError",
+    "WorkflowExecution",
+    "WorkflowExecutionConflictError",
+    "WorkflowExecutionNotFoundError",
+    "WorkflowExecutionStore",
     "RuntimeMiddlewareField",
     "RuntimeMiddlewareNode",
     "RuntimeMiddlewareRegistry",
@@ -182,6 +220,7 @@ __all__ = [
     "RuntimeToolResult",
     "run_tool_with_runtime",
     "runtime_todo_router",
+    "runtime_approval_router",
     "RunRegistry",
     "runtime_middleware_registry",
     "workflow_node_registry",
@@ -210,4 +249,10 @@ __all__ = [
     "select_runtime_tools",
     "todo_planning_instruction",
     "validate_structured_output",
+    "build_human_in_the_loop_middleware",
+    "create_final_output_approval",
+    "human_in_the_loop_final_confirmation",
+    "configure_approval_coordinator",
+    "configure_approval_decision_validator",
+    "configure_runtime_approvals",
 ]
