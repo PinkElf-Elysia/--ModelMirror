@@ -1942,6 +1942,7 @@ class RagService:
         *,
         top_k: int | None = None,
         retrieval: dict[str, Any] | None = None,
+        generate_answer: bool = True,
     ) -> dict[str, Any]:
         version = self.get_pipeline_version(version_id)
         profile = self._retrieval_config_for_version(version, retrieval, top_k=top_k)
@@ -1951,7 +1952,9 @@ class RagService:
             question,
             config=profile,
             lexical_ready=bool(version.get("lexical_index_ready")),
+            generate_answer=generate_answer,
         )
+        result = self._with_source_document_ids(result, version_id)
         return {
             "version_id": version_id,
             "version": int(version["version"]),
@@ -2147,7 +2150,7 @@ class RagService:
         citations: list[dict[str, Any]] = []
         for source in result.get("sources", []):
             chunk_id = str(source.get("chunk_id", ""))
-            doc_id = str(source.get("doc_id", ""))
+            doc_id = str(source.get("source_document_id") or source.get("doc_id", ""))
             citations.append(
                 {
                     "citation_id": f"citation_{chunk_id}" if chunk_id else f"citation_{len(citations)}",
@@ -2165,6 +2168,23 @@ class RagService:
                 }
             )
         return citations
+
+    def _with_source_document_ids(
+        self,
+        result: dict[str, Any],
+        version_id: str | None,
+    ) -> dict[str, Any]:
+        if not version_id:
+            return result
+        prefix = f"{version_id}_"
+        for source in result.get("sources", []):
+            indexed_document_id = str(source.get("doc_id") or "")
+            source["source_document_id"] = (
+                indexed_document_id[len(prefix) :]
+                if indexed_document_id.startswith(prefix)
+                else indexed_document_id
+            )
+        return result
 
     def delete_document(self, doc_id: str) -> None:
         """Delete one document and its vector chunks."""
@@ -2205,12 +2225,16 @@ class RagService:
                 version = stored_version
                 namespace = str(version.get("namespace") or kb_id)
         config = self._retrieval_config_for_version(version, retrieval, top_k=top_k)
-        return await self._query_namespace(
+        result = await self._query_namespace(
             kb_id,
             namespace,
             question,
             config=config,
             lexical_ready=bool(version and version.get("lexical_index_ready")),
+        )
+        return self._with_source_document_ids(
+            result,
+            str(version["version_id"]) if version else None,
         )
 
     async def _query_namespace(
@@ -2221,6 +2245,7 @@ class RagService:
         *,
         config: RetrievalConfig,
         lexical_ready: bool,
+        generate_answer: bool = True,
     ) -> dict[str, Any]:
         """Query one explicit index namespace while preserving public KB identity."""
 
@@ -2296,7 +2321,7 @@ class RagService:
                 ),
             }
 
-        answer = await self._generate_answer(clean_question, results)
+        answer = await self._generate_answer(clean_question, results) if generate_answer else ""
         return {
             "answer": answer,
             "sources": [

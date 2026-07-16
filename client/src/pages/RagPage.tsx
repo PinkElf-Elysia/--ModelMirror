@@ -1187,6 +1187,12 @@ export default function RagPage() {
                   >
                     打开流水线画布
                   </Link>
+                  <Link
+                    className="rounded-lg border border-emerald-300/25 bg-emerald-300/10 px-4 py-2 text-sm font-semibold text-emerald-100 transition hover:bg-emerald-300/15"
+                    to={`/rag/${encodeURIComponent(selectedKnowledgeBase.id)}/evaluation`}
+                  >
+                    检索质量评估
+                  </Link>
                   <button
                     className="rounded-lg border border-hire-300/30 bg-hire-300/10 px-4 py-2 text-sm font-semibold text-hire-100 transition hover:bg-hire-300/20"
                     onClick={() => fileInputRef.current?.click()}

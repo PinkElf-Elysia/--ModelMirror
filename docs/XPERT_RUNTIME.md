@@ -1,6 +1,6 @@
 # Xpert Runtime Contract
 
-Last updated: 2026-07-13
+Last updated: 2026-07-16
 
 ## Purpose
 
@@ -120,7 +120,7 @@ See `docs/XPERT_GOALS.md` for the model, state machine, API, planner contract, a
 
 ## Versioned Knowledge Pipeline Execution
 
-`RagService` persists pipeline drafts, jobs, immutable candidate versions, and the active-version pointer in RAG metadata. `KnowledgePipelineExecutor` is a single-process background worker that claims queued jobs and runs five ordered stages: load, process, chunk, embed, and store.
+`RagService` persists pipeline drafts, jobs, immutable candidate versions, and the active-version pointer in RAG metadata. `KnowledgePipelineExecutor` is a single-process background worker that claims queued jobs and runs six ordered stages: load, vision, process, chunk, embed, and store. The vision stage is skipped safely when it is not configured.
 
 A job pins its draft version and snapshots every selected source before execution. Knowledge-base documents are copied into a private job source area. Explicitly selected Xpert conversation files are resolved through `XpertContextStore`, deduplicated, and snapshotted; archived source assets remain usable by an already-created job, while cross-Xpert references are rejected.
 
@@ -139,6 +139,14 @@ Each v2 candidate owns two coordinated indexes: the existing vector namespace an
 Retrieval modes are `vector`, `fulltext`, and `hybrid`. Hybrid retrieval over-fetches bounded candidate sets, deduplicates by chunk ID, and applies weighted normalized reciprocal-rank fusion. Optional reranking prefers a dedicated rerank provider and can fall back to an OpenAI-compatible LLM strict-JSON ranking response. Provider timeout or invalid output is fail-open: the fused order is returned with a warning.
 
 Normal RAG, Chat RAG, workflow knowledge nodes, published Xperts, Goals, and Xpert Apps resolve the active version through `RagService`; clients cannot silently select a candidate. Legacy indexes remain vector-only and are not migrated automatically. Retrieval checkpoints and diagnostics may contain mode, counts, scores, model labels, and warnings, but never the full question, chunk body, embedding, local path, or credential.
+
+## Knowledge Evaluation And Promotion
+
+`KnowledgeEvaluationStore` persists revisioned evaluation sets, immutable run snapshots, gate policies, aggregate metrics, and safe per-case rankings in the RAG storage directory. Expected citations use stable source document IDs plus optional chunk, source block, and page references, not candidate namespace IDs.
+
+`KnowledgeEvaluationExecutor` is a restart-safe single-process worker. It queries immutable candidate versions with answer generation disabled, then calculates Recall@1/5, MRR@10, nDCG@10, citation hit/coverage, no-result rate, error rate, and P95 latency. RunRegistry uses `run_type=knowledge_evaluation`; checkpoints contain only IDs, counts, status, duration, and safe error summaries.
+
+Promotion Gate supports advisory and required modes. Required promotion verifies that the evaluation run succeeded, evaluated the same knowledge base and candidate version, used the current evaluation-set revision, and passed every configured absolute and regression threshold. Advisory mode retains the previous direct activation path for compatibility. Promotion switches the existing active-version pointer only; it does not rebuild indexes or mutate the immutable candidate.
 
 ## Structured Processor And Generated Indexes
 
@@ -161,5 +169,5 @@ The job owns a private processed artifact per source. Public payloads expose onl
 
 App execution uses `run_type=xpert_app` and the same classic runner. The deployment fixes one immutable XpertVersion. Tool, Handoff, and Xpert-memory capabilities are disabled by default; tool execution also requires an active `tool_policy`, otherwise the runtime denies the call. Public JSON/SSE responses expose only the final output.
 - Automatic Handoff execution is limited to a single backend process and explicit `xpert:` targets.
-- Knowledge ingestion is local and single-process; it has no distributed lease, automatic activation, or image-understanding stage.
+- Knowledge ingestion and evaluation are local and single-process; they have no distributed lease or automatic activation. Image understanding and evaluation are available, while multimodal embeddings, layout coordinates, Knowledge Agent write approval, and GraphRAG remain out of scope.
 - A normal /workflow run remains unchanged and continues to use its existing local-draft behavior.

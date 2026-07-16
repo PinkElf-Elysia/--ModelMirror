@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import csv
+import io
+import json
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +23,15 @@ from .rag_service import (
 from .pipeline_graph import PipelineGraphValidationError
 from .pipeline_executor import KnowledgePipelineExecutor
 from .processor_generator import ProcessorGenerationError
+from .evaluation import (
+    EvaluationPromotionError,
+    EvaluationRevisionError,
+    EvaluationRunNotFoundError,
+    EvaluationSetNotFoundError,
+    EvaluationStateError,
+    KnowledgeEvaluationStore,
+)
+from .evaluation_executor import KnowledgeEvaluationExecutor
 
 
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
@@ -27,6 +39,8 @@ MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 router = APIRouter(prefix="/api/rag", tags=["rag"])
 _rag_service: RagService | None = None
 _pipeline_executor: KnowledgePipelineExecutor | None = None
+_evaluation_store: KnowledgeEvaluationStore | None = None
+_evaluation_executor: KnowledgeEvaluationExecutor | None = None
 
 
 class KnowledgeBaseCreateRequest(BaseModel):
@@ -64,6 +78,7 @@ class DocumentListResponse(BaseModel):
 class RagSourcePayload(BaseModel):
     chunk_id: str
     doc_id: str
+    source_document_id: str | None = None
     document_name: str
     text: str
     score: float
@@ -484,6 +499,72 @@ class CitationAnchorResponse(BaseModel):
     citation_count: int
 
 
+class EvaluationReferenceInput(BaseModel):
+    reference_id: str | None = Field(default=None, max_length=200)
+    document_id: str = Field(min_length=1, max_length=200)
+    chunk_id: str | None = Field(default=None, max_length=240)
+    source_block_id: str | None = Field(default=None, max_length=240)
+    page_number: int | None = Field(default=None, ge=1, le=100_000)
+    relevance: int = Field(default=1, ge=1, le=3)
+
+
+class EvaluationCaseInput(BaseModel):
+    query: str = Field(min_length=1, max_length=20_000)
+    expected_refs: list[EvaluationReferenceInput] = Field(min_length=1, max_length=50)
+    tags: list[str] = Field(default_factory=list, max_length=20)
+    notes: str = Field(default="", max_length=1000)
+
+
+class EvaluationSetCreateRequest(BaseModel):
+    kb_id: str = Field(min_length=1, max_length=160)
+    name: str = Field(min_length=1, max_length=160)
+    description: str = Field(default="", max_length=1000)
+
+
+class EvaluationSetUpdateRequest(BaseModel):
+    expected_revision: int = Field(ge=1)
+    name: str | None = Field(default=None, min_length=1, max_length=160)
+    description: str | None = Field(default=None, max_length=1000)
+    status: str | None = None
+
+
+class EvaluationCasesRequest(BaseModel):
+    expected_revision: int = Field(ge=1)
+    cases: list[EvaluationCaseInput] = Field(min_length=1, max_length=500)
+
+
+class EvaluationCaseUpdateRequest(BaseModel):
+    expected_revision: int = Field(ge=1)
+    case: EvaluationCaseInput
+
+
+class EvaluationTargetInput(BaseModel):
+    version_id: str = Field(min_length=1, max_length=200)
+    label: str | None = Field(default=None, max_length=120)
+    retrieval: RetrievalOptionsPayload | None = None
+
+
+class EvaluationRunCreateRequest(BaseModel):
+    eval_set_id: str = Field(min_length=1, max_length=200)
+    targets: list[EvaluationTargetInput] = Field(min_length=1, max_length=5)
+    baseline_version_id: str | None = Field(default=None, max_length=200)
+    ks: list[int] = Field(default_factory=lambda: [1, 3, 5, 10], min_length=1, max_length=8)
+
+
+class EvaluationGateUpdateRequest(BaseModel):
+    mode: str
+    min_recall_at_5: float = Field(ge=0, le=1)
+    max_mrr_regression: float = Field(ge=0, le=1)
+    max_citation_hit_regression: float = Field(ge=0, le=1)
+    max_no_result_increase: float = Field(ge=0, le=1)
+    max_p95_latency_ratio: float = Field(ge=1, le=10)
+    require_zero_errors: bool = True
+
+
+class PipelineActivationRequest(BaseModel):
+    evaluation_run_id: str | None = Field(default=None, max_length=200)
+
+
 def get_rag_service() -> RagService:
     """Return the process-wide RAG service."""
 
@@ -496,9 +577,11 @@ def get_rag_service() -> RagService:
 def set_rag_service_for_tests(service: RagService | None) -> None:
     """Replace the global RAG service in tests."""
 
-    global _rag_service, _pipeline_executor
+    global _rag_service, _pipeline_executor, _evaluation_store, _evaluation_executor
     _rag_service = service
     _pipeline_executor = None
+    _evaluation_store = None
+    _evaluation_executor = None
 
 
 def configure_pipeline_executor(*, run_registry: Any | None = None) -> KnowledgePipelineExecutor:
@@ -522,6 +605,45 @@ def get_pipeline_executor() -> KnowledgePipelineExecutor:
 def set_pipeline_executor_for_tests(executor: KnowledgePipelineExecutor | None) -> None:
     global _pipeline_executor
     _pipeline_executor = executor
+
+
+def get_evaluation_store() -> KnowledgeEvaluationStore:
+    global _evaluation_store
+    if _evaluation_store is None:
+        _evaluation_store = KnowledgeEvaluationStore(
+            get_rag_service().storage_dir / "evaluations.json"
+        )
+    return _evaluation_store
+
+
+def configure_evaluation_executor(*, run_registry: Any | None = None) -> KnowledgeEvaluationExecutor:
+    global _evaluation_executor
+    _evaluation_executor = KnowledgeEvaluationExecutor(
+        get_rag_service(),
+        get_evaluation_store(),
+        run_registry=run_registry,
+    )
+    return _evaluation_executor
+
+
+def get_evaluation_executor() -> KnowledgeEvaluationExecutor:
+    global _evaluation_executor
+    if _evaluation_executor is None:
+        _evaluation_executor = KnowledgeEvaluationExecutor(
+            get_rag_service(),
+            get_evaluation_store(),
+        )
+    return _evaluation_executor
+
+
+def set_evaluation_executor_for_tests(executor: KnowledgeEvaluationExecutor | None) -> None:
+    global _evaluation_executor
+    _evaluation_executor = executor
+
+
+def _require_knowledge_base(kb_id: str) -> None:
+    if not any(item["id"] == kb_id for item in get_rag_service().list_knowledge_bases()):
+        raise HTTPException(status_code=404, detail="Knowledge base not found.")
 
 
 @router.get("/retrieval-capabilities")
@@ -1008,6 +1130,249 @@ async def retry_pipeline_job(job_id: str) -> PipelineJobPayload:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
+@router.get("/evaluation-sets")
+async def list_evaluation_sets(kb_id: str) -> dict[str, Any]:
+    _require_knowledge_base(kb_id)
+    items = get_evaluation_store().list_sets(kb_id)
+    return {"evaluation_sets": items, "evaluation_set_count": len(items)}
+
+
+@router.post("/evaluation-sets")
+async def create_evaluation_set(payload: EvaluationSetCreateRequest) -> dict[str, Any]:
+    _require_knowledge_base(payload.kb_id)
+    return get_evaluation_store().create_set(
+        payload.kb_id,
+        payload.name,
+        payload.description,
+    )
+
+
+@router.get("/evaluation-sets/{eval_set_id}")
+async def get_evaluation_set(eval_set_id: str) -> dict[str, Any]:
+    try:
+        return get_evaluation_store().get_set(eval_set_id)
+    except EvaluationSetNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.patch("/evaluation-sets/{eval_set_id}")
+async def update_evaluation_set(
+    eval_set_id: str,
+    payload: EvaluationSetUpdateRequest,
+) -> dict[str, Any]:
+    try:
+        return get_evaluation_store().update_set(
+            eval_set_id,
+            expected_revision=payload.expected_revision,
+            name=payload.name,
+            description=payload.description,
+            status=payload.status,
+        )
+    except EvaluationSetNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except EvaluationRevisionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/evaluation-sets/{eval_set_id}/cases")
+async def add_evaluation_case(
+    eval_set_id: str,
+    payload: EvaluationCaseUpdateRequest,
+) -> dict[str, Any]:
+    try:
+        return get_evaluation_store().add_cases(
+            eval_set_id,
+            expected_revision=payload.expected_revision,
+            cases=[payload.case.model_dump()],
+        )
+    except EvaluationSetNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except EvaluationRevisionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.patch("/evaluation-sets/{eval_set_id}/cases/{case_id}")
+async def update_evaluation_case(
+    eval_set_id: str,
+    case_id: str,
+    payload: EvaluationCaseUpdateRequest,
+) -> dict[str, Any]:
+    try:
+        return get_evaluation_store().update_case(
+            eval_set_id,
+            case_id,
+            expected_revision=payload.expected_revision,
+            values=payload.case.model_dump(),
+        )
+    except EvaluationSetNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except EvaluationRevisionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.delete("/evaluation-sets/{eval_set_id}/cases/{case_id}")
+async def delete_evaluation_case(
+    eval_set_id: str,
+    case_id: str,
+    expected_revision: int,
+) -> dict[str, Any]:
+    try:
+        return get_evaluation_store().delete_case(
+            eval_set_id,
+            case_id,
+            expected_revision=expected_revision,
+        )
+    except EvaluationSetNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except EvaluationRevisionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/evaluation-sets/{eval_set_id}/import")
+async def import_evaluation_cases(
+    eval_set_id: str,
+    expected_revision: int,
+    file: UploadFile = File(...),
+) -> dict[str, Any]:
+    content = await file.read(1024 * 1024 + 1)
+    if len(content) > 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Evaluation import is limited to 1 MB.")
+    try:
+        text = content.decode("utf-8-sig")
+        if Path(file.filename or "").suffix.lower() == ".json":
+            raw = json.loads(text)
+            rows = raw.get("cases") if isinstance(raw, dict) else raw
+        else:
+            rows = []
+            for row in csv.DictReader(io.StringIO(text)):
+                references = json.loads(str(row.get("expected_refs") or "[]"))
+                tags = [item.strip() for item in str(row.get("tags") or "").split(",") if item.strip()]
+                rows.append(
+                    {
+                        "query": row.get("query"),
+                        "expected_refs": references,
+                        "tags": tags,
+                        "notes": row.get("notes") or "",
+                    }
+                )
+        if not isinstance(rows, list):
+            raise ValueError("Evaluation import must contain a list of cases.")
+        validated = [EvaluationCaseInput.model_validate(item).model_dump() for item in rows]
+        return get_evaluation_store().add_cases(
+            eval_set_id,
+            expected_revision=expected_revision,
+            cases=validated,
+        )
+    except EvaluationSetNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except EvaluationRevisionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/evaluation-gate/{kb_id}")
+async def get_evaluation_gate(kb_id: str) -> dict[str, Any]:
+    _require_knowledge_base(kb_id)
+    return get_evaluation_store().get_gate_policy(kb_id)
+
+
+@router.patch("/evaluation-gate/{kb_id}")
+async def update_evaluation_gate(
+    kb_id: str,
+    payload: EvaluationGateUpdateRequest,
+) -> dict[str, Any]:
+    _require_knowledge_base(kb_id)
+    try:
+        return get_evaluation_store().set_gate_policy(kb_id, payload.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/evaluation-runs")
+async def create_evaluation_run(payload: EvaluationRunCreateRequest) -> dict[str, Any]:
+    try:
+        evaluation_set = get_evaluation_store().get_set(payload.eval_set_id)
+        if evaluation_set.get("status") != "active" or not evaluation_set.get("cases"):
+            raise ValueError("Evaluation set must be active and contain at least one case.")
+        version_ids = [target.version_id for target in payload.targets]
+        if len(set(version_ids)) != len(version_ids):
+            raise ValueError("Evaluation targets must use distinct version IDs.")
+        if any(k < 1 or k > 50 for k in payload.ks):
+            raise ValueError("Evaluation ks must contain values between 1 and 50.")
+        evaluation_ks = sorted({*payload.ks, 5, 10})
+        if payload.baseline_version_id and payload.baseline_version_id not in version_ids:
+            raise ValueError("baseline_version_id must be included in targets.")
+        targets: list[dict[str, Any]] = []
+        for target in payload.targets:
+            version = get_rag_service().get_pipeline_version(target.version_id)
+            if version.get("kb_id") != evaluation_set.get("kb_id"):
+                raise ValueError("All evaluation versions must belong to the evaluation knowledge base.")
+            if version.get("status") not in {"ready", "active"}:
+                raise ValueError("Only ready or active knowledge versions can be evaluated.")
+            targets.append(
+                {
+                    "target_id": target.version_id,
+                    "version_id": target.version_id,
+                    "version": int(version["version"]),
+                    "label": target.label or f"v{version['version']}",
+                    "retrieval": target.retrieval.model_dump(exclude_none=True) if target.retrieval else {},
+                }
+            )
+        run = get_evaluation_store().create_run(
+            evaluation_set=evaluation_set,
+            targets=targets,
+            baseline_version_id=payload.baseline_version_id,
+            ks=evaluation_ks,
+            gate_policy=get_evaluation_store().get_gate_policy(str(evaluation_set["kb_id"])),
+        )
+        get_evaluation_executor().notify()
+        return run
+    except EvaluationSetNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PipelineVersionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/evaluation-runs")
+async def list_evaluation_runs(
+    kb_id: str,
+    status: str | None = None,
+    limit: int = 50,
+) -> dict[str, Any]:
+    _require_knowledge_base(kb_id)
+    runs = get_evaluation_store().list_runs(kb_id, status=status, limit=min(max(limit, 1), 100))
+    return {"evaluation_runs": runs, "evaluation_run_count": len(runs)}
+
+
+@router.get("/evaluation-runs/{run_id}")
+async def get_evaluation_run(run_id: str) -> dict[str, Any]:
+    try:
+        return get_evaluation_store().get_run(run_id)
+    except EvaluationRunNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/evaluation-runs/{run_id}/cancel")
+async def cancel_evaluation_run(run_id: str) -> dict[str, Any]:
+    try:
+        run = get_evaluation_store().request_cancel(run_id)
+        get_evaluation_executor().notify()
+        return run
+    except EvaluationRunNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except EvaluationStateError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @router.get("/pipeline/versions", response_model=PipelineVersionListResponse)
 async def list_pipeline_versions(kb_id: str) -> PipelineVersionListResponse:
     try:
@@ -1072,10 +1437,19 @@ async def query_pipeline_version(
 
 
 @router.post("/pipeline/versions/{version_id}/activate", response_model=PipelineVersionPayload)
-async def activate_pipeline_version(version_id: str) -> PipelineVersionPayload:
+async def activate_pipeline_version(
+    version_id: str,
+    payload: PipelineActivationRequest | None = None,
+) -> PipelineVersionPayload:
     try:
-        version = get_rag_service().activate_pipeline_version(version_id)
         stored = get_rag_service().get_pipeline_version(version_id)
+        get_evaluation_store().assert_promotion_allowed(
+            kb_id=str(stored["kb_id"]),
+            version_id=version_id,
+            evaluation_run_id=payload.evaluation_run_id if payload else None,
+            require_passed_run=False,
+        )
+        version = get_rag_service().activate_pipeline_version(version_id)
         await get_pipeline_executor().record_job_event(
             str(stored["job_id"]),
             event_type="knowledge_pipeline.version_activated",
@@ -1086,6 +1460,40 @@ async def activate_pipeline_version(version_id: str) -> PipelineVersionPayload:
         return PipelineVersionPayload.model_validate(version)
     except PipelineVersionNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except EvaluationPromotionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/pipeline/versions/{version_id}/promote", response_model=PipelineVersionPayload)
+async def promote_pipeline_version(
+    version_id: str,
+    payload: PipelineActivationRequest,
+) -> PipelineVersionPayload:
+    try:
+        stored = get_rag_service().get_pipeline_version(version_id)
+        get_evaluation_store().assert_promotion_allowed(
+            kb_id=str(stored["kb_id"]),
+            version_id=version_id,
+            evaluation_run_id=payload.evaluation_run_id,
+            require_passed_run=True,
+        )
+        version = get_rag_service().activate_pipeline_version(version_id)
+        await get_pipeline_executor().record_job_event(
+            str(stored["job_id"]),
+            event_type="knowledge_pipeline.version_promoted",
+            title="Evaluated knowledge index promoted",
+            summary=f"Version v{version['version']} passed the evaluation gate and is active.",
+            metadata={
+                "version_id": version_id,
+                "version": version["version"],
+                "evaluation_run_id": payload.evaluation_run_id,
+            },
+        )
+        return PipelineVersionPayload.model_validate(version)
+    except PipelineVersionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except EvaluationPromotionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.post("/pipeline/citations", response_model=CitationAnchorResponse)

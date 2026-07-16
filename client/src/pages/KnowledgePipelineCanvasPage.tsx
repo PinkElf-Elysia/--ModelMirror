@@ -584,6 +584,7 @@ export default function KnowledgePipelineCanvasPage() {
             <p className="mt-1 text-xs text-slate-400">Graph r{graphRevision} · Draft v{draftVersion} · {documents.length} 个数据源文档</p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
+            <Link className="rounded-lg border border-emerald-300/25 bg-emerald-300/10 px-3 py-2 text-sm font-semibold text-emerald-100 hover:bg-emerald-300/15" to={`/rag/${encodeURIComponent(kbId)}/evaluation`}>质量评估</Link>
             <button className="rounded-lg border border-white/10 bg-white/[0.05] px-3 py-2 text-sm font-semibold text-slate-200 hover:bg-white/[0.09] disabled:opacity-50" disabled={Boolean(busy)} onClick={() => void validateGraph()} type="button">校验</button>
             <button className="rounded-lg border border-hire-300/25 bg-hire-300/10 px-3 py-2 text-sm font-semibold text-hire-100 hover:bg-hire-300/15 disabled:opacity-50" disabled={Boolean(busy)} onClick={() => void saveGraph()} type="button">保存草稿</button>
             <button className="rounded-lg bg-hire-300 px-4 py-2 text-sm font-bold text-surface-950 hover:bg-hire-200 disabled:opacity-50" disabled={Boolean(busy) || documents.length === 0} onClick={() => void executeGraph()} type="button">执行流水线</button>
