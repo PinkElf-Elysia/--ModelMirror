@@ -698,3 +698,9 @@ The Xpert Studio fields `enableFileUnderstanding`, `memoryReadEnabled`, `memoryR
 `RuntimeInterrupt` 不属于普通可降级异常，任何审批中断或审批存储错误都不得触发工具 fallback。runner 会持久化变量、队列、已执行节点、ReAct 消息和轮次，由 `ApprovalCoordinator` 使用 lease 恢复；容器重启后不重跑已完成节点，也不重复调用已批准工具。
 
 新增 `runtime_approval_pending / runtime_approval_resolved` 兼容 SSE 事件和安全事件重放接口。GoalStep、AgentTask、Handoff 支持 `waiting_approval`；过期转 `needs_attention`。公开 Xpert App 部署预检拒绝两类交互式 HITL，普通 Workflow、私有 Xpert Chat、Goal 与 Handoff 保持可用。
+
+## 2026-07-16 隔离 Sandbox / Skill Runtime Middleware
+
+`sandbox_files`、`sandbox_shell` 与 `skills_runtime` 已可绑定到 `workflow_agent`。绑定只增加目标 Agent 的 Runtime 工具，不参与控制流；`toolMode=none` 配合 Sandbox 时不会隐式注册 MCP 工具。工作区按 conversation、goal/step、handoff 或 workflow task/node 隔离，Xpert Chat 的显式附件会复制到 `inputs/`。
+
+实际文件与命令执行位于完全断网的 Docker sidecar。命令只接受 argv、固定白名单和有限超时；路径必须留在当前 workspace，副作用通过 operation ID 幂等。`sandbox_shell.require_approval=true` 时，静态校验和运行时均要求同一 Agent 的 HITL 覆盖该工具。公开 Xpert App/API 部署拒绝 Sandbox/Skill 中间件。详细边界见 `docs/XPERT_SANDBOX.md`。

@@ -19,6 +19,8 @@ from server.xperts import (
     set_xpert_store_for_tests,
 )
 from server.xperts.app_models import XpertAppLimits
+from server.xperts.app_api import _deployment_preflight
+from server.xperts.app_models import XpertAppPolicy
 from server.xperts.app_store import (
     XpertAppAccessController,
     XpertAppAuthenticationError,
@@ -435,6 +437,51 @@ async def test_deploy_preflight_rejects_interactive_hitl(
         issue["code"] == "app_interactive_hitl_forbidden"
         for issue in denied.json()["detail"]["issues"]
     )
+
+
+def test_deploy_preflight_rejects_sandbox_runtime(stores) -> None:
+    xpert_store, _ = stores
+    created = xpert_store.create_xpert(name="Sandbox Helper", slug="sandbox-helper")
+    draft = created.draft.model_copy(deep=True)
+    agent = next(
+        node for node in draft.workflow.nodes if node.data.get("kind") == "workflow_agent"
+    )
+    draft.workflow.nodes.append(
+        type(agent).model_validate(
+            {
+                "id": "sandbox-files",
+                "type": "runtime_middleware",
+                "data": {
+                    "kind": "runtime_middleware",
+                    "runtimeMiddlewareId": "sandbox_files",
+                    "runtimeMiddlewareKind": "runtime_middleware.sandbox_files",
+                    "middlewarePriority": "20",
+                    "runtimeMiddlewareConfig": {"quota_mb": 256},
+                },
+            }
+        )
+    )
+    draft.workflow.edges.append(
+        type(draft.workflow.edges[0]).model_validate(
+            {
+                "id": "bind-sandbox",
+                "source": "sandbox-files",
+                "target": agent.id,
+                "sourceHandle": "middleware-binding",
+                "targetHandle": "middleware",
+            }
+        )
+    )
+    updated = xpert_store.update_xpert(
+        created.id, {"draft": draft.model_dump(mode="json")}
+    )
+    version = xpert_store.publish_xpert(
+        created.id, expected_revision=updated.draft_revision
+    )
+
+    result = _deployment_preflight(version, XpertAppPolicy())
+    assert result["valid"] is False
+    assert any(issue["code"] == "app_sandbox_forbidden" for issue in result["issues"])
 
 
 @pytest.mark.asyncio

@@ -48,9 +48,9 @@ except ModuleNotFoundError:
     )
 
 try:
-    from server.skills.api import router as skills_router
+    from server.skills.api import get_skill_manager, router as skills_router
 except ModuleNotFoundError:
-    from skills.api import router as skills_router
+    from skills.api import get_skill_manager, router as skills_router
 
 try:
     from server.xperts import (
@@ -182,6 +182,9 @@ try:
         RuntimeMiddlewareFatalError,
         RuntimeMiddlewareSpec,
         RuntimeTodoStore,
+        SandboxSidecarClient,
+        SandboxToolsetProvider,
+        SandboxWorkspaceStore,
         WorkflowExecution,
         WorkflowExecutionStore,
         RuntimeToolCall,
@@ -194,6 +197,7 @@ try:
         configure_approval_decision_validator,
         configure_runtime_approvals,
         configure_runtime_todo_store,
+        configure_runtime_sandbox,
         control_flow_edges,
         create_default_runtime,
         event_recorder,
@@ -203,10 +207,12 @@ try:
         middleware_spec,
         middleware_spec_from_node,
         register_todo_toolset_capability,
+        register_sandbox_toolset_capability,
         run_tool_with_runtime,
         runtime_middleware_registry,
         runtime_approval_router,
         runtime_todo_router,
+        runtime_sandbox_router,
         select_runtime_tools,
         todo_planning_instruction,
         validate_structured_output,
@@ -249,6 +255,9 @@ except ModuleNotFoundError:
         RuntimeMiddlewareFatalError,
         RuntimeMiddlewareSpec,
         RuntimeTodoStore,
+        SandboxSidecarClient,
+        SandboxToolsetProvider,
+        SandboxWorkspaceStore,
         WorkflowExecution,
         WorkflowExecutionStore,
         RuntimeToolCall,
@@ -261,6 +270,7 @@ except ModuleNotFoundError:
         configure_approval_decision_validator,
         configure_runtime_approvals,
         configure_runtime_todo_store,
+        configure_runtime_sandbox,
         control_flow_edges,
         create_default_runtime,
         event_recorder,
@@ -270,10 +280,12 @@ except ModuleNotFoundError:
         middleware_spec,
         middleware_spec_from_node,
         register_todo_toolset_capability,
+        register_sandbox_toolset_capability,
         run_tool_with_runtime,
         runtime_middleware_registry,
         runtime_approval_router,
         runtime_todo_router,
+        runtime_sandbox_router,
         select_runtime_tools,
         todo_planning_instruction,
         validate_structured_output,
@@ -429,6 +441,7 @@ app.include_router(xpert_apps_router)
 app.include_router(workflow_native_router)
 app.include_router(runtime_todo_router)
 app.include_router(runtime_approval_router)
+app.include_router(runtime_sandbox_router)
 
 request_windows: dict[str, deque[float]] = defaultdict(deque)
 mcp_connect_windows: dict[str, deque[float]] = defaultdict(deque)
@@ -443,6 +456,18 @@ runtime_todo_store = configure_runtime_todo_store(
     RuntimeTodoStore(storage_dir=AGENT_TASK_STORAGE_DIR or None)
 )
 workflow_todo_provider = TodoToolsetProvider(runtime_todo_store)
+sandbox_workspace_store = SandboxWorkspaceStore(
+    storage_dir=AGENT_TASK_STORAGE_DIR or None,
+    workspace_root=os.getenv("SANDBOX_WORKSPACE_ROOT", "").strip() or None,
+)
+sandbox_sidecar_client = SandboxSidecarClient()
+workflow_sandbox_provider = SandboxToolsetProvider(
+    sandbox_workspace_store,
+    sandbox_sidecar_client,
+    skill_manager=get_skill_manager(),
+    context_store=xpert_context_store,
+)
+configure_runtime_sandbox(sandbox_workspace_store, sandbox_sidecar_client)
 runtime_capabilities = CapabilityRegistry()
 workflow_mcp_pipeline = MiddlewarePipeline([event_recorder])
 workflow_tool_policy = ToolPermissionPolicy(allow_by_default=True)
@@ -472,6 +497,7 @@ runtime_capabilities.register(
     description="MCP tools runtime capability for workflow and agents.",
 )
 register_todo_toolset_capability(runtime_capabilities, workflow_todo_provider)
+register_sandbox_toolset_capability(runtime_capabilities, workflow_sandbox_provider)
 runtime_capabilities.register(
     "memory_tools",
     workflow_memory_provider,
@@ -500,6 +526,7 @@ async def validate_runtime_approval_decision(
         workflow_memory_provider,
         workflow_knowledge_provider,
         workflow_todo_provider,
+        workflow_sandbox_provider,
     ):
         matched_tool = await provider.find_tool(tool_name)
         if matched_tool is not None:
@@ -2937,6 +2964,39 @@ async def _run_workflow_response(
                 "todo_scope_type": scope_type,
                 "todo_scope_id": scope_id,
             }
+            sandbox_files = middleware_spec(specs, "sandbox_files")
+            sandbox_shell = middleware_spec(specs, "sandbox_shell")
+            skills_runtime = middleware_spec(specs, "skills_runtime")
+            if (
+                sandbox_shell is not None
+                and workflow_truthy(
+                    sandbox_shell.config.get("require_approval", True)
+                )
+            ):
+                hitl_tools = {
+                    item.strip()
+                    for item in re.split(
+                        r"[,\n]",
+                        str(
+                            hitl.config.get("interrupt_on_tools")
+                            if hitl is not None
+                            else ""
+                        ),
+                    )
+                    if item.strip()
+                }
+                if not ({"sandbox_shell", "*"} & hitl_tools):
+                    raise RuntimeMiddlewareFatalError(
+                        "sandbox_shell requires human_in_the_loop approval coverage."
+                    )
+            context_metadata["sandbox_config"] = {
+                **(sandbox_files.config if sandbox_files is not None else {}),
+                **(sandbox_shell.config if sandbox_shell is not None else {}),
+            }
+            context_metadata["skills_config"] = (
+                dict(skills_runtime.config) if skills_runtime is not None else {}
+            )
+            context_metadata["runtime_run_type"] = runtime_run_type
             run_context = task_state.get("runtime_metadata") or {}
             for metadata_key in (
                 "xpert_id",
@@ -2945,6 +3005,9 @@ async def _run_workflow_response(
                 "goal_step_id",
                 "handoff_id",
                 "agent_task_id",
+                "file_asset_ids",
+                "file_owner_xpert_id",
+                "file_conversation_id",
             ):
                 metadata_value = run_context.get(metadata_key)
                 if metadata_value is not None:
@@ -3068,6 +3131,9 @@ async def _run_workflow_response(
             if not matched_tool:
                 matched_tool = await workflow_todo_provider.find_tool(tool_name)
                 capability_name = "todo_tools"
+            if not matched_tool:
+                matched_tool = await workflow_sandbox_provider.find_tool(tool_name)
+                capability_name = "sandbox_tools"
             if capability_name == "mcp_tools" and not app_capability_allowed(
                 "allow_tools"
             ):
@@ -3083,6 +3149,8 @@ async def _run_workflow_response(
                     "allow_knowledge_read"
                 ):
                     raise PermissionError("Xpert App knowledge read access is disabled.")
+            if capability_name == "sandbox_tools" and runtime_run_type == "xpert_app":
+                raise PermissionError("Xpert App Sandbox and Skill access is disabled.")
             if not matched_tool:
                 raise ValueError(f"MCP 工具未注册：{tool_name}")
             run_context = task_state.get("runtime_metadata") or {}
@@ -3124,10 +3192,19 @@ async def _run_workflow_response(
                         "session_id": matched_tool.session_id,
                         "server_id": matched_tool.server_id,
                         "node_id": node.id,
+                        "task_id": task_id,
+                        "run_id": effective_context.metadata.get("run_id"),
+                        "runtime_run_type": runtime_run_type,
                         "xpert_id": run_context.get("xpert_id"),
                         "conversation_id": run_context.get("conversation_id"),
                         "goal_id": run_context.get("goal_id"),
+                        "goal_step_id": run_context.get("goal_step_id"),
                         "handoff_id": run_context.get("handoff_id"),
+                        "file_asset_ids": run_context.get("file_asset_ids") or [],
+                        "file_owner_xpert_id": run_context.get("file_owner_xpert_id"),
+                        "file_conversation_id": run_context.get("file_conversation_id"),
+                        "sandbox_config": effective_context.metadata.get("sandbox_config") or {},
+                        "skills_config": effective_context.metadata.get("skills_config") or {},
                         "todo_scope_type": todo_scope_type,
                         "todo_scope_id": todo_scope_id,
                         **dict(metadata or {}),
@@ -3165,17 +3242,20 @@ async def _run_workflow_response(
         async def workflow_available_tools(
             tool_names_raw: Any,
             *,
+            include_mcp: bool = True,
             include_memory_read: bool = False,
             include_memory_write: bool = False,
             include_knowledge_read: bool = False,
             include_knowledge_write: bool = False,
             include_todo: bool = False,
+            include_sandbox: bool = False,
+            include_skills: bool = False,
             middleware_specs: list[RuntimeMiddlewareSpec] | None = None,
             apply_policy_filter: bool = False,
         ) -> list[Any]:
             tools = (
                 await workflow_mcp_provider.list_tools()
-                if app_capability_allowed("allow_tools")
+                if include_mcp and app_capability_allowed("allow_tools")
                 else []
             )
             requested_tool_names = {
@@ -3217,6 +3297,16 @@ async def _run_workflow_response(
                 )
             if include_todo:
                 tools.extend(await workflow_todo_provider.list_tools())
+            if include_sandbox or include_skills:
+                sandbox_tools = await workflow_sandbox_provider.list_tools()
+                if include_sandbox:
+                    tools.extend(
+                        tool for tool in sandbox_tools if tool.name.startswith("sandbox_")
+                    )
+                if include_skills:
+                    tools.extend(
+                        tool for tool in sandbox_tools if tool.name.startswith("skill_")
+                    )
             if middleware_specs is not None and apply_policy_filter:
                 allowed_tools: list[Any] = []
                 for tool in tools:
@@ -3224,6 +3314,8 @@ async def _run_workflow_response(
                         "memory": "memory_tools",
                         "knowledge": "knowledge_tools",
                         "todo": "todo_tools",
+                        "sandbox": "sandbox_tools",
+                        "skill": "sandbox_tools",
                     }.get(str(tool.provider or ""), "mcp_tools")
                     if agent_tool_policy(
                         middleware_specs,
@@ -3246,12 +3338,15 @@ async def _run_workflow_response(
             temperature: float,
             output_variable: str,
             run_id: str | None = None,
+            include_mcp: bool = True,
             include_memory_read: bool = False,
             include_memory_write: bool = False,
             include_knowledge_read: bool = False,
             include_knowledge_write: bool = False,
             knowledge_base_ids: list[str] | None = None,
             include_todo: bool = False,
+            include_sandbox: bool = False,
+            include_skills: bool = False,
             pipeline: MiddlewarePipeline | None = None,
             middleware_context: MiddlewareContext | None = None,
             middleware_specs: list[RuntimeMiddlewareSpec] | None = None,
@@ -3261,11 +3356,14 @@ async def _run_workflow_response(
         ) -> tuple[str, list[dict[str, Any]]]:
             available_tools = await workflow_available_tools(
                 tool_names_raw,
+                include_mcp=include_mcp,
                 include_memory_read=include_memory_read,
                 include_memory_write=include_memory_write,
                 include_knowledge_read=include_knowledge_read,
                 include_knowledge_write=include_knowledge_write,
                 include_todo=include_todo,
+                include_sandbox=include_sandbox,
+                include_skills=include_skills,
                 middleware_specs=middleware_specs,
                 apply_policy_filter=selector_spec is not None,
             )
@@ -3275,6 +3373,8 @@ async def _run_workflow_response(
                     if include_todo
                     else set()
                 )
+                if include_skills:
+                    required_tools.update({"skill_list", "skill_read", "skill_stage"})
                 required_tools.update(
                     item.strip()
                     for item in re.split(
@@ -3631,6 +3731,24 @@ async def _run_workflow_response(
                         }
                         raise
                     tool_result_text = runtime_tool_result_text(call_result)
+                    if tool_name.startswith("sandbox_"):
+                        sandbox_event = {
+                            "event": (
+                                "sandbox_artifact_published"
+                                if tool_name == "sandbox_publish_artifact"
+                                else "sandbox_operation_finished"
+                            ),
+                            "node_id": node.id,
+                            "node_title": title,
+                            "node_type": kind,
+                            "tool_name": tool_name,
+                            "workspace_id": call_result.metadata.get("workspace_id"),
+                            "operation_id": call_result.metadata.get("operation_id"),
+                            "artifact_id": call_result.metadata.get("artifact_id"),
+                        }
+                        if run_id:
+                            sandbox_event["run_id"] = run_id
+                        events.append(sandbox_event)
                     if run_id:
                         await run_registry.record_checkpoint(
                             run_id,
@@ -4883,6 +5001,20 @@ async def _run_workflow_response(
                         ).strip() or TEXT_FALLBACK_MODEL
                         agent_specs = agent_middleware_specs(node.id)
                         todo_spec = middleware_spec(agent_specs, "todo_planner")
+                        sandbox_files_spec = middleware_spec(
+                            agent_specs, "sandbox_files"
+                        )
+                        sandbox_shell_spec = middleware_spec(
+                            agent_specs, "sandbox_shell"
+                        )
+                        skills_runtime_spec = middleware_spec(
+                            agent_specs, "skills_runtime"
+                        )
+                        sandbox_enabled = (
+                            sandbox_files_spec is not None
+                            or sandbox_shell_spec is not None
+                        )
+                        skills_enabled = skills_runtime_spec is not None
                         selector_spec = middleware_spec(
                             agent_specs,
                             "llm_tool_selector",
@@ -5474,7 +5606,12 @@ async def _run_workflow_response(
                                         "fallback_used": fallback_used,
                                     },
                                 )
-                                if tool_mode == "none" and todo_spec is None:
+                                if (
+                                    tool_mode == "none"
+                                    and todo_spec is None
+                                    and not sandbox_enabled
+                                    and not skills_enabled
+                                ):
                                     direct_messages = base_agent_messages(
                                         role_prompt,
                                         task_input,
@@ -5557,12 +5694,15 @@ async def _run_workflow_response(
                                         temperature=0.7,
                                         output_variable=output_variable,
                                         run_id=workflow_agent_run.run_id,
+                                        include_mcp=(tool_mode == "mcp_tools"),
                                         include_memory_read=memory_read_enabled,
                                         include_memory_write=memory_write_enabled,
                                         include_knowledge_read=knowledge_read_enabled,
                                         include_knowledge_write=knowledge_write_enabled,
                                         knowledge_base_ids=knowledge_base_ids,
                                         include_todo=todo_spec is not None,
+                                        include_sandbox=sandbox_enabled,
+                                        include_skills=skills_enabled,
                                         pipeline=agent_pipeline,
                                         middleware_context=agent_context,
                                         middleware_specs=agent_specs,

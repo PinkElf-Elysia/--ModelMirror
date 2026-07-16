@@ -29,6 +29,9 @@ def test_registry_list_returns_builtin_nodes() -> None:
         "todo_planner",
         "llm_tool_selector",
         "human_in_the_loop",
+        "sandbox_files",
+        "sandbox_shell",
+        "skills_runtime",
     }
     for node in nodes:
         assert node.id

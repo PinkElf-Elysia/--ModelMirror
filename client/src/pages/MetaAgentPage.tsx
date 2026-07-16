@@ -10,6 +10,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import PageContainer from "../components/PageContainer";
 import RuntimeApprovalPanel from "../components/runtime/RuntimeApprovalPanel";
+import SandboxWorkspacePanel from "../components/runtime/SandboxWorkspacePanel";
 import WorkflowNodeCard from "../components/workflow/WorkflowNodeCard";
 import WorkflowRun from "../components/workflow/WorkflowRun";
 import { models } from "../data/models";
@@ -1252,6 +1253,13 @@ export default function MetaAgentPage() {
                       task: {handoff.task_id}
                     </p>
                     {renderHandoffActions(handoff)}
+                    <div className="mt-3 overflow-hidden rounded-lg border border-white/10">
+                      <SandboxWorkspacePanel
+                        compact
+                        scopeId={handoff.handoff_id}
+                        scopeType="handoff"
+                      />
+                    </div>
                   </article>
                 ))
               )}

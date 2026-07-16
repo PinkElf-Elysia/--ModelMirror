@@ -1,4 +1,36 @@
 services:
+  sandbox:
+    build:
+      context: ./server/sandbox_sidecar
+    container_name: modelmirror-sandbox
+    network_mode: none
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 512m
+    cpus: 1.0
+    tmpfs:
+      - /tmp:rw,nosuid,noexec,size=64m
+    volumes:
+      - sandbox_socket:/run/modelmirror-sandbox
+      - sandbox_workspaces:/workspaces
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import json,socket; s=socket.socket(socket.AF_UNIX); s.connect('/run/modelmirror-sandbox/sandbox.sock'); s.sendall(b'{\"action\":\"health\"}\\n'); assert json.loads(s.recv(4096))['ok']",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
   new-api:
     image: calciumion/new-api:latest
     container_name: modelmirror-new-api
@@ -25,6 +57,8 @@ services:
       context: ./server
     container_name: modelmirror-server
     depends_on:
+      sandbox:
+        condition: service_healthy
       new-api:
         condition: service_healthy
     env_file:
@@ -41,6 +75,8 @@ services:
       HANDOFF_EXECUTOR_ENABLED: "true"
       HANDOFF_EXECUTOR_MAX_CONCURRENCY: "2"
       GOAL_COORDINATOR_ENABLED: "true"
+      SANDBOX_SOCKET_PATH: /run/modelmirror-sandbox/sandbox.sock
+      SANDBOX_WORKSPACE_ROOT: /app/sandbox-workspaces
     ports:
       - "8000:8000"
     volumes:
@@ -49,6 +85,8 @@ services:
       - ./server/skills/installed:/app/skills/installed
       - ./server/xperts/storage:/app/xperts/storage
       - ./server/xpert_runtime/storage:/app/xpert_runtime/storage
+      - sandbox_socket:/run/modelmirror-sandbox
+      - sandbox_workspaces:/app/sandbox-workspaces:ro
     restart: unless-stopped
     healthcheck:
       test:
@@ -73,3 +111,7 @@ services:
     ports:
       - "5173:80"
     restart: unless-stopped
+
+volumes:
+  sandbox_socket:
+  sandbox_workspaces:

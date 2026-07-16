@@ -102,10 +102,20 @@ Todo 管理接口：
 - 审批列表、事件和 checkpoint 只保存脱敏参数、ID、状态和错误摘要；完整 prompt、工具结果与密钥不得进入公共接口。
 - `RuntimeInterrupt` 与审批存储错误属于不可 fail-open 中断，工具 runner 不得降级为直接调用 Provider。
 
+## Sandbox Files / Shell / Skills Runtime
+
+`sandbox_files`、`sandbox_shell` 与 `skills_runtime` 已进入真实执行。绑定后的 `workflow_agent` 会按运行来源创建隔离工作区，并注册文件、命令、Skill 和产物工具；只启用 Sandbox 时不会隐式暴露 MCP 工具。
+
+sidecar 完全断网且不挂载主服务源码、`.env` 或密钥。命令只接受 argv 数组和固定白名单，工作区路径拒绝绝对路径、`..` 与 symlink 逃逸。每个副作用工具调用使用稳定 operation ID，HITL 恢复不会重复执行已完成操作。
+
+`sandbox_shell.require_approval=true` 时，validate 与运行时编译都要求同一 Agent 的 `human_in_the_loop.interrupt_on_tools` 覆盖 `sandbox_shell` 或 `*`。Skill 必须显式安装和选择，按需读取或 staging，脚本不会自动执行。产物发布到受控 `artifacts/` 后由管理 API 下载，物理路径不会外泄。详细契约见 `docs/XPERT_SANDBOX.md`。
+
+公开 Xpert App/API 的部署预检与运行时都拒绝三类 Sandbox/Skill 中间件。
+
 ## 后续阶段
 
-1. `XPERT-MIDDLEWARE-SANDBOX-03`：沙箱文件、命令执行、Skill、浏览器和客户端工具。
-2. `XPERT-MIDDLEWARE-AUTOMATION-04`：定时任务、Ralph Loop、知识写入器和插件 Hook。
-3. `XPERT-MIDDLEWARE-CONSOLIDATION-05`：补齐剩余能力并统一发布预检和测试矩阵。
+1. `XPERT-MIDDLEWARE-BROWSER-04`：独立联网浏览器与客户端工具，建立 SSRF 和域名策略。
+2. `XPERT-MIDDLEWARE-AUTOMATION-05`：定时任务、Ralph Loop、知识写入器和插件 Hook。
+3. `XPERT-MIDDLEWARE-CONSOLIDATION-06`：补齐剩余能力并统一发布预检和测试矩阵。
 
-浏览器、沙箱、自动化和 Workflow Engine V2 仍不属于当前范围。
+联网浏览器、客户端工具、自动化和 Workflow Engine V2 仍不属于当前范围。

@@ -1304,6 +1304,62 @@ async def test_human_in_the_loop_middleware_validates_rules_and_timeout(
 
 
 @pytest.mark.asyncio
+async def test_sandbox_shell_requires_bound_hitl_and_valid_config(
+    client: httpx.AsyncClient,
+) -> None:
+    workflow = middleware_binding_workflow()
+    sandbox = workflow["nodes"][-1]
+    sandbox["id"] = "sandbox-shell"
+    sandbox["data"].update(
+        {
+            "runtimeMiddlewareId": "sandbox_shell",
+            "runtimeMiddlewareKind": "runtime_middleware.sandbox_shell",
+            "runtimeMiddlewareConfig": {
+                "allowed_commands": "python,node,rg",
+                "timeout_seconds": 60,
+                "require_approval": True,
+            },
+        }
+    )
+    workflow["edges"][-1]["source"] = "sandbox-shell"
+
+    missing_hitl = await validate(client, workflow)
+    assert "sandbox_shell_requires_hitl" in issue_codes(missing_hitl)
+
+    workflow["nodes"].append(
+        {
+            "id": "sandbox-hitl",
+            "type": "runtime_middleware",
+            "data": {
+                "kind": "runtime_middleware",
+                "runtimeMiddlewareId": "human_in_the_loop",
+                "runtimeMiddlewareKind": "runtime_middleware.human_in_the_loop",
+                "middlewarePriority": "30",
+                "runtimeMiddlewareConfig": {
+                    "interrupt_on_tools": "sandbox_shell",
+                    "final_confirmation": False,
+                },
+            },
+        }
+    )
+    workflow["edges"].append(
+        {
+            "id": "bind-sandbox-hitl",
+            "source": "sandbox-hitl",
+            "target": "workflow_agent",
+            "sourceHandle": "middleware-binding",
+            "targetHandle": "middleware",
+        }
+    )
+    valid = await validate(client, workflow)
+    assert valid["valid"] is True, valid["issues"]
+
+    sandbox["data"]["runtimeMiddlewareConfig"]["allowed_commands"] = "bash"
+    invalid = await validate(client, workflow)
+    assert "invalid_runtime_middleware_sandbox_commands" in issue_codes(invalid)
+
+
+@pytest.mark.asyncio
 async def test_validate_agent_task_node_ok(client: httpx.AsyncClient) -> None:
     workflow = linear_workflow()
     workflow["nodes"][1] = {

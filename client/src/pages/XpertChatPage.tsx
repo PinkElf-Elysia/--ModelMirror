@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import PageContainer from "../components/PageContainer";
 import RuntimeApprovalPanel from "../components/runtime/RuntimeApprovalPanel";
+import SandboxWorkspacePanel from "../components/runtime/SandboxWorkspacePanel";
 import {
   type XpertConversationMessage,
   type XpertConversation,
@@ -827,6 +828,15 @@ export default function XpertChatPage() {
                   onResolved={() => resumeApprovalExecution()}
                   taskId={taskId}
                   title="Xpert 等待审批"
+                />
+              </div>
+            ) : null}
+            {xpert && conversationId ? (
+              <div className="mb-3 overflow-hidden rounded-lg border border-white/10">
+                <SandboxWorkspacePanel
+                  compact
+                  scopeId={`${xpert.id}:${conversationId}`}
+                  scopeType="conversation"
                 />
               </div>
             ) : null}

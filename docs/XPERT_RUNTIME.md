@@ -192,6 +192,14 @@ App execution uses `run_type=xpert_app` and the same classic runner. The deploym
 - Knowledge ingestion, evaluation, and approval-triggered candidate builds are local and single-process; they have no distributed lease or automatic activation. Image understanding, evaluation, and Knowledge Agent approval writes are available, while multimodal embeddings, layout coordinates, and GraphRAG remain out of scope.
 - A normal /workflow run remains unchanged and continues to use its existing local-draft behavior.
 
+## Isolated Sandbox Runtime
+
+Private Workflow, Xpert Chat, Goal, and Handoff runs may compile `sandbox_files`, `sandbox_shell`, and `skills_runtime` into the target workflow Agent. A dedicated Docker sidecar owns the workspaces and exposes only a Unix Domain Socket. It has no network, no host port, a read-only root, dropped capabilities, resource limits, and no mount of the repository, `.env`, credentials, or Runtime stores.
+
+Workspaces are scoped to conversation, goal/step, handoff, or workflow task/node. Inputs, editable files, staged Skills, artifacts, and idempotency records use separate directories. File paths are relative and symlink-safe. Shell calls accept argv arrays only, use an explicit executable allowlist, terminate process groups on timeout, truncate output, and replay completed operation results instead of repeating side effects.
+
+Sandbox and Skill tools still pass through the Agent pipeline, permission policy, durable HITL, audit, and safe checkpoint handling. `sandbox_shell.require_approval` is enforced during validation and again when the Agent runtime is compiled. Published Xpert Apps reject these middleware types. See `docs/XPERT_SANDBOX.md`.
+
 ## Agent-Bound Middleware Core
 
 Classic workflow supports a non-control binding edge from `runtime_middleware` to `workflow_agent` through `sourceHandle="middleware-binding"` and `targetHandle="middleware"`. Binding nodes are excluded from topological scheduling, variable reachability, and independent execution. A middleware node can bind to one Agent only and cannot simultaneously participate in control flow. Bound middleware is ordered by priority and node ID; legacy linear middleware remains compatible.
