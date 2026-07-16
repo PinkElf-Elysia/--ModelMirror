@@ -2,7 +2,30 @@
 
 本文件说明模镜本地 RAG 模块的架构、API、扩展方式和测试方法。该模块位于 `server/rag/`，前端入口为 `/rag`，聊天页可选择知识库进行检索增强问答。
 
-最后更新日期：2026-07-15
+最后更新日期：2026-07-16
+
+## 2026-07-16 增量：离线检索评估与 Promotion Gate
+
+新增 `/rag/:kbId/evaluation` 与文件型 Evaluation Store。知识库可维护带 revision 的问题集，通过检索预览把稳定 `source_document_id`、chunk/source block 和页码标记为期望引用，再对最多 5 个不可变候选版本运行同一快照。
+
+指标包括 Recall@1/5、MRR@10、nDCG@10、Citation Hit/Coverage、无结果率、错误率和 P95 延迟。评估执行使用 `generate_answer=false`，不会为每条测试问题调用回答模型；安全结果仅保存排名、ID、分数、耗时和错误摘要。
+
+新增 API 族：
+
+```text
+GET/POST   /api/rag/evaluation-sets
+GET/PATCH  /api/rag/evaluation-sets/{evaluation_set_id}
+POST       /api/rag/evaluation-sets/{evaluation_set_id}/cases
+PATCH/DELETE /api/rag/evaluation-sets/{evaluation_set_id}/cases/{case_id}
+POST       /api/rag/evaluation-sets/{evaluation_set_id}/import
+GET/PATCH  /api/rag/evaluation-gate/{kb_id}
+POST/GET   /api/rag/evaluation-runs
+GET        /api/rag/evaluation-runs/{run_id}
+POST       /api/rag/evaluation-runs/{run_id}/cancel
+POST       /api/rag/pipeline/versions/{version_id}/promote
+```
+
+Promotion Gate 的 `advisory` 模式只提示，`required` 模式则强制校验运行成功、知识库与候选版本一致、评估集 revision 未过期且阈值通过。旧索引与现有查询协议保持兼容；Chat、Workflow、Xpert、Goal 与 App 仍只消费当前 active version。
 
 ## 2026-07-15 增量：图像与扫描 PDF 知识理解
 
@@ -500,7 +523,7 @@ curl -X POST http://localhost:8000/api/rag/pipeline/citations \
 
 前端 `/rag` 的“知识流水线 Beta”折叠区已展示当前知识库的数据源、处理器、分块器、图像理解 stage 草稿，并保留 assets / artifacts / chunks 计数和最近 artifacts。后续知识类工作流节点、Agent 引用和 citation 面板会基于这层 schema 继续扩展。
 
-最后更新日期：2026-07-09
+最后更新日期：2026-07-16
 
 ## 2026-07-10 Update: Knowledge Pipeline Draft Config And Preflight
 
@@ -512,4 +535,4 @@ The local RAG pipeline now exposes a safe editable draft layer:
 
 Validation boundaries: `chunk_size` must stay between 100 and 4000, and `chunk_overlap` must be non-negative and smaller than `chunk_size`. Image understanding is optional, but enabling it requires an explicit vision model and the renderer/model-gateway preflight. Draft changes alone do not rebuild indexes or change chat/workflow retrieval until a candidate version is executed and activated. Responses must not expose local stored paths, full chunk text, images, embeddings, prompts, tool outputs, or secrets.
 
-Last updated: 2026-07-10
+Last updated: 2026-07-16

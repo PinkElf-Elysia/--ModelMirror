@@ -30,14 +30,18 @@ except ModuleNotFoundError:
 
 try:
     from server.rag.api import (
+        configure_evaluation_executor,
         configure_pipeline_executor,
+        get_evaluation_executor,
         get_pipeline_executor,
         get_rag_service,
         router as rag_router,
     )
 except ModuleNotFoundError:
     from rag.api import (
+        configure_evaluation_executor,
         configure_pipeline_executor,
+        get_evaluation_executor,
         get_pipeline_executor,
         get_rag_service,
         router as rag_router,
@@ -380,6 +384,7 @@ agent_task_store = AgentTaskStore(
 goal_store = GoalStore(storage_dir=AGENT_TASK_STORAGE_DIR or None)
 run_registry = RunRegistry()
 knowledge_pipeline_executor = configure_pipeline_executor(run_registry=run_registry)
+knowledge_evaluation_executor = configure_evaluation_executor(run_registry=run_registry)
 handoff_executor: HandoffExecutor | None = None
 goal_coordinator: GoalCoordinator | None = None
 runtime_capabilities.register(
@@ -6501,6 +6506,7 @@ async def team_chat(payload: TeamChatRequest, request: Request):
 async def start_mcp_ttl_cleanup() -> None:
     mcp_manager.start_ttl_cleanup(on_cleanup=tool_registry.unregister_sessions)
     get_pipeline_executor().start()
+    get_evaluation_executor().start()
     get_handoff_executor().start()
     get_goal_coordinator().start()
 
@@ -6508,6 +6514,7 @@ async def start_mcp_ttl_cleanup() -> None:
 @app.on_event("shutdown")
 async def shutdown_mcp_sessions() -> None:
     await get_pipeline_executor().stop()
+    await get_evaluation_executor().stop()
     if goal_coordinator is not None:
         await goal_coordinator.stop()
     if handoff_executor is not None:

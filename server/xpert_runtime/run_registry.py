@@ -17,6 +17,7 @@ RuntimeRunType = Literal[
     "chat",
     "knowledge_citation",
     "knowledge_pipeline",
+    "knowledge_evaluation",
 ]
 RuntimeRunStatus = Literal["pending", "running", "completed", "failed", "cancelled"]
 

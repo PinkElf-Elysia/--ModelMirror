@@ -19,6 +19,8 @@
 
 > 2026-07-15 Multimodal Knowledge：Knowledge Canvas 的 `image_understanding` 已从占位升级为可选真实阶段，支持图片和扫描 PDF 的 VLM OCR/视觉摘要，并继续进入既有 Processor 与双索引。Classic workflow 不新增字段；`knowledge_retrieval` 与 `knowledge_citation` 自动消费 active version，并可获得页码、视觉类型与来源 block 的兼容扩展字段。
 
+> 2026-07-16 Knowledge Evaluation：新增离线 Evaluation Set、跨版本指标运行与 Promotion Gate。该能力只约束候选知识版本的激活，不新增 workflow 节点，也不改变 `knowledge_retrieval`、`knowledge_citation`、SSE 或 workflow definition；已发布 workflow、Xpert、Goal 与 App 继续自动消费通过门禁后激活的 active version。
+
 > 2026-07-09 Workflow Agent 运行策略：`workflow_agent` 开始接入 Xpert 式侧栏的第一批真实运行语义：失败重试、备用模型、禁用输出、异常转空输出。该变更不改变节点协议或 SSE wire format，不影响普通 `agent`，也不接文件理解、并行工具调用、记忆写入或输出 schema 强校验。
 
 > 2026-07-10 Runtime Ops 第二版：`/runtime` 已补充 MCP 状态细分、失败 run 摘要、checkpoint severity 统计、禁用的“重试待接入”入口，以及 `GET /api/runtime/environment-summary` 脱敏环境摘要。该变更仍只做运行观测，不触发真实重试、MCP 启停、Skill 安装/卸载或环境变量编辑。
@@ -108,7 +110,7 @@ Classic workflow 每次运行会登记一条 `workflow` run，并在 `workflow_m
 
 workflow-native 是模镜自研工作流引擎的渐进式实验线。它不会替换当前稳定的 `/workflow` Dify iframe 入口，也不会改动 `/rag`。当前阶段提供静态图校验能力，并在 classic 运行器中试点少量本地节点执行，让团队先把数据模型、API 契约、错误模型和测试流程立起来。
 
-最后更新日期：2026-07-13
+最后更新日期：2026-07-16
 维护人：模镜团队
 
 ## 2026-07-10 增量：Xpert Handoff 自动执行
@@ -637,7 +639,7 @@ Classic workflow 新增 handoff_router 节点，作为 workflow_agent -> Handoff
 
 当前边界：不是 OpenAI function calling，不自动创建 Handoff，不接真实多 Agent 调度，也不保存完整 prompt、工具输出、模型回答或 API key 到运行元数据中。
 
-最后更新日期：2026-07-09
+最后更新日期：2026-07-16
 
 ## 长期 Goal 调度（2026-07-10）
 
