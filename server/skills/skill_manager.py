@@ -168,6 +168,21 @@ class SkillManager:
                 )
             return skill_md.read_text(encoding="utf-8", errors="replace")
 
+    def get_skill_directory(self, skill_id: str) -> Path:
+        """Return the validated installed directory for Runtime staging."""
+
+        normalized_skill_id = self._validate_skill_id(skill_id)
+        with self._lock:
+            installed = self._read_metadata()
+            if normalized_skill_id not in installed:
+                raise SkillNotFoundError(f"Skill '{normalized_skill_id}' is not installed")
+            target = self._safe_skill_dir(normalized_skill_id)
+            if not target.exists() or not target.is_dir():
+                raise SkillNotFoundError(
+                    f"Skill '{normalized_skill_id}' directory is unavailable"
+                )
+            return target
+
     def _ensure_dirs(self) -> None:
         self.installed_dir.mkdir(parents=True, exist_ok=True)
         self.tmp_dir.mkdir(parents=True, exist_ok=True)

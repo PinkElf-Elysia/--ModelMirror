@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import PageContainer from "../components/PageContainer";
 import RuntimeApprovalPanel from "../components/runtime/RuntimeApprovalPanel";
+import SandboxWorkspacePanel from "../components/runtime/SandboxWorkspacePanel";
 import {
   type ConversationGoal,
   type GoalStatus,
@@ -342,6 +343,13 @@ export default function ConversationGoalsPage() {
                   scopeType="goal"
                   title="Goal 步骤等待审批"
                 />
+                <div className="mt-3 overflow-hidden rounded-lg border border-white/10">
+                  <SandboxWorkspacePanel
+                    compact
+                    scopeIdPrefix={`${goal.goal_id}:`}
+                    scopeType="goal"
+                  />
+                </div>
               </div>
 
               {goal.status === "planning" ? (

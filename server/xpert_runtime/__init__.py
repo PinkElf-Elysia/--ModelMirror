@@ -140,6 +140,26 @@ from .toolset import (
     register_mcp_toolset_capability,
 )
 from .tool_runner import run_tool_with_runtime
+from .sandbox_api import configure_runtime_sandbox, router as runtime_sandbox_router
+from .sandbox_client import (
+    LocalSandboxClient,
+    SandboxClientError,
+    SandboxSidecarClient,
+)
+from .sandbox_store import (
+    RuntimeArtifact,
+    SandboxNotFoundError,
+    SandboxOperation,
+    SandboxValidationError,
+    SandboxWorkspace,
+    SandboxWorkspaceStore,
+)
+from .sandbox_toolset import (
+    SANDBOX_TOOL_NAMES,
+    SKILL_TOOL_NAMES,
+    SandboxToolsetProvider,
+    register_sandbox_toolset_capability,
+)
 
 __all__ = [
     "AgentMiddleware",
@@ -255,4 +275,19 @@ __all__ = [
     "configure_approval_coordinator",
     "configure_approval_decision_validator",
     "configure_runtime_approvals",
+    "configure_runtime_sandbox",
+    "runtime_sandbox_router",
+    "LocalSandboxClient",
+    "SandboxClientError",
+    "SandboxSidecarClient",
+    "RuntimeArtifact",
+    "SandboxNotFoundError",
+    "SandboxOperation",
+    "SandboxValidationError",
+    "SandboxWorkspace",
+    "SandboxWorkspaceStore",
+    "SANDBOX_TOOL_NAMES",
+    "SKILL_TOOL_NAMES",
+    "SandboxToolsetProvider",
+    "register_sandbox_toolset_capability",
 ]

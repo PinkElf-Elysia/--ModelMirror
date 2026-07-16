@@ -254,6 +254,12 @@ def validate_workflow_graph(workflow: NativeWorkflowDefinition) -> ValidateWorkf
         nodes_by_id={node.id: node for node in workflow.nodes},
         kinds_by_id=kinds_by_id,
     )
+    validate_sandbox_middleware_bindings(
+        workflow.nodes,
+        valid_edges,
+        issues,
+        kinds_by_id=kinds_by_id,
+    )
     order = topological_order(workflow.nodes, valid_edges, issues)
 
     has_errors = any(issue.severity == "error" for issue in issues)
@@ -1574,6 +1580,59 @@ def validate_node_configuration(
                 20,
                 integer=True,
             )
+        if middleware_id == "sandbox_files":
+            _validate_middleware_number(
+                issues,
+                node.id,
+                config,
+                "quota_mb",
+                16,
+                1024,
+                integer=True,
+            )
+        if middleware_id == "sandbox_shell":
+            _validate_middleware_number(
+                issues,
+                node.id,
+                config,
+                "timeout_seconds",
+                1,
+                300,
+                integer=True,
+            )
+            commands = [
+                value.strip()
+                for value in re.split(r"[,\n]+", str(config.get("allowed_commands") or ""))
+                if value.strip()
+            ]
+            supported = {"python", "python3", "node", "npm", "npx", "git", "rg"}
+            if not commands or any(command not in supported for command in commands):
+                issues.append(
+                    ValidationIssue(
+                        code="invalid_runtime_middleware_sandbox_commands",
+                        message="sandbox_shell allowed_commands must be a non-empty subset of the supported command list.",
+                        node_id=node.id,
+                    )
+                )
+        if middleware_id == "skills_runtime":
+            skill_ids = [
+                value.strip()
+                for value in re.split(r"[,\n]+", str(config.get("skill_ids") or ""))
+                if value.strip()
+            ]
+            auto_discover = str(config.get("auto_discover", False)).lower() in {
+                "true",
+                "1",
+                "yes",
+            }
+            if len(skill_ids) > 10 or (not auto_discover and not skill_ids):
+                issues.append(
+                    ValidationIssue(
+                        code="invalid_runtime_middleware_skills",
+                        message="skills_runtime needs 1-10 Skill IDs unless auto_discover is enabled.",
+                        node_id=node.id,
+                    )
+                )
         if middleware_id == "human_in_the_loop":
             _validate_middleware_number(
                 issues,
@@ -2116,6 +2175,64 @@ def validate_edges(
             )
 
     return valid_edges
+
+
+def validate_sandbox_middleware_bindings(
+    nodes: list[NativeWorkflowNode],
+    edges: list[NativeWorkflowEdge],
+    issues: list[ValidationIssue],
+    *,
+    kinds_by_id: dict[str, str],
+) -> None:
+    """Require an explicit HITL gate for bound shell execution."""
+
+    nodes_by_id = {node.id: node for node in nodes}
+    bound_by_agent: dict[str, list[NativeWorkflowNode]] = defaultdict(list)
+    for edge in edges:
+        if not is_middleware_binding_edge(edge):
+            continue
+        source = nodes_by_id.get(edge.source)
+        if source is not None and kinds_by_id.get(source.id) == "runtime_middleware":
+            bound_by_agent[edge.target].append(source)
+
+    for agent_id, middleware_nodes in bound_by_agent.items():
+        shell_nodes = [
+            node
+            for node in middleware_nodes
+            if str(node.data.get("runtimeMiddlewareId") or "") == "sandbox_shell"
+            and str(
+                (node.data.get("runtimeMiddlewareConfig") or {}).get(
+                    "require_approval", True
+                )
+            ).lower()
+            not in {"false", "0", "no"}
+        ]
+        if not shell_nodes:
+            continue
+        hitl_tools: set[str] = set()
+        for node in middleware_nodes:
+            if str(node.data.get("runtimeMiddlewareId") or "") != "human_in_the_loop":
+                continue
+            config = node.data.get("runtimeMiddlewareConfig") or {}
+            hitl_tools.update(
+                value.strip()
+                for value in re.split(
+                    r"[,\n]+", str(config.get("interrupt_on_tools") or "")
+                )
+                if value.strip()
+            )
+        if "*" not in hitl_tools and "sandbox_shell" not in hitl_tools:
+            for shell_node in shell_nodes:
+                issues.append(
+                    ValidationIssue(
+                        code="sandbox_shell_requires_hitl",
+                        message=(
+                            "sandbox_shell require_approval needs a human_in_the_loop "
+                            "binding that interrupts sandbox_shell or '*'."
+                        ),
+                        node_id=shell_node.id,
+                    )
+                )
 
 
 def topological_order(

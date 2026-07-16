@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 
 from fastapi import APIRouter, File, HTTPException, Query, UploadFile
 from pydantic import BaseModel, Field
@@ -32,10 +33,54 @@ from .store import (
 )
 from .validation import validate_xpert_definition
 
+try:
+    from server.skills.api import get_skill_manager
+    from server.workflow_native.schemas import ValidationIssue
+except ModuleNotFoundError:
+    from skills.api import get_skill_manager
+    from workflow_native.schemas import ValidationIssue
+
 
 router = APIRouter(prefix="/api/xperts", tags=["xperts"])
 _xpert_store: XpertStore | None = None
 _xpert_context_store: XpertContextStore | None = None
+
+
+def _validate_installed_skills(
+    xpert: XpertDefinition,
+    validation: XpertValidationResult,
+) -> XpertValidationResult:
+    installed = {
+        item.skill_id for item in get_skill_manager().list_installed_skills()
+    }
+    issues = list(validation.issues)
+    for node in xpert.draft.workflow.nodes:
+        data = node.data if isinstance(node.data, dict) else {}
+        if str(data.get("runtimeMiddlewareId") or "") != "skills_runtime":
+            continue
+        config = data.get("runtimeMiddlewareConfig") or {}
+        if str(config.get("auto_discover", False)).lower() in {"true", "1", "yes"}:
+            continue
+        skill_ids = {
+            value.strip()
+            for value in re.split(r"[,\n]+", str(config.get("skill_ids") or ""))
+            if value.strip()
+        }
+        missing = sorted(skill_ids - installed)
+        if missing:
+            issues.append(
+                ValidationIssue(
+                    code="xpert_skills_not_installed",
+                    message=f"Install referenced Skills before publish: {', '.join(missing)}.",
+                    node_id=node.id,
+                )
+            )
+    return validation.model_copy(
+        update={
+            "valid": not any(issue.severity == "error" for issue in issues),
+            "issues": issues,
+        }
+    )
 
 
 class XpertCreateRequest(BaseModel):
@@ -184,7 +229,7 @@ async def update_xpert(xpert_id: str, payload: XpertUpdateRequest) -> XpertDefin
 async def validate_xpert(xpert_id: str) -> XpertValidationResult:
     try:
         xpert = await asyncio.to_thread(get_xpert_store().get_xpert, xpert_id)
-        return validate_xpert_definition(xpert)
+        return _validate_installed_skills(xpert, validate_xpert_definition(xpert))
     except XpertStoreError as exc:
         _raise_store_error(exc)
 
@@ -194,7 +239,9 @@ async def publish_xpert(xpert_id: str, payload: XpertPublishRequest) -> XpertVer
     try:
         store = get_xpert_store()
         xpert = await asyncio.to_thread(store.get_xpert, xpert_id)
-        validation = validate_xpert_definition(xpert)
+        validation = _validate_installed_skills(
+            xpert, validate_xpert_definition(xpert)
+        )
         if not validation.valid:
             raise HTTPException(
                 status_code=422,

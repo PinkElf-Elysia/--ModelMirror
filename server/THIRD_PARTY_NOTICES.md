@@ -29,3 +29,11 @@ validate Draft 2020-12 schemas for Agent structured output. No upstream
 source code is copied into this repository.
 
 Project: https://github.com/python-jsonschema/jsonschema
+
+## Sandbox sidecar
+
+The isolated Sandbox sidecar is implemented independently by ModelMirror and
+uses official CPython and Node.js runtime images plus Debian packages for Git
+and ripgrep. Its complete runtime notice is included at
+`/usr/share/doc/modelmirror-sandbox/THIRD_PARTY_NOTICES.md` inside the sidecar
+image. No Xpert or Dify source code is copied into the Sandbox implementation.

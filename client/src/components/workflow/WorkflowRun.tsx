@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import RuntimeApprovalPanel from "../runtime/RuntimeApprovalPanel";
+import SandboxWorkspacePanel from "../runtime/SandboxWorkspacePanel";
 import {
   type WorkflowDefinition,
   type WorkflowRunEvent,
@@ -677,6 +678,14 @@ export default function WorkflowRun({
             title="Agent 运行审批"
           />
         </div>
+      ) : null}
+
+      {taskId ? (
+        <SandboxWorkspacePanel
+          compact
+          scopeIdPrefix={`${taskId}:`}
+          scopeType="workflow"
+        />
       ) : null}
 
       {error ? (

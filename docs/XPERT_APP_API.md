@@ -10,6 +10,8 @@
 
 公开 App 和 OpenAI 兼容 API 不支持交互式暂停。部署预检会拒绝包含 `human_intervention` 节点，或通过 middleware binding 绑定 `human_in_the_loop` 的版本。该限制仅作用于公开部署；私有 Xpert Chat、Workflow、Goal 和 Handoff 可以使用持久化审批与恢复。
 
+公开 App/API 同样禁止部署 `sandbox_files`、`sandbox_shell` 与 `skills_runtime`。这些能力可执行文件和代码，只允许在私有 Workflow、Xpert Chat、Goal 与 Handoff 中通过隔离 sidecar 和 HITL 使用；不能通过 App policy 开关放行。
+
 动态知识工具受独立 `allow_knowledge_read` 策略控制。显式开启后，App 只能读取已发布工作流中 `knowledgeBaseIds` 固定的活动知识版本；不能扩展到其他知识库。任何启用了 `knowledgeWriteEnabled` 的 Xpert 都不能部署为 App，公开运行时也永远不注册 `knowledge_propose_write`。固定的 `knowledge_retrieval` / `knowledge_citation` 节点保持兼容，并继续随部署快照运行。
 
 ## 访问凭据

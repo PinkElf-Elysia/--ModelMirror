@@ -337,6 +337,18 @@ class XpertContextStore:
         except OSError as exc:
             raise XpertContextError("Xpert file artifact is unavailable.") from exc
 
+    def read_file_bytes(self, asset: XpertFileAsset) -> bytes:
+        """Read the original attachment for explicit Sandbox staging."""
+
+        path = (self.files_dir / asset.storage_key).resolve(strict=False)
+        root = self.files_dir.resolve()
+        if root not in path.parents or path.is_symlink():
+            raise XpertContextError("Xpert file asset path is unsafe.")
+        try:
+            return path.read_bytes()
+        except OSError as exc:
+            raise XpertContextError("Xpert file asset is unavailable.") from exc
+
     def build_file_context(
         self,
         xpert_id: str,

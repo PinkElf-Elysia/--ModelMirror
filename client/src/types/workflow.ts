@@ -148,6 +148,9 @@ export interface WorkflowRunEvent {
     | "human_intervention_pending"
     | "runtime_approval_pending"
     | "runtime_approval_resolved"
+    | "sandbox_operation_started"
+    | "sandbox_operation_finished"
+    | "sandbox_artifact_published"
     | "heartbeat"
     | "node_end"
     | "workflow_end"
@@ -162,6 +165,9 @@ export interface WorkflowRunEvent {
   approval_status?: string;
   request_type?: "tool_call" | "final_output" | "manual_input";
   tool_name?: string;
+  workspace_id?: string;
+  operation_id?: string;
+  artifact_id?: string;
   sequence?: number;
   output?: string;
   output_variable?: string;

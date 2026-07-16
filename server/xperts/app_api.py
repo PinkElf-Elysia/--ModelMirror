@@ -119,6 +119,7 @@ def _deployment_preflight(version: XpertVersion, policy: XpertAppPolicy) -> dict
     has_dynamic_knowledge_read = False
     has_dynamic_knowledge_write = False
     has_interactive_hitl = False
+    has_sandbox_runtime = False
     for node in version.workflow.nodes:
         data = node.data if isinstance(node.data, dict) else {}
         kind = str(data.get("kind") or node.type)
@@ -147,6 +148,12 @@ def _deployment_preflight(version: XpertVersion, policy: XpertAppPolicy) -> dict
             and data.get("runtimeMiddlewareId") == "human_in_the_loop"
         ):
             has_interactive_hitl = True
+        if (
+            kind == "runtime_middleware"
+            and data.get("runtimeMiddlewareId")
+            in {"sandbox_files", "sandbox_shell", "skills_runtime"}
+        ):
+            has_sandbox_runtime = True
         if kind in {"agent_handoff", "handoff_router"}:
             has_handoff = True
         if kind in {"knowledge_retrieval", "knowledge_citation"}:
@@ -193,6 +200,13 @@ def _deployment_preflight(version: XpertVersion, policy: XpertAppPolicy) -> dict
             {
                 "code": "app_interactive_hitl_forbidden",
                 "message": "Public Xpert Apps cannot deploy interactive HITL workflows.",
+            }
+        )
+    if has_sandbox_runtime:
+        issues.append(
+            {
+                "code": "app_sandbox_forbidden",
+                "message": "Public Xpert Apps cannot deploy Sandbox or Skill runtime middleware.",
             }
         )
     if has_knowledge or has_dynamic_knowledge_read:

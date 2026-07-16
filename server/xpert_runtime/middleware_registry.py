@@ -384,6 +384,116 @@ def register_builtin_middleware_nodes(
 
     registry.register(
         RuntimeMiddlewareNode(
+            id="sandbox_files",
+            kind="runtime_middleware.sandbox_files",
+            title="隔离文件工作区",
+            description="为 Agent 提供离线隔离的文件读写、搜索和产物发布能力。",
+            category="tool",
+            icon="FolderLock",
+            fields=[
+                RuntimeMiddlewareField(
+                    name="quota_mb",
+                    label="工作区配额（MB）",
+                    type="number",
+                    default=256,
+                    min_value=16,
+                    max_value=1024,
+                ),
+                RuntimeMiddlewareField(
+                    name="copy_attachments",
+                    label="复制本次附件到 inputs/",
+                    type="boolean",
+                    default=True,
+                ),
+            ],
+            tags=["agent", "sandbox", "files", "artifacts"],
+            metadata={
+                "middleware_name": "sandbox_files",
+                "runtime_hook": "agent_tools",
+                "capability_name": "sandbox_tools",
+                "network": "none",
+                "real_execution": True,
+            },
+        )
+    )
+
+    registry.register(
+        RuntimeMiddlewareNode(
+            id="sandbox_shell",
+            kind="runtime_middleware.sandbox_shell",
+            title="隔离命令执行",
+            description="在无网络 sidecar 中以 argv 方式执行受控 Python、Node、git 和 rg 命令。",
+            category="tool",
+            icon="SquareTerminal",
+            fields=[
+                RuntimeMiddlewareField(
+                    name="allowed_commands",
+                    label="允许命令（逗号或换行分隔）",
+                    type="textarea",
+                    default="python,python3,node,npm,npx,git,rg",
+                    rows=3,
+                ),
+                RuntimeMiddlewareField(
+                    name="timeout_seconds",
+                    label="命令超时（秒）",
+                    type="number",
+                    default=60,
+                    min_value=1,
+                    max_value=300,
+                ),
+                RuntimeMiddlewareField(
+                    name="require_approval",
+                    label="每次命令需要人工审批",
+                    type="boolean",
+                    default=True,
+                ),
+            ],
+            tags=["agent", "sandbox", "shell", "hitl"],
+            metadata={
+                "middleware_name": "sandbox_shell",
+                "runtime_hook": "agent_tools",
+                "capability_name": "sandbox_tools",
+                "network": "none",
+                "real_execution": True,
+            },
+        )
+    )
+
+    registry.register(
+        RuntimeMiddlewareNode(
+            id="skills_runtime",
+            kind="runtime_middleware.skills_runtime",
+            title="Skill 执行指导",
+            description="按需读取已安装 Skill，并安全复制到隔离工作区供 Agent 显式执行。",
+            category="tool",
+            icon="BookOpenCheck",
+            fields=[
+                RuntimeMiddlewareField(
+                    name="skill_ids",
+                    label="已安装 Skill ID（逗号或换行分隔）",
+                    type="textarea",
+                    rows=4,
+                ),
+                RuntimeMiddlewareField(
+                    name="auto_discover",
+                    label="允许发现全部已安装 Skill",
+                    type="boolean",
+                    default=False,
+                ),
+            ],
+            tags=["agent", "sandbox", "skills"],
+            metadata={
+                "middleware_name": "skills_runtime",
+                "runtime_hook": "agent_tools",
+                "capability_name": "sandbox_tools",
+                "network": "none",
+                "real_execution": True,
+            },
+        )
+    )
+
+    registry.register(
+        RuntimeMiddlewareNode(
             id="human_in_the_loop",
             kind="runtime_middleware.human_in_the_loop",
             title="人机审批",
