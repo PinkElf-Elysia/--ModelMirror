@@ -21,3 +21,11 @@ Project: https://python-pillow.org/
 These libraries are used for local image validation and PDF page rendering.
 No source code from Xpert or Dify is copied into ModelMirror; those projects
 are used only as behavioral and domain-model references where permitted.
+
+## jsonschema
+
+`jsonschema` is distributed under the MIT License. ModelMirror uses it to
+validate Draft 2020-12 schemas for Agent structured output. No upstream
+source code is copied into this repository.
+
+Project: https://github.com/python-jsonschema/jsonschema

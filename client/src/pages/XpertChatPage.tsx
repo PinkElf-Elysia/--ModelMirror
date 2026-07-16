@@ -91,6 +91,18 @@ interface KnowledgeWriteProposalSummary {
   status: string;
 }
 
+interface RuntimeTodoItem {
+  todo_id: string;
+  scope_type: string;
+  scope_id: string;
+  title: string;
+  details: string;
+  status: "pending" | "in_progress" | "completed" | "cancelled" | "archived";
+  priority: number;
+  order: number;
+  revision: number;
+}
+
 async function responseError(response: Response) {
   try {
     const payload = (await response.json()) as { detail?: string; error?: string };
@@ -98,6 +110,19 @@ async function responseError(response: Response) {
   } catch {
     return `请求失败：${response.status}`;
   }
+}
+
+function todoScopeId(xpertId: string, conversationId: string) {
+  return `${xpertId}:${conversationId}`;
+}
+
+async function listConversationTodos(xpertId: string, conversationId: string) {
+  const response = await fetch(
+    `/api/runtime/todos?scope_type=conversation&scope_id=${encodeURIComponent(todoScopeId(xpertId, conversationId))}`,
+  );
+  if (!response.ok) throw new Error(await responseError(response));
+  const payload = (await response.json()) as { items?: RuntimeTodoItem[] };
+  return payload.items ?? [];
 }
 
 function eventSummary(event: XpertRunEvent) {
@@ -134,10 +159,14 @@ export default function XpertChatPage() {
   const [creatingGoal, setCreatingGoal] = useState(false);
   const [conversations, setConversations] = useState<XpertConversation[]>([]);
   const [conversationId, setConversationId] = useState("");
+  const [summaryRevision, setSummaryRevision] = useState(0);
   const [files, setFiles] = useState<XpertFileAsset[]>([]);
   const [selectedFileIds, setSelectedFileIds] = useState<string[]>([]);
   const [memories, setMemories] = useState<XpertMemoryRecord[]>([]);
   const [memoryCandidates, setMemoryCandidates] = useState<XpertMemoryCandidate[]>([]);
+  const [todos, setTodos] = useState<RuntimeTodoItem[]>([]);
+  const [newTodoTitle, setNewTodoTitle] = useState("");
+  const [todoBusy, setTodoBusy] = useState(false);
   const [contextLoading, setContextLoading] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [showContext, setShowContext] = useState(false);
@@ -226,28 +255,32 @@ export default function XpertChatPage() {
     cancelled = false,
   ) {
     if (!selectedXpertId || !nextConversationId) return;
-    const [conversation, filePayload, memoryPayload, candidatePayload] = await Promise.all([
+    const [conversation, filePayload, memoryPayload, candidatePayload, todoItems] = await Promise.all([
       getXpertConversation(selectedXpertId, nextConversationId),
       listXpertFiles(selectedXpertId, nextConversationId),
       listXpertMemories(selectedXpertId, nextConversationId),
       listXpertMemoryCandidates(selectedXpertId, nextConversationId),
+      listConversationTodos(selectedXpertId, nextConversationId),
     ]);
     if (cancelled) return;
     setConversationId(nextConversationId);
     setMessages(conversation.messages ?? []);
+    setSummaryRevision(conversation.summary_revision ?? 0);
     setFiles(filePayload.items);
     setSelectedFileIds(filePayload.items.slice(0, 5).map((item) => item.asset_id));
     setMemories(memoryPayload.items);
     setMemoryCandidates(candidatePayload.items);
+    setTodos(todoItems);
   }
 
   async function refreshContext() {
     if (!xpert || !conversationId) return;
-    const [conversationPayload, filePayload, memoryPayload, candidatePayload] = await Promise.all([
+    const [conversationPayload, filePayload, memoryPayload, candidatePayload, todoItems] = await Promise.all([
       listXpertConversations(xpert.id),
       listXpertFiles(xpert.id, conversationId),
       listXpertMemories(xpert.id, conversationId),
       listXpertMemoryCandidates(xpert.id, conversationId),
+      listConversationTodos(xpert.id, conversationId),
     ]);
     setConversations(conversationPayload.items);
     setFiles(filePayload.items);
@@ -256,6 +289,7 @@ export default function XpertChatPage() {
     );
     setMemories(memoryPayload.items);
     setMemoryCandidates(candidatePayload.items);
+    setTodos(todoItems);
   }
 
   async function refreshKnowledgeProposals(selectedXpertId = xpert?.id) {
@@ -352,6 +386,73 @@ export default function XpertChatPage() {
     if (!xpert) return;
     await decideXpertMemoryCandidate(xpert.id, candidateId, action);
     await refreshContext();
+  }
+
+  async function createTodo() {
+    if (!xpert || !conversationId || !newTodoTitle.trim()) return;
+    setTodoBusy(true);
+    try {
+      const response = await fetch("/api/runtime/todos", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          scope_type: "conversation",
+          scope_id: todoScopeId(xpert.id, conversationId),
+          title: newTodoTitle.trim(),
+        }),
+      });
+      if (!response.ok) throw new Error(await responseError(response));
+      setNewTodoTitle("");
+      setTodos(await listConversationTodos(xpert.id, conversationId));
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Todo 创建失败");
+    } finally {
+      setTodoBusy(false);
+    }
+  }
+
+  async function patchTodo(
+    todo: RuntimeTodoItem,
+    patch: Partial<Pick<RuntimeTodoItem, "status" | "order" | "title">>,
+  ) {
+    if (!xpert || !conversationId) return;
+    setTodoBusy(true);
+    try {
+      const response = await fetch(`/api/runtime/todos/${todo.todo_id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          scope_type: "conversation",
+          scope_id: todoScopeId(xpert.id, conversationId),
+          revision: todo.revision,
+          ...patch,
+        }),
+      });
+      if (!response.ok) throw new Error(await responseError(response));
+      setTodos(await listConversationTodos(xpert.id, conversationId));
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Todo 更新失败");
+    } finally {
+      setTodoBusy(false);
+    }
+  }
+
+  async function archiveTodo(todo: RuntimeTodoItem) {
+    if (!xpert || !conversationId) return;
+    setTodoBusy(true);
+    try {
+      const scopeId = todoScopeId(xpert.id, conversationId);
+      const response = await fetch(
+        `/api/runtime/todos/${todo.todo_id}?scope_type=conversation&scope_id=${encodeURIComponent(scopeId)}&revision=${todo.revision}`,
+        { method: "DELETE" },
+      );
+      if (!response.ok) throw new Error(await responseError(response));
+      setTodos(await listConversationTodos(xpert.id, conversationId));
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Todo 归档失败");
+    } finally {
+      setTodoBusy(false);
+    }
   }
 
   async function loadTrace(nextRunId: string, nextTaskId: string) {
@@ -714,6 +815,11 @@ export default function XpertChatPage() {
 
           {showContext ? (
             <div className="mt-4 min-h-0 flex-1 space-y-5 overflow-y-auto">
+              {summaryRevision > 0 ? (
+                <div className="rounded-lg border border-cyan-300/20 bg-cyan-300/[0.06] px-3 py-2 text-[11px] text-cyan-100">
+                  会话上下文摘要已生效 · revision {summaryRevision}
+                </div>
+              ) : null}
               <section>
                 <div className="flex items-center justify-between">
                   <h3 className="text-xs font-semibold text-white">{"\u4f1a\u8bdd\u9644\u4ef6"}</h3>
@@ -795,6 +901,105 @@ export default function XpertChatPage() {
                       暂无待审批知识写入
                     </p>
                   )}
+                </div>
+              </section>
+
+              <section>
+                <div className="flex items-center justify-between">
+                  <h3 className="text-xs font-semibold text-white">Todo 规划</h3>
+                  <span className="text-[10px] text-slate-500">
+                    {todos.filter((todo) => todo.status !== "archived").length}
+                  </span>
+                </div>
+                <p className="mt-1 text-[10px] leading-4 text-slate-500">
+                  当前会话独立保存；Agent 可通过 Todo Runtime 工具同步维护。
+                </p>
+                <div className="mt-2 flex gap-2">
+                  <input
+                    className="min-w-0 flex-1 rounded-md border border-white/10 bg-ink-950/60 px-2 py-1.5 text-[11px] text-white outline-none focus:border-indigo-300/50"
+                    disabled={todoBusy}
+                    onChange={(event) => setNewTodoTitle(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") void createTodo();
+                    }}
+                    placeholder="新增 Todo"
+                    value={newTodoTitle}
+                  />
+                  <button
+                    className="rounded-md bg-indigo-300 px-2.5 py-1.5 text-[11px] font-semibold text-ink-950 disabled:opacity-50"
+                    disabled={todoBusy || !newTodoTitle.trim()}
+                    onClick={() => void createTodo()}
+                    type="button"
+                  >
+                    添加
+                  </button>
+                </div>
+                <div className="mt-2 space-y-2">
+                  {todos.filter((todo) => todo.status !== "archived").map((todo, index) => (
+                    <div
+                      className="flex items-start gap-2 rounded-lg border border-indigo-300/15 bg-indigo-300/[0.05] p-2.5"
+                      key={todo.todo_id}
+                    >
+                      <input
+                        checked={todo.status === "completed"}
+                        className="mt-1"
+                        disabled={todoBusy}
+                        onChange={(event) =>
+                          void patchTodo(todo, {
+                            status: event.target.checked ? "completed" : "pending",
+                          })
+                        }
+                        type="checkbox"
+                      />
+                      <div className="min-w-0 flex-1">
+                        <p className={`text-[11px] font-semibold ${todo.status === "completed" ? "text-slate-500 line-through" : "text-slate-100"}`}>
+                          {todo.title}
+                        </p>
+                        <p className="mt-1 text-[10px] text-slate-500">
+                          {todo.status} · rev {todo.revision}
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <button
+                          className="px-1 text-[10px] text-slate-400 disabled:opacity-30"
+                          disabled={todoBusy || index === 0}
+                          onClick={() => void patchTodo(todo, { order: Math.max(0, todo.order - 1) })}
+                          title="上移"
+                          type="button"
+                        >
+                          ↑
+                        </button>
+                        <button
+                          className="px-1 text-[10px] text-slate-400 disabled:opacity-30"
+                          disabled={
+                            todoBusy ||
+                            index ===
+                              todos.filter((item) => item.status !== "archived")
+                                .length -
+                                1
+                          }
+                          onClick={() => void patchTodo(todo, { order: todo.order + 1 })}
+                          title="下移"
+                          type="button"
+                        >
+                          ↓
+                        </button>
+                        <button
+                          className="px-1 text-[10px] text-rose-200"
+                          disabled={todoBusy}
+                          onClick={() => void archiveTodo(todo)}
+                          type="button"
+                        >
+                          归档
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                  {todos.filter((todo) => todo.status !== "archived").length === 0 ? (
+                    <p className="rounded-lg border border-dashed border-white/10 p-3 text-center text-xs text-slate-500">
+                      暂无 Todo
+                    </p>
+                  ) : null}
                 </div>
               </section>
 

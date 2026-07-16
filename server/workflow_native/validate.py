@@ -5,6 +5,9 @@ import json
 from collections import defaultdict, deque
 from string import Formatter
 
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import SchemaError
+
 from .schemas import (
     NativeWorkflowDefinition,
     NativeWorkflowEdge,
@@ -244,7 +247,13 @@ def validate_workflow_graph(workflow: NativeWorkflowDefinition) -> ValidateWorkf
             validate_variable_references(node, kinds_by_id[node.id], available_variables)
         )
 
-    valid_edges = validate_edges(workflow.edges, node_ids, issues)
+    valid_edges = validate_edges(
+        workflow.edges,
+        node_ids,
+        issues,
+        nodes_by_id={node.id: node for node in workflow.nodes},
+        kinds_by_id=kinds_by_id,
+    )
     order = topological_order(workflow.nodes, valid_edges, issues)
 
     has_errors = any(issue.severity == "error" for issue in issues)
@@ -1480,6 +1489,92 @@ def validate_node_configuration(
                             )
                         )
 
+        priority_raw = data.get("middlewarePriority", 100)
+        try:
+            priority = int(str(priority_raw))
+        except (TypeError, ValueError):
+            priority = -1
+        if not 0 <= priority <= 1000:
+            issues.append(
+                ValidationIssue(
+                    code="invalid_runtime_middleware_priority",
+                    message="runtime_middleware middlewarePriority must be an integer from 0 to 1000.",
+                    node_id=node.id,
+                )
+            )
+
+        config = data.get("runtimeMiddlewareConfig")
+        config = config if isinstance(config, dict) else {}
+        if middleware_id == "context_compression":
+            for name, minimum, maximum in (
+                ("max_context_tokens", 2048, 200000),
+                ("keep_recent_messages", 2, 40),
+                ("summary_max_tokens", 256, 4000),
+                ("max_tool_output_chars", 500, 20000),
+            ):
+                _validate_middleware_number(
+                    issues,
+                    node.id,
+                    config,
+                    name,
+                    minimum,
+                    maximum,
+                    integer=True,
+                )
+            _validate_middleware_number(
+                issues,
+                node.id,
+                config,
+                "trigger_ratio",
+                0.5,
+                0.95,
+                integer=False,
+            )
+        if middleware_id == "structured_output":
+            raw_schema = config.get("schema_json")
+            try:
+                schema = raw_schema if isinstance(raw_schema, dict) else json.loads(str(raw_schema or ""))
+                if not isinstance(schema, dict) or not schema:
+                    raise ValueError("schema must be a non-empty object")
+                Draft202012Validator.check_schema(schema)
+            except (ValueError, TypeError, json.JSONDecodeError, SchemaError) as exc:
+                issues.append(
+                    ValidationIssue(
+                        code="invalid_runtime_middleware_structured_output_schema",
+                        message=f"structured_output schema_json must be a valid JSON Schema: {str(exc)[:200]}",
+                        node_id=node.id,
+                    )
+                )
+            _validate_middleware_number(
+                issues,
+                node.id,
+                config,
+                "repair_attempts",
+                0,
+                1,
+                integer=True,
+            )
+        if middleware_id == "todo_planner":
+            _validate_middleware_number(
+                issues,
+                node.id,
+                config,
+                "max_items",
+                1,
+                100,
+                integer=True,
+            )
+        if middleware_id == "llm_tool_selector":
+            _validate_middleware_number(
+                issues,
+                node.id,
+                config,
+                "max_selected_tools",
+                1,
+                20,
+                integer=True,
+            )
+
     return issues
 
 
@@ -1910,8 +2005,13 @@ def validate_edges(
     edges: list[NativeWorkflowEdge],
     node_ids: set[str],
     issues: list[ValidationIssue],
+    *,
+    nodes_by_id: dict[str, NativeWorkflowNode],
+    kinds_by_id: dict[str, str],
 ) -> list[NativeWorkflowEdge]:
     valid_edges: list[NativeWorkflowEdge] = []
+    bindings_by_source: dict[str, list[NativeWorkflowEdge]] = defaultdict(list)
+    control_node_ids: set[str] = set()
 
     for edge in edges:
         source_missing = edge.source not in node_ids
@@ -1926,6 +2026,56 @@ def validate_edges(
             )
             continue
         valid_edges.append(edge)
+        if is_middleware_binding_edge(edge):
+            bindings_by_source[edge.source].append(edge)
+            source_kind = kinds_by_id.get(edge.source)
+            target_kind = kinds_by_id.get(edge.target)
+            if (
+                source_kind != "runtime_middleware"
+                or target_kind != "workflow_agent"
+                or str(edge.sourceHandle or "").strip() != "middleware-binding"
+            ):
+                issues.append(
+                    ValidationIssue(
+                        code="invalid_middleware_binding",
+                        message=(
+                            "Middleware binding edges must connect the runtime_middleware "
+                            "middleware-binding handle to a workflow_agent middleware handle."
+                        ),
+                        edge_id=edge.id,
+                    )
+                )
+        else:
+            control_node_ids.update({edge.source, edge.target})
+            if str(edge.sourceHandle or "").strip() == "middleware-binding":
+                issues.append(
+                    ValidationIssue(
+                        code="invalid_middleware_binding",
+                        message=(
+                            "The middleware-binding source handle can only connect to a "
+                            "workflow_agent middleware handle."
+                        ),
+                        edge_id=edge.id,
+                    )
+                )
+
+    for source_id, binding_edges in bindings_by_source.items():
+        if len(binding_edges) > 1:
+            issues.append(
+                ValidationIssue(
+                    code="duplicate_middleware_binding",
+                    message="A runtime_middleware node can bind to only one workflow_agent.",
+                    node_id=source_id,
+                )
+            )
+        if source_id in control_node_ids:
+            issues.append(
+                ValidationIssue(
+                    code="mixed_middleware_binding_and_control_flow",
+                    message="A bound runtime_middleware node cannot also use control-flow edges.",
+                    node_id=source_id,
+                )
+            )
 
     return valid_edges
 
@@ -1935,12 +2085,19 @@ def topological_order(
     edges: list[NativeWorkflowEdge],
     issues: list[ValidationIssue],
 ) -> list[str]:
-    node_ids = {node.id for node in nodes}
-    indegree = {node.id: 0 for node in nodes}
+    bound_middleware_ids = {
+        edge.source for edge in edges if is_middleware_binding_edge(edge)
+    }
+    node_ids = {
+        node.id for node in nodes if node.id not in bound_middleware_ids
+    }
+    indegree = {node_id: 0 for node_id in node_ids}
     outgoing: dict[str, list[str]] = defaultdict(list)
 
     for edge in edges:
         if edge.source not in node_ids or edge.target not in node_ids:
+            continue
+        if is_middleware_binding_edge(edge):
             continue
         outgoing[edge.source].append(edge.target)
         indegree[edge.target] += 1
@@ -1956,7 +2113,7 @@ def topological_order(
             if indegree[target_id] == 0:
                 queue.append(target_id)
 
-    if len(order) != len(nodes):
+    if len(order) != len(node_ids):
         issues.append(
             ValidationIssue(
                 code="cycle_detected",
@@ -1966,6 +2123,40 @@ def topological_order(
         return []
 
     return order
+
+
+def is_middleware_binding_edge(edge: NativeWorkflowEdge) -> bool:
+    return str(edge.targetHandle or "").strip() == "middleware"
+
+
+def _validate_middleware_number(
+    issues: list[ValidationIssue],
+    node_id: str,
+    config: dict,
+    name: str,
+    minimum: float,
+    maximum: float,
+    *,
+    integer: bool,
+) -> None:
+    if name not in config or config.get(name) in {None, ""}:
+        return
+    try:
+        value = int(config[name]) if integer else float(config[name])
+    except (TypeError, ValueError):
+        value = minimum - 1
+    if not minimum <= value <= maximum:
+        number_type = "integer" if integer else "number"
+        issues.append(
+            ValidationIssue(
+                code="invalid_runtime_middleware_config",
+                message=(
+                    f"runtime_middleware {name} must be a {number_type} "
+                    f"from {minimum} to {maximum}."
+                ),
+                node_id=node_id,
+            )
+        )
 
 
 def extract_template_variables(template: str) -> set[str]:

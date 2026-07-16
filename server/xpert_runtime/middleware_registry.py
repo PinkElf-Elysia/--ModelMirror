@@ -215,6 +215,173 @@ def register_builtin_middleware_nodes(
         )
     )
 
+    registry.register(
+        RuntimeMiddlewareNode(
+            id="context_compression",
+            kind="runtime_middleware.context_compression",
+            title="上下文压缩",
+            description="在上下文接近预算时总结旧消息，并保留最近对话与关键约束。",
+            category="agent",
+            icon="Shrink",
+            fields=[
+                RuntimeMiddlewareField(
+                    name="max_context_tokens",
+                    label="上下文预算（估算 token）",
+                    type="number",
+                    default=24000,
+                    min_value=2048,
+                    max_value=200000,
+                ),
+                RuntimeMiddlewareField(
+                    name="trigger_ratio",
+                    label="触发比例",
+                    type="number",
+                    default=0.8,
+                    min_value=0.5,
+                    max_value=0.95,
+                ),
+                RuntimeMiddlewareField(
+                    name="keep_recent_messages",
+                    label="保留最近消息数",
+                    type="number",
+                    default=8,
+                    min_value=2,
+                    max_value=40,
+                ),
+                RuntimeMiddlewareField(
+                    name="summary_model_id",
+                    label="摘要模型（留空使用 Agent 模型）",
+                    type="text",
+                    placeholder="openai/gpt-4.1-mini",
+                ),
+                RuntimeMiddlewareField(
+                    name="summary_max_tokens",
+                    label="摘要最大 token",
+                    type="number",
+                    default=1500,
+                    min_value=256,
+                    max_value=4000,
+                ),
+                RuntimeMiddlewareField(
+                    name="max_tool_output_chars",
+                    label="单条工具结果最大字符",
+                    type="number",
+                    default=4000,
+                    min_value=500,
+                    max_value=20000,
+                ),
+            ],
+            tags=["agent", "context", "compression", "before_model"],
+            metadata={
+                "middleware_name": "context_compression",
+                "runtime_hook": "before_model",
+                "real_execution": True,
+            },
+        )
+    )
+
+    registry.register(
+        RuntimeMiddlewareNode(
+            id="structured_output",
+            kind="runtime_middleware.structured_output",
+            title="结构化输出",
+            description="校验 Agent 最终输出是否符合 JSON Schema，并允许一次自动修复。",
+            category="agent",
+            icon="Braces",
+            fields=[
+                RuntimeMiddlewareField(
+                    name="schema_json",
+                    label="JSON Schema",
+                    type="json",
+                    required=True,
+                    default={"type": "object"},
+                    rows=8,
+                ),
+                RuntimeMiddlewareField(
+                    name="repair_attempts",
+                    label="自动修复次数",
+                    type="number",
+                    default=1,
+                    min_value=0,
+                    max_value=1,
+                ),
+            ],
+            tags=["agent", "json", "schema", "after_model"],
+            metadata={
+                "middleware_name": "structured_output",
+                "runtime_hook": "final_output",
+                "real_execution": True,
+            },
+        )
+    )
+
+    registry.register(
+        RuntimeMiddlewareNode(
+            id="todo_planner",
+            kind="runtime_middleware.todo_planner",
+            title="Todo 规划",
+            description="向 Agent 提供持久 Todo 工具，并在多步骤任务中维护执行计划。",
+            category="agent",
+            icon="ListTodo",
+            fields=[
+                RuntimeMiddlewareField(
+                    name="max_items",
+                    label="单作用域最大 Todo 数",
+                    type="number",
+                    default=50,
+                    min_value=1,
+                    max_value=100,
+                ),
+            ],
+            tags=["agent", "todo", "planning", "tools"],
+            metadata={
+                "middleware_name": "todo_planner",
+                "runtime_hook": "agent_tools",
+                "capability_name": "todo_tools",
+                "real_execution": True,
+            },
+        )
+    )
+
+    registry.register(
+        RuntimeMiddlewareNode(
+            id="llm_tool_selector",
+            kind="runtime_middleware.llm_tool_selector",
+            title="LLM 工具选择器",
+            description="在 Agent 执行前从已授权工具中选出与当前任务最相关的最小集合。",
+            category="tool",
+            icon="ListFilter",
+            fields=[
+                RuntimeMiddlewareField(
+                    name="selector_model_id",
+                    label="选择模型（留空使用 Agent 模型）",
+                    type="text",
+                    placeholder="openai/gpt-4.1-mini",
+                ),
+                RuntimeMiddlewareField(
+                    name="max_selected_tools",
+                    label="最多选择工具数",
+                    type="number",
+                    default=8,
+                    min_value=1,
+                    max_value=20,
+                ),
+                RuntimeMiddlewareField(
+                    name="always_include_tools",
+                    label="始终保留工具（逗号或换行分隔）",
+                    type="textarea",
+                    rows=3,
+                ),
+            ],
+            tags=["agent", "tool", "selector", "before_agent"],
+            metadata={
+                "middleware_name": "llm_tool_selector",
+                "runtime_hook": "tool_selection",
+                "real_execution": True,
+            },
+        )
+    )
+
 
 runtime_middleware_registry = RuntimeMiddlewareRegistry()
 register_builtin_middleware_nodes(runtime_middleware_registry)

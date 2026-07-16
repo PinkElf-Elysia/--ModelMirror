@@ -106,6 +106,11 @@ export interface XpertConversation {
   title: string;
   messages?: XpertConversationMessage[];
   message_count?: number;
+  summary?: string;
+  summary_through_message_id?: string | null;
+  summary_revision?: number;
+  summary_model_id?: string | null;
+  summary_updated_at?: number | null;
   file_asset_ids: string[];
   archived: boolean;
   created_at: number;

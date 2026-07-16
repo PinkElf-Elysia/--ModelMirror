@@ -1106,6 +1106,168 @@ def test_tool_policy_allow_by_default_false() -> None:
     assert policy.is_allowed("unknown_tool") is False
 
 
+def middleware_binding_workflow() -> dict:
+    workflow = linear_workflow()
+    workflow["nodes"][1] = {
+        "id": "workflow_agent",
+        "type": "workflow_agent",
+        "data": {
+            "kind": "workflow_agent",
+            "agentName": "bound-agent",
+            "modelId": "openai/gpt-4o-mini",
+            "rolePrompt": "Answer accurately.",
+            "taskInput": "{{user_input}}",
+            "outputVariable": "agent_output",
+        },
+    }
+    workflow["nodes"][2]["data"]["outputVariable"] = "agent_output"
+    workflow["nodes"].append(
+        {
+            "id": "compression",
+            "type": "runtime_middleware",
+            "data": {
+                "kind": "runtime_middleware",
+                "runtimeMiddlewareId": "context_compression",
+                "runtimeMiddlewareKind": "runtime_middleware.context_compression",
+                "middlewarePriority": "20",
+                "runtimeMiddlewareConfig": {
+                    "max_context_tokens": 4096,
+                    "trigger_ratio": 0.8,
+                    "keep_recent_messages": 6,
+                },
+            },
+        }
+    )
+    workflow["edges"] = [
+        {"id": "e1", "source": "input", "target": "workflow_agent"},
+        {"id": "e2", "source": "workflow_agent", "target": "output"},
+        {
+            "id": "bind",
+            "source": "compression",
+            "target": "workflow_agent",
+            "sourceHandle": "middleware-binding",
+            "targetHandle": "middleware",
+        },
+    ]
+    return workflow
+
+
+@pytest.mark.asyncio
+async def test_bound_middleware_does_not_participate_in_control_topology(
+    client: httpx.AsyncClient,
+) -> None:
+    data = await validate(client, middleware_binding_workflow())
+
+    assert data["valid"] is True
+    assert "cycle_detected" not in issue_codes(data)
+    assert data["order"].index("input") < data["order"].index("workflow_agent")
+    assert data["order"].index("workflow_agent") < data["order"].index("output")
+    assert "compression" not in data["order"]
+
+
+@pytest.mark.asyncio
+async def test_middleware_binding_rejects_invalid_target(
+    client: httpx.AsyncClient,
+) -> None:
+    workflow = middleware_binding_workflow()
+    workflow["edges"][-1]["target"] = "output"
+
+    data = await validate(client, workflow)
+
+    assert data["valid"] is False
+    assert "invalid_middleware_binding" in issue_codes(data)
+
+
+@pytest.mark.asyncio
+async def test_middleware_binding_rejects_multiple_agents(
+    client: httpx.AsyncClient,
+) -> None:
+    workflow = middleware_binding_workflow()
+    workflow["nodes"].append(
+        {
+            "id": "second_agent",
+            "type": "workflow_agent",
+            "data": {
+                "kind": "workflow_agent",
+                "agentName": "second-agent",
+                "modelId": "openai/gpt-4o-mini",
+                "rolePrompt": "Answer accurately.",
+                "taskInput": "{{user_input}}",
+                "outputVariable": "second_output",
+            },
+        }
+    )
+    workflow["edges"].append(
+        {
+            "id": "bind-second",
+            "source": "compression",
+            "target": "second_agent",
+            "sourceHandle": "middleware-binding",
+            "targetHandle": "middleware",
+        }
+    )
+
+    data = await validate(client, workflow)
+
+    assert data["valid"] is False
+    assert "duplicate_middleware_binding" in issue_codes(data)
+
+
+@pytest.mark.asyncio
+async def test_middleware_binding_rejects_control_edge_mixing(
+    client: httpx.AsyncClient,
+) -> None:
+    workflow = middleware_binding_workflow()
+    workflow["edges"].append(
+        {"id": "control", "source": "input", "target": "compression"}
+    )
+
+    data = await validate(client, workflow)
+
+    assert data["valid"] is False
+    assert "mixed_middleware_binding_and_control_flow" in issue_codes(data)
+
+
+@pytest.mark.asyncio
+async def test_middleware_binding_rejects_wrong_source_handle(
+    client: httpx.AsyncClient,
+) -> None:
+    workflow = middleware_binding_workflow()
+    workflow["edges"][-1].pop("sourceHandle")
+
+    data = await validate(client, workflow)
+
+    assert data["valid"] is False
+    assert "invalid_middleware_binding" in issue_codes(data)
+
+
+@pytest.mark.asyncio
+async def test_structured_output_middleware_validates_schema_and_priority(
+    client: httpx.AsyncClient,
+) -> None:
+    workflow = middleware_binding_workflow()
+    middleware = workflow["nodes"][-1]
+    middleware["data"].update(
+        {
+            "runtimeMiddlewareId": "structured_output",
+            "runtimeMiddlewareKind": "runtime_middleware.structured_output",
+            "middlewarePriority": "1001",
+            "runtimeMiddlewareConfig": {
+                "schema_json": '{"type":"object","properties":{"answer":{"type":"unknown"}}}',
+                "repair_attempts": 2,
+            },
+        }
+    )
+
+    data = await validate(client, workflow)
+
+    codes = issue_codes(data)
+    assert data["valid"] is False
+    assert "invalid_runtime_middleware_priority" in codes
+    assert "invalid_runtime_middleware_structured_output_schema" in codes
+    assert "invalid_runtime_middleware_config" in codes
+
+
 @pytest.mark.asyncio
 async def test_validate_agent_task_node_ok(client: httpx.AsyncClient) -> None:
     workflow = linear_workflow()
