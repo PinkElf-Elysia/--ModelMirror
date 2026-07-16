@@ -54,6 +54,11 @@ class XpertConversation:
     title: str
     messages: list[XpertConversationMessage] = field(default_factory=list)
     file_asset_ids: list[str] = field(default_factory=list)
+    summary: str = ""
+    summary_through_message_id: str | None = None
+    summary_revision: int = 0
+    summary_model_id: str | None = None
+    summary_updated_at: float | None = None
     archived: bool = False
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
@@ -184,6 +189,35 @@ class XpertContextStore:
             conversation.updated_at = time.time()
             self._persist_unlocked()
         return message
+
+    def update_conversation_summary(
+        self,
+        xpert_id: str,
+        conversation_id: str,
+        *,
+        summary: str,
+        model_id: str,
+        through_message_id: str | None,
+    ) -> XpertConversation:
+        clean_summary = self._required_text(summary, "summary", 40_000)
+        clean_model_id = self._required_text(model_id, "model_id", 300)
+        with self._lock:
+            conversation = self._require_conversation_unlocked(xpert_id, conversation_id)
+            if through_message_id and not any(
+                message.message_id == through_message_id
+                for message in conversation.messages
+            ):
+                raise XpertContextValidationError(
+                    "Conversation summary boundary message was not found."
+                )
+            conversation.summary = clean_summary
+            conversation.summary_through_message_id = through_message_id
+            conversation.summary_revision += 1
+            conversation.summary_model_id = clean_model_id
+            conversation.summary_updated_at = time.time()
+            conversation.updated_at = time.time()
+            self._persist_unlocked()
+            return conversation
 
     def add_file(
         self,

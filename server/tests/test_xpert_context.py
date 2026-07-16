@@ -141,6 +141,34 @@ def test_context_store_rejects_unsafe_files_and_cross_xpert_access(stores) -> No
         context.get_conversation("xpert-2", conversation.conversation_id)
 
 
+def test_context_store_persists_derived_conversation_summary(stores) -> None:
+    _, context = stores
+    conversation = context.create_conversation("xpert-summary")
+    boundary = context.append_message(
+        "xpert-summary",
+        conversation.conversation_id,
+        role="user",
+        content="The project name is Aurora.",
+    )
+
+    context.update_conversation_summary(
+        "xpert-summary",
+        conversation.conversation_id,
+        summary="The conversation concerns project Aurora.",
+        model_id="summary-model",
+        through_message_id=boundary.message_id,
+    )
+
+    restored = XpertContextStore(context.storage_dir).get_conversation(
+        "xpert-summary",
+        conversation.conversation_id,
+    )
+    assert restored.summary == "The conversation concerns project Aurora."
+    assert restored.summary_revision == 1
+    assert restored.summary_model_id == "summary-model"
+    assert restored.summary_through_message_id == boundary.message_id
+
+
 @pytest.mark.asyncio
 async def test_context_api_upload_memory_and_candidate_flow(client, stores) -> None:
     xperts, _ = stores

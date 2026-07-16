@@ -450,12 +450,13 @@ function createNodeData(
     return {
       kind,
       title: payload?.title ?? "中间件节点",
-      description: payload?.description ?? "运行时中间件原型节点。",
+      description: payload?.description ?? "运行时中间件节点。",
       runtimeMiddlewareId: middlewareId,
       runtimeMiddlewareKind: middlewareKind,
       runtimeMiddlewareFields: fields,
       runtimeMiddlewareMetadata: payload?.metadata ?? {},
       runtimeMiddlewareConfig: createRuntimeMiddlewareConfig(fields),
+      middlewarePriority: "100",
     };
   }
 
@@ -811,11 +812,15 @@ function AgentStudioPanel({
   update,
   registryTools,
   registryToolsError,
+  boundMiddlewares,
+  onSelectNode,
 }: {
   data: WorkflowNodeData;
   update: (patch: Partial<WorkflowNodeData>) => void;
   registryTools: RegistryToolOption[];
   registryToolsError: string;
+  boundMiddlewares: WorkflowNode[];
+  onSelectNode: (nodeId: string) => void;
 }) {
   const isWorkflowAgent = data.kind === "workflow_agent";
   const [knowledgeBases, setKnowledgeBases] = useState<
@@ -1028,9 +1033,37 @@ function AgentStudioPanel({
         description="画布上的 runtime_middleware 节点已经可用，节点内嵌中间件后续接入。"
         title="中间件"
       >
-        <p className="rounded-lg border border-dashed border-white/15 bg-white/[0.035] px-3 py-3 text-xs leading-5 text-slate-400">
+        {boundMiddlewares.length ? (
+          <div className="space-y-2">
+            {boundMiddlewares.map((middleware, index) => (
+              <button
+                className="flex w-full items-center gap-3 rounded-lg border border-indigo-300/20 bg-indigo-300/10 px-3 py-2 text-left transition hover:border-indigo-200/45"
+                key={middleware.id}
+                onClick={() => onSelectNode(middleware.id)}
+                type="button"
+              >
+                <span className="flex h-7 w-7 items-center justify-center rounded-md bg-indigo-300/15 text-xs font-semibold text-indigo-100">
+                  {index + 1}
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-xs font-semibold text-indigo-50">
+                    {middleware.data.title}
+                  </span>
+                  <span className="block truncate text-[11px] text-indigo-200/70">
+                    {String(middleware.data.runtimeMiddlewareId ?? "middleware")}
+                  </span>
+                </span>
+                <span className="text-[10px] text-indigo-200/70">
+                  P{String(middleware.data.middlewarePriority ?? "100")}
+                </span>
+              </button>
+            ))}
+          </div>
+        ) : (
+          <p className="rounded-lg border border-dashed border-white/15 bg-white/[0.035] px-3 py-3 text-xs leading-5 text-slate-400">
           暂未在智能体节点内嵌中间件。需要工具策略、审计或 system prompt 时，请继续使用画布上的中间件节点。
-        </p>
+          </p>
+        )}
       </ConfigSection>
 
       <ConfigSection
@@ -1298,9 +1331,18 @@ function AgentStudioPanel({
 interface NodeConfigProps {
   node: WorkflowNode | null;
   onChange: (nodeId: string, data: Partial<WorkflowNodeData>) => void;
+  nodes: WorkflowNode[];
+  edges: WorkflowEdge[];
+  onSelectNode: (nodeId: string) => void;
 }
 
-function NodeConfig({ node, onChange }: NodeConfigProps) {
+function NodeConfig({
+  node,
+  onChange,
+  nodes,
+  edges,
+  onSelectNode,
+}: NodeConfigProps) {
   const [registryTools, setRegistryTools] = useState<RegistryToolOption[]>([]);
   const [registryToolsError, setRegistryToolsError] = useState("");
   const [publishedXperts, setPublishedXperts] = useState<XpertSummary[]>([]);
@@ -1375,6 +1417,25 @@ function NodeConfig({ node, onChange }: NodeConfigProps) {
   const runtimeMiddlewareConfig = isRecord(data.runtimeMiddlewareConfig)
     ? data.runtimeMiddlewareConfig
     : undefined;
+  const boundMiddlewares =
+    data.kind === "workflow_agent"
+      ? edges
+          .filter(
+            (edge) =>
+              edge.target === node.id && edge.targetHandle === "middleware",
+          )
+          .map((edge) => nodes.find((candidate) => candidate.id === edge.source))
+          .filter(
+            (candidate): candidate is WorkflowNode =>
+              candidate?.data.kind === "runtime_middleware",
+          )
+          .sort((left, right) => {
+            const priorityDifference =
+              Number(left.data.middlewarePriority ?? 100) -
+              Number(right.data.middlewarePriority ?? 100);
+            return priorityDifference || left.id.localeCompare(right.id);
+          })
+      : [];
   const updateRuntimeMiddlewareConfig = (fieldName: string, value: unknown) =>
     update({
       runtimeMiddlewareConfig: {
@@ -1914,7 +1975,9 @@ function NodeConfig({ node, onChange }: NodeConfigProps) {
 
       {data.kind === "agent" || data.kind === "workflow_agent" ? (
         <AgentStudioPanel
+          boundMiddlewares={boundMiddlewares}
           data={data}
+          onSelectNode={onSelectNode}
           registryTools={registryTools}
           registryToolsError={registryToolsError}
           update={update}
@@ -2269,7 +2332,22 @@ function NodeConfig({ node, onChange }: NodeConfigProps) {
       {data.kind === "runtime_middleware" ? (
         <div className="space-y-4">
           <div className="rounded-lg border border-indigo-300/25 bg-indigo-300/10 px-3 py-2 text-xs leading-5 text-indigo-50">
-            当前为中间件原型节点：运行时会记录并跳过实际编排，下一轮接入真实 MiddlewarePipeline。
+            使用紫色端口绑定到一个 workflow_agent，或使用普通端口作为线性中间件。两种连接方式不可混用。
+          </div>
+          <Field label="执行优先级（0-1000）">
+            <input
+              className={textInputClass()}
+              max={1000}
+              min={0}
+              onChange={(event) =>
+                update({ middlewarePriority: event.target.value })
+              }
+              type="number"
+              value={data.middlewarePriority ?? "100"}
+            />
+          </Field>
+          <div className="rounded-lg border border-indigo-300/25 bg-indigo-300/10 px-3 py-2 text-xs leading-5 text-indigo-50">
+            绑定模式仅作用于目标 workflow_agent；线性模式会影响其后执行的智能体。核心中间件已接入真实 MiddlewarePipeline。
           </div>
           <div className="rounded-lg border border-white/10 bg-white/[0.035] px-3 py-2">
             <p className="text-xs font-semibold text-slate-200">
@@ -2513,18 +2591,53 @@ function WorkflowCanvas({
 
   const handleConnect = useCallback(
     (connection: Connection) => {
+      const sourceNode = nodes.find((node) => node.id === connection.source);
+      const targetNode = nodes.find((node) => node.id === connection.target);
+      const middlewareBinding = connection.targetHandle === "middleware";
+      if (middlewareBinding) {
+        if (
+          connection.sourceHandle !== "middleware-binding" ||
+          sourceNode?.data.kind !== "runtime_middleware" ||
+          targetNode?.data.kind !== "workflow_agent"
+        ) {
+          setSaveNotice("中间件绑定必须从 runtime_middleware 的紫色端口连接到 workflow_agent。")
+          return;
+        }
+        if (edges.some((edge) => edge.source === connection.source)) {
+          setSaveNotice("一个中间件节点只能绑定一个 Agent，且不能同时连接控制流。")
+          return;
+        }
+      } else if (connection.sourceHandle === "middleware-binding") {
+        setSaveNotice("紫色中间件端口只能连接 workflow_agent 的 middleware 入口。")
+        return;
+      } else if (
+        sourceNode?.data.kind === "runtime_middleware" &&
+        edges.some(
+          (edge) =>
+            edge.source === connection.source && edge.targetHandle === "middleware",
+        )
+      ) {
+        setSaveNotice("已绑定 Agent 的中间件不能同时连接控制流。")
+        return;
+      }
       setEdges((currentEdges) =>
         addEdge(
           {
             ...connection,
             animated: true,
-            className: "modelmirror-workflow-edge",
+            className: middlewareBinding
+              ? "modelmirror-workflow-edge modelmirror-middleware-binding-edge"
+              : "modelmirror-workflow-edge",
+            style: middlewareBinding
+              ? { stroke: "#a5b4fc", strokeDasharray: "7 5", strokeWidth: 2 }
+              : undefined,
           },
           currentEdges,
         ),
       );
+      setSaveNotice("");
     },
-    [setEdges],
+    [edges, nodes, setEdges],
   );
 
   const handleNodesChange = useCallback(
@@ -2807,7 +2920,13 @@ function WorkflowCanvas({
             节点配置会立即写入画布，下次运行直接生效。
           </p>
           <div className="mt-4">
-            <NodeConfig node={selectedNode} onChange={updateNodeData} />
+            <NodeConfig
+              edges={edges}
+              node={selectedNode}
+              nodes={nodes}
+              onChange={updateNodeData}
+              onSelectNode={setSelectedNodeId}
+            />
           </div>
         </section>
 

@@ -17,7 +17,18 @@ def test_registry_list_returns_builtin_nodes() -> None:
     registry = _registry()
     nodes = registry.list()
 
-    assert len(nodes) == 5
+    node_ids = {node.id for node in nodes}
+    assert node_ids == {
+        "system_prompt_injector",
+        "event_recorder",
+        "tool_policy",
+        "tool_audit",
+        "mcp_tools",
+        "context_compression",
+        "structured_output",
+        "todo_planner",
+        "llm_tool_selector",
+    }
     for node in nodes:
         assert node.id
         assert node.kind.startswith("runtime_middleware.")

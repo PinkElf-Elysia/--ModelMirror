@@ -262,7 +262,27 @@ export default function WorkflowNodeCard({ data, selected }: NodeProps<WorkflowN
           : meta.border
       }`}
     >
-      {data.kind !== "input" ? (
+      {data.kind === "workflow_agent" ? (
+        <>
+          <Handle
+            className="!h-3 !w-3 !border-2 !border-surface-900 !bg-slate-200"
+            position={Position.Left}
+            style={{ top: "38%" }}
+            type="target"
+          />
+          <Handle
+            className="!h-3 !w-3 !border-2 !border-surface-900 !bg-indigo-300"
+            id="middleware"
+            position={Position.Left}
+            style={{ top: "72%" }}
+            title="绑定 Agent 中间件"
+            type="target"
+          />
+          <div className="pointer-events-none absolute -left-14 top-[66%] text-[10px] font-semibold text-indigo-200">
+            middleware
+          </div>
+        </>
+      ) : data.kind !== "input" ? (
         <Handle
           className="!h-3 !w-3 !border-2 !border-surface-900 !bg-slate-200"
           position={Position.Left}
@@ -320,6 +340,24 @@ export default function WorkflowNodeCard({ data, selected }: NodeProps<WorkflowN
           <div className="pointer-events-none absolute -right-12 top-[62%] text-[10px] font-semibold text-rose-100">
             否
           </div>
+        </>
+      ) : data.kind === "runtime_middleware" ? (
+        <>
+          <Handle
+            className="!h-3 !w-3 !border-2 !border-surface-900 !bg-hire-300"
+            position={Position.Right}
+            style={{ top: "38%" }}
+            title="控制流输出"
+            type="source"
+          />
+          <Handle
+            className="!h-3 !w-3 !border-2 !border-surface-900 !bg-indigo-300"
+            id="middleware-binding"
+            position={Position.Right}
+            style={{ top: "72%" }}
+            title="绑定到 workflow_agent"
+            type="source"
+          />
         </>
       ) : data.kind !== "output" ? (
         <Handle

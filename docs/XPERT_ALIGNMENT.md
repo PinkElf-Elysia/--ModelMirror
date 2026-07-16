@@ -3,6 +3,14 @@
 最后更新日期：2026-07-16
 维护人：模镜团队
 
+## 2026-07-16 增量：XPERT-MIDDLEWARE-CORE-01
+
+`runtime_middleware` 已从线性工作流步骤扩展为可绑定到单个 `workflow_agent` 的 Agent 级执行能力。绑定边使用 `sourceHandle="middleware-binding" -> targetHandle="middleware"`，不参与控制流拓扑、变量传播或节点调度；每个 Agent 独立编译 middleware pipeline，直接模型调用、ReAct 决策与工具调用共享一致的 policy、audit 和 checkpoint 边界。
+
+首批真实能力包括上下文压缩、JSON Schema 结构化输出、按运行来源隔离的持久 Todo，以及不能绕过权限策略的 LLM 工具选择器。Xpert Chat 提供 Todo 管理与会话摘要状态，Goal、Handoff 和 App 复用同一 classic runner；公共 App 的 Todo 和摘要保持请求级临时态。
+
+后续中间件路线依次为 HITL、Sandbox、Automation 和 Consolidation。每轮必须形成可运行闭环，不单独交付目录或纯观测页面。详细契约见 `docs/XPERT_MIDDLEWARE.md`。
+
 ## 2026-07-16 增量：XPERT-KNOWLEDGE-AGENT-01
 
 成熟 RAG 基础路线已完成最后一轮闭环：已发布 Xpert 可通过受作用域约束的 Knowledge Runtime Toolset 检索活动知识版本、获取原文、生成稳定引用，并提出待审批知识写入。Knowledge Inbox 是唯一审批入口；批准只会基于活动来源快照自动构建候选版本，必须通过 Evaluation Gate 后才能推广，绝不自动激活。

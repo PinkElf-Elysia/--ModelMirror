@@ -34,6 +34,13 @@ async def client():
         yield async_client
 
 
+@pytest.fixture(autouse=True)
+def reset_chat_rate_limit_window():
+    main_module.request_windows.clear()
+    yield
+    main_module.request_windows.clear()
+
+
 @pytest.mark.asyncio
 async def test_middleware_injects_system_prompt_in_chat() -> None:
     pipeline, context = create_default_runtime()

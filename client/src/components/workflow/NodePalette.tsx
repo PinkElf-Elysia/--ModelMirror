@@ -22,6 +22,10 @@ const paletteTabs: Array<{ id: PaletteTab; label: string }> = [
 ];
 
 const middlewareIconMap: Record<string, string> = {
+  Shrink: "CTX",
+  Braces: "{}",
+  ListTodo: "TODO",
+  ListFilter: "SEL",
   Activity: "〽",
   ClipboardList: "▦",
   MessageSquare: "◇",

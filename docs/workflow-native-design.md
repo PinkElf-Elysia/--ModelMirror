@@ -681,3 +681,11 @@ The Xpert Studio fields `enableFileUnderstanding`, `memoryReadEnabled`, `memoryR
 - In `toolMode=mcp_tools`, memory tools and MCP tools share Runtime Toolset middleware, policy, and audit. The MCP whitelist only filters MCP tools.
 - Goal/Handoff propagation carries explicit file references. It does not copy private conversation memory between Xperts.
 - No workflow node, SSE wire type, RAG index, or `knowledge_citation` execution contract is changed by this milestone.
+
+## 2026-07-16 Agent 级 Runtime Middleware
+
+`runtime_middleware -> workflow_agent` 现在支持 `sourceHandle="middleware-binding" -> targetHandle="middleware"` 专用绑定边。绑定节点不参与控制流拓扑排序、变量可达性、节点调度或独立执行；同一 middleware 只能绑定一个 Agent，且不能混用普通控制边。旧的线性 middleware 节点继续保持原行为。
+
+每个 `workflow_agent` 会按 `middlewarePriority` 和节点 ID 编译独立 pipeline。`context_compression`、`structured_output`、`todo_planner` 和 `llm_tool_selector` 已进入真实执行：模型直答与 ReAct 决策均运行模型 hooks，工具继续走 Runtime Toolset、policy 和 audit。结构化输出仍复用既有 SSE，仅替换最终正文为 schema-valid JSON；Todo 按 conversation/goal/handoff/workflow 隔离，公共 App 只使用临时 run 作用域。
+
+节点库浮层、普通拖拽 payload、右侧 `配置 / 运行` tabs 和已有节点协议保持兼容。完整配置、顺序和安全边界见 `docs/XPERT_MIDDLEWARE.md`。

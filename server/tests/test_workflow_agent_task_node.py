@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -10,6 +11,7 @@ import pytest_asyncio
 import server.main as main_module
 from server.main import app
 from server.xpert_runtime import RuntimeTool, RuntimeToolResult
+from server.xpert_runtime.todo_store import RuntimeTodoStore
 
 
 @pytest_asyncio.fixture
@@ -1209,3 +1211,165 @@ def _install_fake_tool_provider() -> tuple[FakeWorkflowToolProvider, Any]:
         main_module.runtime_capabilities.register("mcp_tools", original)
 
     return provider, restore
+
+
+@pytest.mark.asyncio
+async def test_bound_structured_output_repairs_and_validates_agent_answer(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    responses = iter(
+        [
+            '{"answer": 42}',
+            '{"answer":"validated"}',
+        ]
+    )
+
+    async def fake_collect_chat_completion_text(*args, **kwargs):
+        return next(responses)
+
+    monkeypatch.setattr(
+        main_module,
+        "collect_chat_completion_text",
+        fake_collect_chat_completion_text,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "get_llm_gateway_config",
+        lambda: ("http://test-gateway.local/v1/chat/completions", "test-key"),
+    )
+    workflow = _workflow_agent_strategy_workflow()
+    workflow["nodes"].append(
+        {
+            "id": "structured",
+            "type": "runtime_middleware",
+            "data": {
+                "kind": "runtime_middleware",
+                "runtimeMiddlewareId": "structured_output",
+                "runtimeMiddlewareKind": "runtime_middleware.structured_output",
+                "middlewarePriority": "20",
+                "runtimeMiddlewareConfig": {
+                    "schema_json": {
+                        "type": "object",
+                        "required": ["answer"],
+                        "properties": {"answer": {"type": "string"}},
+                        "additionalProperties": False,
+                    },
+                    "repair_attempts": 1,
+                },
+            },
+        }
+    )
+    workflow["edges"].append(
+        {
+            "id": "bind-structured",
+            "source": "structured",
+            "target": "workflow_agent",
+            "sourceHandle": "middleware-binding",
+            "targetHandle": "middleware",
+        }
+    )
+
+    response = await client.post(
+        "/api/workflow/run",
+        json={"workflow": workflow, "inputs": {"user_input": "return JSON"}},
+    )
+
+    assert response.status_code == 200, response.text
+    events = _parse_sse_events(response.text)
+    agent_end = next(
+        event
+        for event in events
+        if event.get("event") == "node_end"
+        and event.get("node_id") == "workflow_agent"
+    )
+    assert json.loads(agent_end["output"]) == {"answer": "validated"}
+    assert agent_end["variables"]["agent_output"] == '{"answer":"validated"}'
+
+    workflow_meta = next(event for event in events if event.get("event") == "workflow_meta")
+    agent_run = await _workflow_agent_run(client, workflow_meta["run_id"])
+    checkpoints = await _checkpoint_types(client, agent_run["run_id"])
+    assert "middleware.structured_output.validated" in checkpoints
+
+
+@pytest.mark.asyncio
+async def test_bound_todo_planner_creates_scoped_todo_through_runtime_toolset(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    todo_store = RuntimeTodoStore(tmp_path / "workflow-todos")
+    monkeypatch.setattr(main_module, "runtime_todo_store", todo_store)
+    monkeypatch.setattr(main_module.workflow_todo_provider, "store", todo_store)
+    responses = iter(
+        [
+            '{"tool":"todo_create","arguments":{"title":"Draft plan","priority":2}}',
+            '{"answer":"plan tracked"}',
+        ]
+    )
+
+    async def fake_collect_chat_completion_text(*args, **kwargs):
+        return next(responses)
+
+    monkeypatch.setattr(
+        main_module,
+        "get_llm_gateway_config",
+        lambda: ("http://test-gateway.local/v1/chat/completions", "test-key"),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "collect_chat_completion_text",
+        fake_collect_chat_completion_text,
+    )
+    workflow = _workflow_agent_strategy_workflow()
+    workflow["nodes"].append(
+        {
+            "id": "planner",
+            "type": "runtime_middleware",
+            "data": {
+                "kind": "runtime_middleware",
+                "runtimeMiddlewareId": "todo_planner",
+                "runtimeMiddlewareKind": "runtime_middleware.todo_planner",
+                "middlewarePriority": "30",
+                "runtimeMiddlewareConfig": {"max_items": 20},
+            },
+        }
+    )
+    workflow["edges"].append(
+        {
+            "id": "bind-planner",
+            "source": "planner",
+            "target": "workflow_agent",
+            "sourceHandle": "middleware-binding",
+            "targetHandle": "middleware",
+        }
+    )
+
+    response = await client.post(
+        "/api/workflow/run",
+        json={"workflow": workflow, "inputs": {"user_input": "make a plan"}},
+    )
+
+    assert response.status_code == 200, response.text
+    events = _parse_sse_events(response.text)
+    workflow_meta = next(event for event in events if event.get("event") == "workflow_meta")
+    agent_end = next(
+        event
+        for event in events
+        if event.get("event") == "node_end"
+        and event.get("node_id") == "workflow_agent"
+    )
+    assert agent_end["output"] == "plan tracked"
+
+    todos = todo_store.list_items(
+        scope_type="workflow",
+        scope_id=f"{workflow_meta['task_id']}:workflow_agent",
+    )
+    assert len(todos) == 1
+    assert todos[0].title == "Draft plan"
+    assert todos[0].source_run_id
+
+    agent_run = await _workflow_agent_run(client, workflow_meta["run_id"])
+    checkpoints = await _checkpoint_types(client, agent_run["run_id"])
+    assert "workflow_agent.tool_call" in checkpoints
+    assert "workflow_agent.model_answer" in checkpoints

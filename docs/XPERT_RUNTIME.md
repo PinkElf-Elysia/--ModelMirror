@@ -181,3 +181,11 @@ App execution uses `run_type=xpert_app` and the same classic runner. The deploym
 - Automatic Handoff execution is limited to a single backend process and explicit `xpert:` targets.
 - Knowledge ingestion, evaluation, and approval-triggered candidate builds are local and single-process; they have no distributed lease or automatic activation. Image understanding, evaluation, and Knowledge Agent approval writes are available, while multimodal embeddings, layout coordinates, and GraphRAG remain out of scope.
 - A normal /workflow run remains unchanged and continues to use its existing local-draft behavior.
+
+## Agent-Bound Middleware Core
+
+Classic workflow supports a non-control binding edge from `runtime_middleware` to `workflow_agent` through `sourceHandle="middleware-binding"` and `targetHandle="middleware"`. Binding nodes are excluded from topological scheduling, variable reachability, and independent execution. A middleware node can bind to one Agent only and cannot simultaneously participate in control flow. Bound middleware is ordered by priority and node ID; legacy linear middleware remains compatible.
+
+Each workflow Agent compiles an isolated `MiddlewarePipeline`. Agent hooks wrap the complete Agent run, model hooks run for direct streaming and every ReAct decision, and Runtime tools reuse the same pipeline, tool policy, event recorder, and audit store. Context compression can persist a derived Xpert conversation summary without modifying original messages. Structured output buffers the final answer, validates Draft 2020-12 JSON Schema, and optionally repairs once before entering existing exception handling.
+
+The Todo capability exposes scope-bound `todo_list`, `todo_create`, and `todo_update`. Conversation, Goal, Handoff, and Workflow scopes are atomically persisted; Xpert App scopes remain run-local. The LLM tool selector operates only after allowlist and policy filtering and cannot restore denied tools. Checkpoints retain names, counts, status, timing, and safe errors only. See `docs/XPERT_MIDDLEWARE.md`.

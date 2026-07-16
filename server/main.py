@@ -150,6 +150,7 @@ except ModuleNotFoundError:
 try:
     from server.xpert_runtime import (
         AgentTaskStore,
+        AgentMiddleware,
         CapabilityRegistry,
         HandoffBusyError,
         HandoffExecutionResult,
@@ -174,18 +175,35 @@ try:
         PinnedXpert,
         RunRegistry,
         RuntimeEventStore,
+        RuntimeMiddlewareSpec,
+        RuntimeTodoStore,
         RuntimeToolCall,
+        TodoToolsetProvider,
         ToolPermissionPolicy,
+        bound_middleware_specs,
+        build_context_compression_middleware,
+        configure_runtime_todo_store,
+        control_flow_edges,
         create_default_runtime,
         event_recorder,
         goal_to_payload,
+        middleware_config_int,
+        middleware_config_schema,
+        middleware_spec,
+        middleware_spec_from_node,
+        register_todo_toolset_capability,
         run_tool_with_runtime,
         runtime_middleware_registry,
+        runtime_todo_router,
+        select_runtime_tools,
+        todo_planning_instruction,
+        validate_structured_output,
         workflow_node_registry,
     )
 except ModuleNotFoundError:
     from xpert_runtime import (
         AgentTaskStore,
+        AgentMiddleware,
         CapabilityRegistry,
         HandoffBusyError,
         HandoffExecutionResult,
@@ -210,13 +228,29 @@ except ModuleNotFoundError:
         PinnedXpert,
         RunRegistry,
         RuntimeEventStore,
+        RuntimeMiddlewareSpec,
+        RuntimeTodoStore,
         RuntimeToolCall,
+        TodoToolsetProvider,
         ToolPermissionPolicy,
+        bound_middleware_specs,
+        build_context_compression_middleware,
+        configure_runtime_todo_store,
+        control_flow_edges,
         create_default_runtime,
         event_recorder,
         goal_to_payload,
+        middleware_config_int,
+        middleware_config_schema,
+        middleware_spec,
+        middleware_spec_from_node,
+        register_todo_toolset_capability,
         run_tool_with_runtime,
         runtime_middleware_registry,
+        runtime_todo_router,
+        select_runtime_tools,
+        todo_planning_instruction,
+        validate_structured_output,
         workflow_node_registry,
     )
 
@@ -365,6 +399,7 @@ app.include_router(skills_router)
 app.include_router(xperts_router)
 app.include_router(xpert_apps_router)
 app.include_router(workflow_native_router)
+app.include_router(runtime_todo_router)
 
 request_windows: dict[str, deque[float]] = defaultdict(deque)
 mcp_connect_windows: dict[str, deque[float]] = defaultdict(deque)
@@ -375,6 +410,10 @@ workflow_mcp_provider = MCPToolsetProvider(tool_registry, mcp_manager)
 xpert_context_store = get_xpert_context_store()
 workflow_memory_provider = MemoryToolsetProvider(xpert_context_store)
 workflow_knowledge_provider = KnowledgeToolsetProvider(get_rag_service)
+runtime_todo_store = configure_runtime_todo_store(
+    RuntimeTodoStore(storage_dir=AGENT_TASK_STORAGE_DIR or None)
+)
+workflow_todo_provider = TodoToolsetProvider(runtime_todo_store)
 runtime_capabilities = CapabilityRegistry()
 workflow_mcp_pipeline = MiddlewarePipeline([event_recorder])
 workflow_tool_policy = ToolPermissionPolicy(allow_by_default=True)
@@ -395,6 +434,7 @@ runtime_capabilities.register(
     workflow_mcp_provider,
     description="MCP tools runtime capability for workflow and agents.",
 )
+register_todo_toolset_capability(runtime_capabilities, workflow_todo_provider)
 runtime_capabilities.register(
     "memory_tools",
     workflow_memory_provider,
@@ -1965,7 +2005,7 @@ def workflow_topological_order(
     indegree = {node.id: 0 for node in nodes}
     outgoing: dict[str, list[str]] = defaultdict(list)
 
-    for edge in edges:
+    for edge in control_flow_edges(edges):
         if edge.source not in node_ids or edge.target not in node_ids:
             raise HTTPException(status_code=400, detail="工作流连线引用了不存在的节点。")
         outgoing[edge.source].append(edge.target)
@@ -2093,19 +2133,30 @@ async def stream_workflow_llm_text(
     *,
     system_prompt: str | None = None,
 ) -> AsyncIterator[str]:
-    url, key = get_llm_gateway_config()
-    if not url:
-        raise RuntimeError(LLM_GATEWAY_NOT_CONFIGURED_MESSAGE)
-
     messages = []
     if system_prompt and system_prompt.strip():
         messages.append(ChatMessage(role="system", content=system_prompt.strip()))
     messages.append(ChatMessage(role="user", content=prompt))
+    async for delta in stream_workflow_llm_messages(model_id, messages):
+        yield delta
+
+
+async def stream_workflow_llm_messages(
+    model_id: str,
+    messages: list[ChatMessage],
+    *,
+    temperature: float = 0.7,
+    max_tokens: int = 2048,
+) -> AsyncIterator[str]:
+    url, key = get_llm_gateway_config()
+    if not url:
+        raise RuntimeError(LLM_GATEWAY_NOT_CONFIGURED_MESSAGE)
+
     chat_payload = ChatRequest(
         model_id=model_id,
         messages=messages,
-        temperature=0.7,
-        max_tokens=2048,
+        temperature=temperature,
+        max_tokens=max_tokens,
     )
     current_model_id = model_id
 
@@ -2266,11 +2317,12 @@ async def prepare_published_xpert_run(
     history_json = json.dumps(history, ensure_ascii=False)
 
     conversation_id = payload.conversation_id
+    conversation = None
     file_owner_xpert_id = shared_file_owner_xpert_id or xpert.id
     file_conversation_id = shared_file_conversation_id or conversation_id
     file_asset_ids = list(shared_file_asset_ids or payload.file_asset_ids)
     if conversation_id:
-        await asyncio.to_thread(
+        conversation = await asyncio.to_thread(
             xpert_context_store.get_conversation,
             xpert.id,
             conversation_id,
@@ -2370,6 +2422,18 @@ async def prepare_published_xpert_run(
             "xpert_checksum": version.checksum,
             "handoff_depth": handoff_depth,
             "conversation_id": conversation_id,
+            "conversation_messages": (
+                [
+                    {
+                        "message_id": message.message_id,
+                        "role": message.role,
+                        "content": message.content,
+                    }
+                    for message in conversation.messages[-100:]
+                ]
+                if conversation is not None
+                else history
+            ),
             "file_asset_ids": [item.asset_id for item in selected_files],
             "file_owner_xpert_id": file_owner_xpert_id if selected_files else None,
             "file_conversation_id": file_conversation_id if selected_files else None,
@@ -2491,7 +2555,7 @@ async def _run_workflow_response(
     nodes_by_id = {node.id: node for node in payload.workflow.nodes}
     order_index = {node_id: index for index, node_id in enumerate(order)}
     outgoing: dict[str, list[WorkflowEdgePayload]] = defaultdict(list)
-    for edge in payload.workflow.edges:
+    for edge in control_flow_edges(payload.workflow.edges):
         outgoing[edge.source].append(edge)
 
     start_node_ids = [
@@ -2545,6 +2609,11 @@ async def _run_workflow_response(
         "runtime_event_store": RuntimeEventStore(),
         "tool_audit_store": InMemoryToolAuditStore(),
         "runtime_metadata": run_metadata,
+        "middleware_binding_edges": [
+            edge
+            for edge in payload.workflow.edges
+            if str(edge.targetHandle or "").strip() == "middleware"
+        ],
     }
     workflow_task_store[task_id] = task_state
 
@@ -2559,6 +2628,7 @@ async def _run_workflow_response(
             "override_system_prompt": False,
             "active_middlewares": [],
             "tool_policy": None,
+            "global_middleware_specs": [],
             "app_policy": (
                 dict(run_metadata.get("app_policy") or {})
                 if runtime_run_type == "xpert_app"
@@ -2609,6 +2679,142 @@ async def _run_workflow_response(
             if isinstance(value, str):
                 return value.strip().lower() in {"1", "true", "yes", "on"}
             return bool(value)
+
+        async def middleware_model_text(
+            model_id: str,
+            messages: list[dict[str, Any]],
+            max_tokens: int,
+        ) -> str:
+            return await collect_chat_completion_text(
+                model_id,
+                [ChatMessage.model_validate(message) for message in messages],
+                temperature=0,
+                max_tokens=max_tokens,
+            )
+
+        def agent_middleware_specs(node_id: str) -> list[RuntimeMiddlewareSpec]:
+            specs = [
+                *workflow_runtime_context["global_middleware_specs"],
+                *bound_middleware_specs(
+                    nodes_by_id,
+                    payload.workflow.edges,
+                    node_id,
+                ),
+            ]
+            return sorted(specs, key=lambda item: (item.priority, item.node_id))
+
+        def agent_tool_policy(
+            specs: list[RuntimeMiddlewareSpec],
+            capability_name: str,
+        ) -> ToolPermissionPolicy:
+            spec = middleware_spec(specs, "tool_policy")
+            if spec is None:
+                return selected_workflow_tool_policy(capability_name)
+            return ToolPermissionPolicy(
+                allowed_tools=parse_workflow_tool_policy_list(
+                    spec.config.get("allowed_tools")
+                ),
+                denied_tools=parse_workflow_tool_policy_list(
+                    spec.config.get("denied_tools")
+                ),
+                allow_by_default=parse_workflow_bool(
+                    spec.config.get("allow_by_default"),
+                    default=True,
+                ),
+            )
+
+        def runtime_todo_scope(node_id: str) -> tuple[str, str]:
+            context = task_state.get("runtime_metadata") or {}
+            if runtime_run_type == "xpert_app":
+                return "app_run", str(workflow_run.run_id)
+            conversation_id = str(context.get("conversation_id") or "").strip()
+            xpert_id = str(context.get("xpert_id") or "").strip()
+            if conversation_id:
+                return "conversation", f"{xpert_id}:{conversation_id}"
+            goal_id = str(context.get("goal_id") or "").strip()
+            if goal_id:
+                step_id = str(context.get("goal_step_id") or node_id).strip()
+                return "goal", f"{goal_id}:{step_id}"
+            handoff_id = str(context.get("handoff_id") or "").strip()
+            if handoff_id:
+                return "handoff", handoff_id
+            return "workflow", f"{task_id}:{node_id}"
+
+        async def compile_agent_runtime(
+            node: WorkflowNodePayload,
+            title: str,
+            run_id: str,
+            model_id: str,
+        ) -> tuple[
+            MiddlewarePipeline,
+            MiddlewareContext,
+            list[RuntimeMiddlewareSpec],
+            ToolPermissionPolicy,
+        ]:
+            specs = agent_middleware_specs(node.id)
+            middlewares: list[AgentMiddleware] = [event_recorder]
+            compression = middleware_spec(specs, "context_compression")
+            if compression is not None:
+                middlewares.append(build_context_compression_middleware(compression))
+            pipeline = MiddlewarePipeline(middlewares)
+            scope_type, scope_id = runtime_todo_scope(node.id)
+            context_metadata: dict[str, Any] = {
+                "node_id": node.id,
+                "node_title": title,
+                "workflow": True,
+                "run_id": run_id,
+                "model_id": model_id,
+                "middleware_model_text": middleware_model_text,
+                "middleware_ids": [item.middleware_id for item in specs],
+                "todo_scope_type": scope_type,
+                "todo_scope_id": scope_id,
+            }
+            run_context = task_state.get("runtime_metadata") or {}
+            context_metadata["conversation_messages"] = list(
+                run_context.get("conversation_messages") or []
+            )
+            xpert_id = str(run_context.get("xpert_id") or "").strip()
+            conversation_id = str(run_context.get("conversation_id") or "").strip()
+            if compression is not None and xpert_id and conversation_id:
+                try:
+                    conversation = await asyncio.to_thread(
+                        xpert_context_store.get_conversation,
+                        xpert_id,
+                        conversation_id,
+                    )
+                    context_metadata["conversation_summary"] = conversation.summary
+                    context_metadata["conversation_summary_through_message_id"] = (
+                        conversation.summary_through_message_id
+                    )
+
+                    async def persist_summary(
+                        summary: str,
+                        summary_model_id: str,
+                        through_message_id: str | None,
+                    ) -> None:
+                        await asyncio.to_thread(
+                            xpert_context_store.update_conversation_summary,
+                            xpert_id,
+                            conversation_id,
+                            summary=summary,
+                            model_id=summary_model_id,
+                            through_message_id=through_message_id,
+                        )
+
+                    context_metadata["persist_conversation_summary"] = persist_summary
+                except XpertContextError as exc:
+                    context_metadata.setdefault("middleware_warnings", []).append(
+                        f"conversation summary unavailable: {str(exc)[:160]}"
+                    )
+            context = MiddlewareContext(
+                task_id=task_id,
+                trace_id=task_id,
+                capabilities=runtime_capabilities,
+                store=task_state["runtime_event_store"],
+                metadata=context_metadata,
+            )
+            policy = agent_tool_policy(specs, "mcp_tools")
+            return pipeline, context, specs, policy
 
         def workflow_handoff_settings(data: dict[str, Any]) -> tuple[str, bool, str, int]:
             execution_mode = str(data.get("executionMode") or "manual").strip()
@@ -2668,6 +2874,9 @@ async def _run_workflow_response(
             node: WorkflowNodePayload,
             title: str,
             metadata: dict[str, Any] | None = None,
+            pipeline: MiddlewarePipeline | None = None,
+            middleware_context: MiddlewareContext | None = None,
+            middleware_specs: list[RuntimeMiddlewareSpec] | None = None,
         ):
             matched_tool = await workflow_mcp_provider.find_tool(tool_name)
             capability_name = "mcp_tools"
@@ -2677,6 +2886,9 @@ async def _run_workflow_response(
             if not matched_tool:
                 matched_tool = await workflow_knowledge_provider.find_tool(tool_name)
                 capability_name = "knowledge_tools"
+            if not matched_tool:
+                matched_tool = await workflow_todo_provider.find_tool(tool_name)
+                capability_name = "todo_tools"
             if capability_name == "mcp_tools" and not app_capability_allowed(
                 "allow_tools"
             ):
@@ -2695,6 +2907,36 @@ async def _run_workflow_response(
             if not matched_tool:
                 raise ValueError(f"MCP 工具未注册：{tool_name}")
             run_context = task_state.get("runtime_metadata") or {}
+            todo_scope_type, todo_scope_id = runtime_todo_scope(node.id)
+            effective_context = middleware_context or MiddlewareContext(
+                task_id=task_id,
+                trace_id=task_id,
+                capabilities=runtime_capabilities,
+                store=task_state["runtime_event_store"],
+                metadata={
+                    "node_id": node.id,
+                    "node_title": title,
+                    "workflow": True,
+                },
+            )
+            effective_context.metadata.update(
+                {
+                    "todo_scope_type": todo_scope_type,
+                    "todo_scope_id": todo_scope_id,
+                }
+            )
+            if middleware_specs is not None:
+                todo_spec = middleware_spec(middleware_specs, "todo_planner")
+                if todo_spec is not None:
+                    effective_context.metadata["todo_max_items"] = (
+                        middleware_config_int(
+                            todo_spec.config,
+                            "max_items",
+                            50,
+                            1,
+                            100,
+                        )
+                    )
             return await run_tool_with_runtime(
                 RuntimeToolCall(
                     tool_name=tool_name,
@@ -2707,24 +2949,20 @@ async def _run_workflow_response(
                         "conversation_id": run_context.get("conversation_id"),
                         "goal_id": run_context.get("goal_id"),
                         "handoff_id": run_context.get("handoff_id"),
+                        "todo_scope_type": todo_scope_type,
+                        "todo_scope_id": todo_scope_id,
                         **dict(metadata or {}),
                     },
                 ),
                 runtime_capabilities,
-                workflow_mcp_pipeline,
-                MiddlewareContext(
-                    task_id=task_id,
-                    trace_id=task_id,
-                    capabilities=runtime_capabilities,
-                    store=task_state["runtime_event_store"],
-                    metadata={
-                        "node_id": node.id,
-                        "node_title": title,
-                        "workflow": True,
-                    },
-                ),
+                pipeline or workflow_mcp_pipeline,
+                effective_context,
                 capability_name=capability_name,
-                policy=selected_workflow_tool_policy(capability_name),
+                policy=(
+                    agent_tool_policy(middleware_specs, capability_name)
+                    if middleware_specs is not None
+                    else selected_workflow_tool_policy(capability_name)
+                ),
                 audit_store=selected_workflow_tool_audit_store(),
             )
 
@@ -2752,6 +2990,9 @@ async def _run_workflow_response(
             include_memory_write: bool = False,
             include_knowledge_read: bool = False,
             include_knowledge_write: bool = False,
+            include_todo: bool = False,
+            middleware_specs: list[RuntimeMiddlewareSpec] | None = None,
+            apply_policy_filter: bool = False,
         ) -> list[Any]:
             tools = (
                 await workflow_mcp_provider.list_tools()
@@ -2795,6 +3036,22 @@ async def _run_workflow_response(
                     for tool in knowledge_tools
                     if tool.name == "knowledge_propose_write"
                 )
+            if include_todo:
+                tools.extend(await workflow_todo_provider.list_tools())
+            if middleware_specs is not None and apply_policy_filter:
+                allowed_tools: list[Any] = []
+                for tool in tools:
+                    capability_name = {
+                        "memory": "memory_tools",
+                        "knowledge": "knowledge_tools",
+                        "todo": "todo_tools",
+                    }.get(str(tool.provider or ""), "mcp_tools")
+                    if agent_tool_policy(
+                        middleware_specs,
+                        capability_name,
+                    ).is_allowed(tool.name):
+                        allowed_tools.append(tool)
+                tools = allowed_tools
             return tools
 
         async def run_react_lite_agent(
@@ -2815,6 +3072,12 @@ async def _run_workflow_response(
             include_knowledge_read: bool = False,
             include_knowledge_write: bool = False,
             knowledge_base_ids: list[str] | None = None,
+            include_todo: bool = False,
+            pipeline: MiddlewarePipeline | None = None,
+            middleware_context: MiddlewareContext | None = None,
+            middleware_specs: list[RuntimeMiddlewareSpec] | None = None,
+            selector_spec: RuntimeMiddlewareSpec | None = None,
+            history_messages: list[dict[str, Any]] | None = None,
         ) -> tuple[str, list[dict[str, Any]]]:
             available_tools = await workflow_available_tools(
                 tool_names_raw,
@@ -2822,7 +3085,109 @@ async def _run_workflow_response(
                 include_memory_write=include_memory_write,
                 include_knowledge_read=include_knowledge_read,
                 include_knowledge_write=include_knowledge_write,
+                include_todo=include_todo,
+                middleware_specs=middleware_specs,
+                apply_policy_filter=selector_spec is not None,
             )
+            if selector_spec is not None and available_tools:
+                required_tools = (
+                    {"todo_list", "todo_create", "todo_update"}
+                    if include_todo
+                    else set()
+                )
+                required_tools.update(
+                    item.strip()
+                    for item in re.split(
+                        r"[,\n]",
+                        str(selector_spec.config.get("always_include_tools") or ""),
+                    )
+                    if item.strip()
+                )
+                selector_model_id = str(
+                    selector_spec.config.get("selector_model_id") or model_id
+                ).strip() or model_id
+                selector_started_at = time.perf_counter()
+                available_tools, selector_metadata = await select_runtime_tools(
+                    available_tools,
+                    user_prompt=user_prompt,
+                    model_id=selector_model_id,
+                    max_selected_tools=middleware_config_int(
+                        selector_spec.config,
+                        "max_selected_tools",
+                        8,
+                        1,
+                        20,
+                    ),
+                    required_tools=required_tools,
+                    model_text=middleware_model_text,
+                )
+                if middleware_context is not None:
+                    middleware_context.metadata["tool_selection"] = selector_metadata
+                if run_id:
+                    await run_registry.record_checkpoint(
+                        run_id,
+                        event_type="middleware.tool_selector.completed",
+                        title="Runtime tools selected",
+                        summary=f"selected={len(available_tools)}",
+                        severity=(
+                            "warning" if selector_metadata.get("warning") else "info"
+                        ),
+                        metadata={
+                            "mode": selector_metadata.get("mode"),
+                            "selected": selector_metadata.get("selected", []),
+                            "warning": selector_metadata.get("warning"),
+                            "duration_ms": round(
+                                (time.perf_counter() - selector_started_at) * 1000,
+                                2,
+                            ),
+                        },
+                    )
+
+            async def invoke_agent_model(messages: list[ChatMessage]) -> str:
+                if pipeline is None or middleware_context is None:
+                    return await collect_chat_completion_text(
+                        model_id,
+                        messages,
+                        temperature=temperature,
+                        max_tokens=WORKFLOW_AGENT_MAX_TOKENS,
+                    )
+
+                async def handler(request: ModelCallRequest) -> ModelCallResponse:
+                    text = await collect_chat_completion_text(
+                        request.model_id,
+                        [
+                            ChatMessage.model_validate(message)
+                            for message in request.messages
+                        ],
+                        temperature=float(
+                            request.params.get("temperature", temperature)
+                        ),
+                        max_tokens=int(
+                            request.params.get(
+                                "max_tokens",
+                                WORKFLOW_AGENT_MAX_TOKENS,
+                            )
+                        ),
+                    )
+                    return ModelCallResponse(
+                        text=text,
+                        metadata={"model_id": request.model_id},
+                    )
+
+                response = await pipeline.run_model_call(
+                    ModelCallRequest(
+                        model_id=model_id,
+                        messages=[message.model_dump() for message in messages],
+                        params={
+                            "temperature": temperature,
+                            "max_tokens": WORKFLOW_AGENT_MAX_TOKENS,
+                        },
+                    ),
+                    handler,
+                    middleware_context,
+                )
+                return response.text
+
             events: list[dict[str, Any]] = []
             if not available_tools:
                 events.append(
@@ -2849,11 +3214,11 @@ async def _run_workflow_response(
                         },
                     )
                 return (
-                    await collect_chat_completion_text(
-                        model_id,
-                        [ChatMessage(role="system", content=system_prompt), ChatMessage(role="user", content=user_prompt)],
-                        temperature=temperature,
-                        max_tokens=WORKFLOW_AGENT_MAX_TOKENS,
+                    await invoke_agent_model(
+                        [
+                            ChatMessage(role="system", content=system_prompt),
+                            ChatMessage(role="user", content=user_prompt),
+                        ]
                     ),
                     events,
                 )
@@ -2876,20 +3241,19 @@ async def _run_workflow_response(
             )
             messages: list[ChatMessage] = [
                 ChatMessage(role="system", content=react_system_prompt),
+                *[
+                    ChatMessage.model_validate(message)
+                    for message in list(history_messages or [])
+                    if str(message.get("role") or "") in {"user", "assistant"}
+                    and str(message.get("content") or "").strip()
+                ],
                 ChatMessage(role="user", content=user_prompt),
             ]
             output_text = ""
             for iteration_index in range(max_iterations):
                 if not get_llm_gateway_config()[0]:
                     raise ValueError(LLM_GATEWAY_NOT_CONFIGURED_MESSAGE)
-                raw_response = (
-                    await collect_chat_completion_text(
-                        model_id,
-                        messages,
-                        temperature=temperature,
-                        max_tokens=WORKFLOW_AGENT_MAX_TOKENS,
-                    )
-                ).strip()
+                raw_response = (await invoke_agent_model(messages)).strip()
                 json_text = raw_response
                 fenced = re.search(
                     r"```(?:json)?\s*\n?(.*?)\n?```",
@@ -2977,6 +3341,9 @@ async def _run_workflow_response(
                             "knowledge_write_enabled": include_knowledge_write,
                             "knowledge_base_ids": list(knowledge_base_ids or []),
                         },
+                        pipeline=pipeline,
+                        middleware_context=middleware_context,
+                        middleware_specs=middleware_specs,
                     )
                     tool_result_text = runtime_tool_result_text(call_result)
                     if run_id:
@@ -4161,6 +4528,8 @@ async def _run_workflow_response(
                         node.data.get("outputVariable") or "agent_output"
                     ).strip() or "agent_output"
                     workflow_agent_run = None
+                    agent_pipeline = None
+                    agent_context = None
                     try:
                         agent_name = str(
                             node.data.get("agentName") or "workflow-agent"
@@ -4168,6 +4537,59 @@ async def _run_workflow_response(
                         model_id = str(
                             node.data.get("modelId") or TEXT_FALLBACK_MODEL
                         ).strip() or TEXT_FALLBACK_MODEL
+                        agent_specs = agent_middleware_specs(node.id)
+                        todo_spec = middleware_spec(agent_specs, "todo_planner")
+                        selector_spec = middleware_spec(
+                            agent_specs,
+                            "llm_tool_selector",
+                        )
+                        structured_spec = middleware_spec(
+                            agent_specs,
+                            "structured_output",
+                        )
+                        if (
+                            structured_spec is None
+                            and str(node.data.get("outputSchemaMode") or "default")
+                            == "json"
+                            and str(node.data.get("outputSchemaJson") or "").strip()
+                        ):
+                            raw_schema = json.loads(
+                                str(node.data.get("outputSchemaJson") or "{}")
+                            )
+                            if not isinstance(raw_schema, dict):
+                                raise ValueError(
+                                    "workflow_agent outputSchemaJson must be an object."
+                                )
+                            if "type" not in raw_schema and "properties" not in raw_schema:
+                                properties: dict[str, Any] = {}
+                                for name, value in raw_schema.items():
+                                    value_type = str(value or "string").strip()
+                                    if value_type not in {
+                                        "string",
+                                        "number",
+                                        "integer",
+                                        "boolean",
+                                        "array",
+                                        "object",
+                                    }:
+                                        value_type = "string"
+                                    properties[str(name)] = {"type": value_type}
+                                raw_schema = {
+                                    "type": "object",
+                                    "properties": properties,
+                                    "required": list(properties),
+                                    "additionalProperties": False,
+                                }
+                            structured_spec = RuntimeMiddlewareSpec(
+                                node_id=f"{node.id}:implicit-structured-output",
+                                middleware_id="structured_output",
+                                priority=1000,
+                                config={
+                                    "schema_json": raw_schema,
+                                    "repair_attempts": 1,
+                                },
+                                binding="implicit",
+                            )
                         role_prompt = render_workflow_template(
                             str(node.data.get("rolePrompt") or ""),
                             variables,
@@ -4182,6 +4604,51 @@ async def _run_workflow_response(
                         ).strip()
                         if prompt_suffix:
                             task_input = f"{task_input}\n\n{prompt_suffix}".strip()
+                        system_prompt_spec = middleware_spec(
+                            agent_specs,
+                            "system_prompt_injector",
+                        )
+                        if system_prompt_spec is not None:
+                            injected_prompt = render_workflow_template(
+                                str(
+                                    system_prompt_spec.config.get("system_prompt")
+                                    or system_prompt_spec.config.get("systemPrompt")
+                                    or ""
+                                ),
+                                variables,
+                            ).strip()
+                            if injected_prompt:
+                                if parse_workflow_bool(
+                                    system_prompt_spec.config.get("override"),
+                                    default=False,
+                                ):
+                                    role_prompt = injected_prompt
+                                else:
+                                    role_prompt = (
+                                        f"{injected_prompt}\n\n{role_prompt}"
+                                    ).strip()
+                        if todo_spec is not None:
+                            todo_scope_type, todo_scope_id = runtime_todo_scope(node.id)
+                            todo_items = runtime_todo_store.list_items(
+                                scope_type=todo_scope_type,
+                                scope_id=todo_scope_id,
+                                limit=middleware_config_int(
+                                    todo_spec.config,
+                                    "max_items",
+                                    50,
+                                    1,
+                                    100,
+                                ),
+                            )
+                            role_prompt = (
+                                f"{role_prompt}\n\n"
+                                + todo_planning_instruction(
+                                    [
+                                        runtime_todo_store.serialize(item)
+                                        for item in todo_items
+                                    ]
+                                )
+                            ).strip()
                         tool_mode = str(node.data.get("toolMode") or "none").strip()
                         enable_file_understanding = workflow_truthy(
                             node.data.get("enableFileUnderstanding")
@@ -4318,6 +4785,46 @@ async def _run_workflow_response(
                                 "knowledge_base_ids": knowledge_base_ids,
                             },
                         )
+                        (
+                            agent_pipeline,
+                            agent_context,
+                            agent_specs,
+                            _agent_policy,
+                        ) = await compile_agent_runtime(
+                            node,
+                            title,
+                            workflow_agent_run.run_id,
+                            model_id,
+                        )
+                        compression_spec = middleware_spec(
+                            agent_specs,
+                            "context_compression",
+                        )
+                        history_messages = (
+                            list(
+                                agent_context.metadata.get("conversation_messages")
+                                or []
+                            )
+                            if compression_spec is not None
+                            else []
+                        )
+                        raw_history = str(variables.get("conversation_history") or "")
+                        if raw_history and history_messages and raw_history in task_input:
+                            task_input = task_input.replace(
+                                raw_history,
+                                "[Conversation history is supplied as prior messages.]",
+                            )
+                        await agent_pipeline.before_agent(
+                            {
+                                "model_id": model_id,
+                                "messages": history_messages,
+                                "node_id": node.id,
+                                "middleware_ids": [
+                                    item.middleware_id for item in agent_specs
+                                ],
+                            },
+                            agent_context,
+                        )
                         await run_registry.record_checkpoint(
                             workflow_agent_run.run_id,
                             event_type="workflow_agent.started",
@@ -4383,6 +4890,79 @@ async def _run_workflow_response(
                             if retry_on_failure:
                                 attempt_models.append((fallback_model_id, True))
 
+                        def base_agent_messages(
+                            system_prompt: str,
+                            user_prompt: str,
+                        ) -> list[dict[str, Any]]:
+                            return [
+                                {"role": "system", "content": system_prompt},
+                                *[
+                                    dict(message)
+                                    for message in history_messages
+                                    if str(message.get("role") or "")
+                                    in {"user", "assistant"}
+                                    and str(message.get("content") or "").strip()
+                                ],
+                                {"role": "user", "content": user_prompt},
+                            ]
+
+                        async def buffered_agent_model_text(
+                            call_model_id: str,
+                            messages: list[dict[str, Any]],
+                            max_tokens: int,
+                            *,
+                            temperature: float = 0.7,
+                        ) -> str:
+                            async def handler(
+                                request: ModelCallRequest,
+                            ) -> ModelCallResponse:
+                                text = await collect_chat_completion_text(
+                                    request.model_id,
+                                    [
+                                        ChatMessage.model_validate(message)
+                                        for message in request.messages
+                                    ],
+                                    temperature=float(
+                                        request.params.get(
+                                            "temperature",
+                                            temperature,
+                                        )
+                                    ),
+                                    max_tokens=int(
+                                        request.params.get("max_tokens", max_tokens)
+                                    ),
+                                )
+                                return ModelCallResponse(
+                                    text=text,
+                                    metadata={"model_id": request.model_id},
+                                )
+
+                            response = await agent_pipeline.run_model_call(
+                                ModelCallRequest(
+                                    model_id=call_model_id,
+                                    messages=messages,
+                                    params={
+                                        "temperature": temperature,
+                                        "max_tokens": max_tokens,
+                                    },
+                                ),
+                                handler,
+                                agent_context,
+                            )
+                            return response.text
+
+                        async def structured_repair_model_text(
+                            call_model_id: str,
+                            messages: list[dict[str, Any]],
+                            max_tokens: int,
+                        ) -> str:
+                            return await buffered_agent_model_text(
+                                call_model_id,
+                                messages,
+                                max_tokens,
+                                temperature=0,
+                            )
+
                         last_error: Exception | None = None
                         success = False
                         fallback_checkpoint_recorded = False
@@ -4436,23 +5016,75 @@ async def _run_workflow_response(
                                         "fallback_used": fallback_used,
                                     },
                                 )
-                                if tool_mode == "none":
-                                    async for delta in stream_workflow_llm_text(
-                                        attempt_model_id,
+                                if tool_mode == "none" and todo_spec is None:
+                                    direct_messages = base_agent_messages(
+                                        role_prompt,
                                         task_input,
-                                        system_prompt=role_prompt,
-                                    ):
-                                        output += delta
-                                        yield sse_payload(
-                                            {
-                                                "event": "node_delta",
-                                                "node_id": node.id,
-                                                "node_title": title,
-                                                "node_type": kind,
-                                                "output": delta,
-                                                "variable": output_variable,
-                                                "run_id": workflow_agent_run.run_id,
-                                            }
+                                    )
+                                    if structured_spec is not None:
+                                        output = await buffered_agent_model_text(
+                                            attempt_model_id,
+                                            direct_messages,
+                                            WORKFLOW_AGENT_MAX_TOKENS,
+                                        )
+                                    else:
+                                        prepared_request = await agent_pipeline.before_model(
+                                            ModelCallRequest(
+                                                model_id=attempt_model_id,
+                                                messages=direct_messages,
+                                                params={
+                                                    "temperature": 0.7,
+                                                    "max_tokens": WORKFLOW_AGENT_MAX_TOKENS,
+                                                    "stream": True,
+                                                },
+                                            ),
+                                            agent_context,
+                                        )
+                                        prepared_messages = [
+                                            ChatMessage.model_validate(message)
+                                            for message in prepared_request.messages
+                                        ]
+                                        if (
+                                            len(prepared_messages) == 2
+                                            and prepared_messages[0].role == "system"
+                                            and prepared_messages[1].role == "user"
+                                        ):
+                                            model_stream = stream_workflow_llm_text(
+                                                prepared_request.model_id,
+                                                str(prepared_messages[1].content or ""),
+                                                system_prompt=str(
+                                                    prepared_messages[0].content or ""
+                                                ),
+                                            )
+                                        else:
+                                            model_stream = stream_workflow_llm_messages(
+                                                prepared_request.model_id,
+                                                prepared_messages,
+                                                temperature=0.7,
+                                                max_tokens=WORKFLOW_AGENT_MAX_TOKENS,
+                                            )
+                                        async for delta in model_stream:
+                                            output += delta
+                                            yield sse_payload(
+                                                {
+                                                    "event": "node_delta",
+                                                    "node_id": node.id,
+                                                    "node_title": title,
+                                                    "node_type": kind,
+                                                    "output": delta,
+                                                    "variable": output_variable,
+                                                    "run_id": workflow_agent_run.run_id,
+                                                }
+                                            )
+                                        await agent_pipeline.after_model(
+                                            ModelCallResponse(
+                                                text=output,
+                                                metadata={
+                                                    "model_id": attempt_model_id,
+                                                    "streaming": True,
+                                                },
+                                            ),
+                                            agent_context,
                                         )
                                 else:
                                     output, agent_events = await run_react_lite_agent(
@@ -4472,16 +5104,75 @@ async def _run_workflow_response(
                                         include_knowledge_read=knowledge_read_enabled,
                                         include_knowledge_write=knowledge_write_enabled,
                                         knowledge_base_ids=knowledge_base_ids,
+                                        include_todo=todo_spec is not None,
+                                        pipeline=agent_pipeline,
+                                        middleware_context=agent_context,
+                                        middleware_specs=agent_specs,
+                                        selector_spec=selector_spec,
+                                        history_messages=history_messages,
                                     )
                                     for agent_event in agent_events:
                                         yield sse_payload(agent_event)
+                                    if structured_spec is None:
+                                        yield sse_payload(
+                                            {
+                                                "event": "node_delta",
+                                                "node_id": node.id,
+                                                "node_title": title,
+                                                "node_type": kind,
+                                                "output": output[:500],
+                                                "variable": output_variable,
+                                                "run_id": workflow_agent_run.run_id,
+                                            }
+                                        )
+                                if structured_spec is not None:
+                                    structured_started_at = time.perf_counter()
+                                    output = await validate_structured_output(
+                                        output,
+                                        schema=middleware_config_schema(
+                                            structured_spec.config
+                                        ),
+                                        model_id=attempt_model_id,
+                                        repair_attempts=middleware_config_int(
+                                            structured_spec.config,
+                                            "repair_attempts",
+                                            1,
+                                            0,
+                                            1,
+                                        ),
+                                        model_text=structured_repair_model_text,
+                                    )
+                                    await run_registry.record_checkpoint(
+                                        workflow_agent_run.run_id,
+                                        event_type="middleware.structured_output.validated",
+                                        title="Structured output validated",
+                                        summary=f"output_length={len(output)}",
+                                        metadata={
+                                            "node_id": node.id,
+                                            "repair_attempts": middleware_config_int(
+                                                structured_spec.config,
+                                                "repair_attempts",
+                                                1,
+                                                0,
+                                                1,
+                                            ),
+                                            "duration_ms": round(
+                                                (
+                                                    time.perf_counter()
+                                                    - structured_started_at
+                                                )
+                                                * 1000,
+                                                2,
+                                            ),
+                                        },
+                                    )
                                     yield sse_payload(
                                         {
                                             "event": "node_delta",
                                             "node_id": node.id,
                                             "node_title": title,
                                             "node_type": kind,
-                                            "output": output[:500],
+                                            "output": output,
                                             "variable": output_variable,
                                             "run_id": workflow_agent_run.run_id,
                                         }
@@ -4581,6 +5272,40 @@ async def _run_workflow_response(
                             output = ""
                         else:
                             variables[output_variable] = output
+                        await agent_pipeline.after_agent(
+                            {
+                                "model_id": model_id,
+                                "node_id": node.id,
+                                "status": "completed",
+                                "output_length": len(output or ""),
+                            },
+                            agent_context,
+                        )
+                        compression_stats = agent_context.metadata.get(
+                            "context_compression"
+                        )
+                        if isinstance(compression_stats, dict):
+                            await run_registry.record_checkpoint(
+                                workflow_agent_run.run_id,
+                                event_type="middleware.context_compression.completed",
+                                title="Context compressed",
+                                summary=(
+                                    f"summarized_messages="
+                                    f"{compression_stats.get('summarized_messages', 0)}"
+                                ),
+                                metadata=dict(compression_stats),
+                            )
+                        for warning in list(
+                            agent_context.metadata.get("middleware_warnings") or []
+                        )[:10]:
+                            await run_registry.record_checkpoint(
+                                workflow_agent_run.run_id,
+                                event_type="middleware.warning",
+                                title="Agent middleware warning",
+                                summary=str(warning)[:300],
+                                severity="warning",
+                                metadata={"node_id": node.id},
+                            )
                         await run_registry.update_run(
                             workflow_agent_run.run_id,
                             status="completed",
@@ -4607,6 +5332,22 @@ async def _run_workflow_response(
                         logger.warning("Workflow workflow_agent node failed: %s", exc)
                         output = ""
                         variables[output_variable] = output
+                        if agent_pipeline is not None and agent_context is not None:
+                            try:
+                                await agent_pipeline.after_agent(
+                                    {
+                                        "model_id": str(node.data.get("modelId") or ""),
+                                        "node_id": node.id,
+                                        "status": "error",
+                                        "error": workflow_error_summary(exc),
+                                    },
+                                    agent_context,
+                                )
+                            except Exception:
+                                logger.warning(
+                                    "Failed to finalize workflow_agent middleware",
+                                    exc_info=True,
+                                )
                         if workflow_agent_run is not None:
                             try:
                                 await run_registry.update_run(
@@ -5293,7 +6034,33 @@ async def _run_workflow_response(
                     middleware_config = node.data.get("runtimeMiddlewareConfig")
                     if not isinstance(middleware_config, dict):
                         middleware_config = {}
-                    if middleware_id == "tool_policy":
+                    if middleware_id in {
+                        "system_prompt_injector",
+                        "event_recorder",
+                        "tool_policy",
+                        "tool_audit",
+                        "context_compression",
+                        "structured_output",
+                        "todo_planner",
+                        "llm_tool_selector",
+                    }:
+                        workflow_runtime_context["global_middleware_specs"].append(
+                            middleware_spec_from_node(node, binding="linear")
+                        )
+                    if middleware_id in {
+                        "context_compression",
+                        "structured_output",
+                        "todo_planner",
+                        "llm_tool_selector",
+                    }:
+                        workflow_runtime_context["active_middlewares"].append(
+                            middleware_id
+                        )
+                        output = (
+                            f"Enabled agent middleware: {middleware_id}. "
+                            "It applies to downstream workflow_agent nodes."
+                        )
+                    elif middleware_id == "tool_policy":
                         allowed_tools = parse_workflow_tool_policy_list(
                             middleware_config.get("allowed_tools")
                         )

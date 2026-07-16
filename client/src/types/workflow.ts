@@ -125,6 +125,7 @@ export interface WorkflowNodeData extends Record<string, unknown> {
   runtimeMiddlewareFields?: RuntimeMiddlewareField[];
   runtimeMiddlewareMetadata?: Record<string, unknown>;
   runtimeMiddlewareConfig?: Record<string, unknown>;
+  middlewarePriority?: string;
 }
 
 export type WorkflowNode = Node<WorkflowNodeData, "workflowNode">;
