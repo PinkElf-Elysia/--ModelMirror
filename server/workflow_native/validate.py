@@ -4,6 +4,7 @@ import re
 import json
 from collections import defaultdict, deque
 from string import Formatter
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
@@ -267,6 +268,12 @@ def validate_workflow_graph(workflow: NativeWorkflowDefinition) -> ValidateWorkf
         kinds_by_id=kinds_by_id,
     )
     validate_client_tool_middleware_bindings(
+        workflow.nodes,
+        valid_edges,
+        issues,
+        kinds_by_id=kinds_by_id,
+    )
+    validate_automation_middleware_bindings(
         workflow.nodes,
         valid_edges,
         issues,
@@ -1742,6 +1749,71 @@ def validate_node_configuration(
                         node_id=node.id,
                     )
                 )
+        if middleware_id == "scheduler":
+            timezone_name = str(config.get("default_timezone") or "UTC").strip()
+            try:
+                ZoneInfo(timezone_name)
+            except ZoneInfoNotFoundError:
+                issues.append(
+                    ValidationIssue(
+                        code="invalid_runtime_middleware_scheduler_timezone",
+                        message="scheduler default_timezone must be a valid IANA timezone.",
+                        node_id=node.id,
+                    )
+                )
+            _validate_middleware_number(
+                issues,
+                node.id,
+                config,
+                "max_runs_per_day",
+                1,
+                1000,
+                integer=True,
+            )
+        if middleware_id == "ralph_loop":
+            _validate_middleware_number(
+                issues,
+                node.id,
+                config,
+                "max_iterations",
+                1,
+                20,
+                integer=True,
+            )
+            _validate_middleware_number(
+                issues,
+                node.id,
+                config,
+                "max_output_chars",
+                4000,
+                200000,
+                integer=True,
+            )
+        if middleware_id == "knowledge_writer":
+            if not str(config.get("knowledge_base_id") or "").strip():
+                issues.append(
+                    ValidationIssue(
+                        code="knowledge_writer_kb_required",
+                        message="knowledge_writer requires knowledge_base_id.",
+                        node_id=node.id,
+                    )
+                )
+        if middleware_id == "plugin_hooks":
+            skill_ids = [
+                value.strip()
+                for value in re.split(
+                    r"[,\n]+", str(config.get("skill_ids") or "")
+                )
+                if value.strip()
+            ]
+            if not 1 <= len(skill_ids) <= 10:
+                issues.append(
+                    ValidationIssue(
+                        code="plugin_hooks_skills_required",
+                        message="plugin_hooks requires between 1 and 10 installed Skill IDs.",
+                        node_id=node.id,
+                    )
+                )
 
     return issues
 
@@ -2492,6 +2564,57 @@ def validate_client_tool_middleware_bindings(
                             "coverage for every configured mutation."
                         ),
                         node_id=client_node.id,
+                    )
+                )
+
+
+def validate_automation_middleware_bindings(
+    nodes: list[NativeWorkflowNode],
+    edges: list[NativeWorkflowEdge],
+    issues: list[ValidationIssue],
+    *,
+    kinds_by_id: dict[str, str],
+) -> None:
+    """Validate tool mode and execution constraints for automation middleware."""
+
+    nodes_by_id = {node.id: node for node in nodes}
+    bound_by_agent: dict[str, list[NativeWorkflowNode]] = defaultdict(list)
+    for edge in edges:
+        if not is_middleware_binding_edge(edge):
+            continue
+        source = nodes_by_id.get(edge.source)
+        if source is not None and kinds_by_id.get(source.id) == "runtime_middleware":
+            bound_by_agent[edge.target].append(source)
+
+    for agent_id, middleware_nodes in bound_by_agent.items():
+        agent = nodes_by_id.get(agent_id)
+        tool_mode = str((agent.data if agent else {}).get("toolMode") or "none")
+        for middleware_node in middleware_nodes:
+            middleware_id = str(
+                middleware_node.data.get("runtimeMiddlewareId") or ""
+            )
+            config = middleware_node.data.get("runtimeMiddlewareConfig") or {}
+            if middleware_id == "scheduler" and tool_mode != "mcp_tools":
+                issues.append(
+                    ValidationIssue(
+                        code="scheduler_requires_runtime_tool_mode",
+                        message="scheduler requires workflow_agent toolMode=mcp_tools.",
+                        node_id=middleware_node.id,
+                    )
+                )
+            if (
+                middleware_id == "knowledge_writer"
+                and not config_truthy(config.get("auto_propose_verified_output"))
+                and tool_mode != "mcp_tools"
+            ):
+                issues.append(
+                    ValidationIssue(
+                        code="knowledge_writer_requires_runtime_tool_mode",
+                        message=(
+                            "knowledge_writer requires workflow_agent toolMode=mcp_tools "
+                            "unless automatic proposal is enabled."
+                        ),
+                        node_id=middleware_node.id,
                     )
                 )
 

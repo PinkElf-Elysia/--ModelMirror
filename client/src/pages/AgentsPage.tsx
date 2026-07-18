@@ -23,6 +23,16 @@ import {
 
 const platformCapabilities: PlatformCapability[] = [
   {
+    id: "xpert-automations",
+    icon: "AT",
+    title: "Xpert 自动化",
+    summary: "按单次、间隔或 Cron 调度已发布 Xpert，并在失败后重试或进入死信。",
+    detail:
+      "每条自动化固定 Xpert 发布版本，支持预算、并发与重叠策略；审批和客户端等待可以在后台恢复。",
+    tag: "后台执行 · Beta",
+    eta: "已开放自动化工作台",
+  },
+  {
     id: "conversation-goals",
     icon: "GL",
     title: "长期 Goal",
@@ -139,6 +149,10 @@ export default function AgentsPage() {
   }
 
   function openPlatformCapability(capability: PlatformCapability) {
+    if (capability.id === "xpert-automations") {
+      navigate("/agents/automations");
+      return;
+    }
     if (capability.id === "conversation-goals") {
       navigate("/agents/goals");
       return;

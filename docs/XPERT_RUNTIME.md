@@ -219,3 +219,11 @@ Classic workflow supports a non-control binding edge from `runtime_middleware` t
 Each workflow Agent compiles an isolated `MiddlewarePipeline`. Agent hooks wrap the complete Agent run, model hooks run for direct streaming and every ReAct decision, and Runtime tools reuse the same pipeline, tool policy, event recorder, and audit store. Context compression can persist a derived Xpert conversation summary without modifying original messages. Structured output buffers the final answer, validates Draft 2020-12 JSON Schema, and optionally repairs once before entering existing exception handling.
 
 The Todo capability exposes scope-bound `todo_list`, `todo_create`, and `todo_update`. Conversation, Goal, Handoff, and Workflow scopes are atomically persisted; Xpert App scopes remain run-local. The LLM tool selector operates only after allowlist and policy filtering and cannot restore denied tools. Checkpoints retain names, counts, status, timing, and safe errors only. See `docs/XPERT_MIDDLEWARE.md`.
+
+## Automation Runtime
+
+`AutomationStore` persists definitions and executions atomically in the Runtime storage directory. A definition pins one immutable published Xpert version and supports once, fixed interval, or five-field Cron triggers with an IANA timezone. Occurrence IDs, leases, overlap/misfire policies, budgets, bounded retries, and dead-letter states provide the single-process reliability boundary.
+
+`AutomationCoordinator` invokes the fixed Xpert through the same classic workflow runner and creates an `automation` RunRegistry parent. Approval and Client Tool continuations update and resume the same execution. Scheduler Runtime tools are scoped to the current private published Xpert and cannot manage another Xpert's definitions.
+
+Ralph Loop performs bounded continuation and strict verification before the Agent output is committed. Knowledge Writer creates pending proposals only and retains the existing Inbox, pipeline, evaluation, and promotion gates. Plugin Hooks stage an installed Skill's explicit manifest into the offline Sandbox and execute argv only. Public Xpert Apps reject all private automation middleware. See `docs/XPERT_AUTOMATION.md`.

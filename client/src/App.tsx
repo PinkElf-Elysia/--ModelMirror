@@ -23,6 +23,7 @@ import ConversationGoalsPage from "./pages/ConversationGoalsPage";
 import KnowledgePipelineCanvasPage from "./pages/KnowledgePipelineCanvasPage";
 import KnowledgeEvaluationPage from "./pages/KnowledgeEvaluationPage";
 import KnowledgeInboxPage from "./pages/KnowledgeInboxPage";
+import AutomationsPage from "./pages/AutomationsPage";
 
 export default function App() {
   return (
@@ -39,6 +40,7 @@ export default function App() {
       <Route element={<XpertAppPage />} path="/apps/:appSlug" />
       <Route element={<ConversationGoalsPage />} path="/agents/goals" />
       <Route element={<ConversationGoalsPage />} path="/agents/goals/:goalId" />
+      <Route element={<AutomationsPage />} path="/agents/automations" />
       <Route element={<MatrixOasisPage />} path="/matrix-oasis" />
       <Route element={<ExpertTeamPage />} path="/expert-team" />
       <Route element={<McpBrowserPage />} path="/mcps" />

@@ -18,6 +18,7 @@ RuntimeRunType = Literal[
     "knowledge_citation",
     "knowledge_pipeline",
     "knowledge_evaluation",
+    "automation",
 ]
 RuntimeRunStatus = Literal[
     "pending",

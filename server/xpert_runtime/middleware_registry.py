@@ -709,6 +709,163 @@ def register_builtin_middleware_nodes(
         )
     )
 
+    registry.register(
+        RuntimeMiddlewareNode(
+            id="scheduler",
+            kind="runtime_middleware.scheduler",
+            title="定时任务调度",
+            description="允许私有 Xpert 创建、暂停、恢复和立即运行固定版本的持久化计划。",
+            category="agent",
+            icon="CalendarClock",
+            fields=[
+                RuntimeMiddlewareField(
+                    name="allow_agent_create",
+                    label="允许 Agent 创建计划",
+                    type="boolean",
+                    default=True,
+                ),
+                RuntimeMiddlewareField(
+                    name="default_timezone",
+                    label="默认时区",
+                    type="text",
+                    default="UTC",
+                    placeholder="Asia/Shanghai",
+                ),
+                RuntimeMiddlewareField(
+                    name="max_runs_per_day",
+                    label="每日运行上限",
+                    type="number",
+                    default=100,
+                    min_value=1,
+                    max_value=1000,
+                ),
+            ],
+            tags=["agent", "automation", "scheduler", "cron"],
+            metadata={
+                "middleware_name": "scheduler",
+                "runtime_hook": "agent_tools",
+                "capability_name": "automation_tools",
+                "durable": True,
+                "real_execution": True,
+                "app_forbidden": True,
+            },
+        )
+    )
+
+    registry.register(
+        RuntimeMiddlewareNode(
+            id="ralph_loop",
+            kind="runtime_middleware.ralph_loop",
+            title="Ralph 迭代循环",
+            description="在最终输出前执行有界的行动与严格验证循环，直到完成或达到预算。",
+            category="agent",
+            icon="Repeat2",
+            fields=[
+                RuntimeMiddlewareField(
+                    name="max_iterations",
+                    label="最大迭代次数",
+                    type="number",
+                    default=5,
+                    min_value=1,
+                    max_value=20,
+                ),
+                RuntimeMiddlewareField(
+                    name="verifier_model_id",
+                    label="验证模型（留空沿用 Agent 模型）",
+                    type="text",
+                ),
+                RuntimeMiddlewareField(
+                    name="max_output_chars",
+                    label="累计输出预算（字符）",
+                    type="number",
+                    default=60000,
+                    min_value=4000,
+                    max_value=200000,
+                ),
+            ],
+            tags=["agent", "automation", "loop", "verification"],
+            metadata={
+                "middleware_name": "ralph_loop",
+                "runtime_hook": "after_agent",
+                "real_execution": True,
+                "app_forbidden": True,
+            },
+        )
+    )
+
+    registry.register(
+        RuntimeMiddlewareNode(
+            id="knowledge_writer",
+            kind="runtime_middleware.knowledge_writer",
+            title="知识写入器",
+            description="把显式工具调用或已验证的最终输出提交到现有 Knowledge Inbox 审批。",
+            category="knowledge",
+            icon="NotebookPen",
+            fields=[
+                RuntimeMiddlewareField(
+                    name="knowledge_base_id",
+                    label="目标知识库 ID",
+                    type="text",
+                    required=True,
+                ),
+                RuntimeMiddlewareField(
+                    name="auto_propose_verified_output",
+                    label="自动提议已验证输出",
+                    type="boolean",
+                    default=False,
+                ),
+                RuntimeMiddlewareField(
+                    name="title_prefix",
+                    label="提议标题前缀",
+                    type="text",
+                    default="Automation result",
+                ),
+            ],
+            tags=["agent", "knowledge", "approval", "automation"],
+            metadata={
+                "middleware_name": "knowledge_writer",
+                "runtime_hook": "agent_tools,after_agent",
+                "capability_name": "knowledge_tools",
+                "real_execution": True,
+            },
+        )
+    )
+
+    registry.register(
+        RuntimeMiddlewareNode(
+            id="plugin_hooks",
+            kind="runtime_middleware.plugin_hooks",
+            title="Skill 插件 Hook",
+            description="在离线 Sandbox 中运行已安装 Skill 声明的会话与工具 Hook。",
+            category="tool",
+            icon="PlugZap",
+            fields=[
+                RuntimeMiddlewareField(
+                    name="skill_ids",
+                    label="已安装 Skill ID",
+                    type="textarea",
+                    required=True,
+                    rows=4,
+                ),
+                RuntimeMiddlewareField(
+                    name="fail_closed",
+                    label="Hook 失败时阻断 Agent",
+                    type="boolean",
+                    default=False,
+                ),
+            ],
+            tags=["agent", "skill", "hooks", "sandbox", "automation"],
+            metadata={
+                "middleware_name": "plugin_hooks",
+                "runtime_hook": "before_agent,wrap_tool_call,after_agent",
+                "capability_name": "sandbox_tools",
+                "network": "none",
+                "real_execution": True,
+                "app_forbidden": True,
+            },
+        )
+    )
+
 
 runtime_middleware_registry = RuntimeMiddlewareRegistry()
 register_builtin_middleware_nodes(runtime_middleware_registry)
