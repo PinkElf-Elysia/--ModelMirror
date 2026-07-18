@@ -160,6 +160,23 @@ from .sandbox_toolset import (
     SandboxToolsetProvider,
     register_sandbox_toolset_capability,
 )
+from .browser_api import configure_runtime_browser, router as runtime_browser_router
+from .browser_client import BrowserClientError, BrowserSidecarClient
+from .browser_store import (
+    BrowserArtifact,
+    BrowserDomainGrant,
+    BrowserNotFoundError,
+    BrowserOperation,
+    BrowserSession,
+    BrowserSessionStore,
+    BrowserValidationError,
+)
+from .browser_toolset import (
+    BROWSER_MUTATING_TOOLS,
+    BROWSER_TOOL_NAMES,
+    BrowserToolsetProvider,
+    register_browser_toolset_capability,
+)
 
 __all__ = [
     "AgentMiddleware",
@@ -290,4 +307,19 @@ __all__ = [
     "SKILL_TOOL_NAMES",
     "SandboxToolsetProvider",
     "register_sandbox_toolset_capability",
+    "configure_runtime_browser",
+    "runtime_browser_router",
+    "BrowserClientError",
+    "BrowserSidecarClient",
+    "BrowserArtifact",
+    "BrowserDomainGrant",
+    "BrowserNotFoundError",
+    "BrowserOperation",
+    "BrowserSession",
+    "BrowserSessionStore",
+    "BrowserValidationError",
+    "BROWSER_MUTATING_TOOLS",
+    "BROWSER_TOOL_NAMES",
+    "BrowserToolsetProvider",
+    "register_browser_toolset_capability",
 ]

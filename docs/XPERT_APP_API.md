@@ -1,5 +1,7 @@
 # Xpert App 与兼容 API
 
+> 安全补充（2026-07-16）：公开 Xpert App 与 OpenAI 兼容 API 禁止部署 `browser_automation`。服务端 Browser 只面向私有 Workflow、Xpert Chat、Goal 和 Handoff，App policy 不提供放行开关。
+
 最后更新日期：2026-07-16
 
 ## 能力边界

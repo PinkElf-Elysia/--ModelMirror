@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import RuntimeApprovalPanel from "../runtime/RuntimeApprovalPanel";
+import BrowserSessionPanel from "../runtime/BrowserSessionPanel";
 import SandboxWorkspacePanel from "../runtime/SandboxWorkspacePanel";
 import {
   type WorkflowDefinition,
@@ -673,7 +674,7 @@ export default function WorkflowRun({
           <RuntimeApprovalPanel
             compact
             onResolved={() => resumeDurableExecution()}
-            requestTypes={["tool_call", "final_output"]}
+            requestTypes={["tool_call", "final_output", "browser_domain"]}
             taskId={taskId}
             title="Agent 运行审批"
           />
@@ -682,6 +683,14 @@ export default function WorkflowRun({
 
       {taskId ? (
         <SandboxWorkspacePanel
+          compact
+          scopeIdPrefix={`${taskId}:`}
+          scopeType="workflow"
+        />
+      ) : null}
+
+      {taskId ? (
+        <BrowserSessionPanel
           compact
           scopeIdPrefix={`${taskId}:`}
           scopeType="workflow"

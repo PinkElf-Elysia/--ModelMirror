@@ -484,6 +484,67 @@ def test_deploy_preflight_rejects_sandbox_runtime(stores) -> None:
     assert any(issue["code"] == "app_sandbox_forbidden" for issue in result["issues"])
 
 
+def test_deploy_preflight_rejects_browser_runtime(stores) -> None:
+    xpert_store, _ = stores
+    created = xpert_store.create_xpert(name="Browser Helper", slug="browser-helper")
+    draft = created.draft.model_copy(deep=True)
+    agent = next(
+        node for node in draft.workflow.nodes if node.data.get("kind") == "workflow_agent"
+    )
+    agent.data["toolMode"] = "mcp_tools"
+    middleware_nodes = [
+        {
+            "id": "browser",
+            "type": "runtime_middleware",
+            "data": {
+                "kind": "runtime_middleware",
+                "runtimeMiddlewareId": "browser_automation",
+                "runtimeMiddlewareKind": "runtime_middleware.browser_automation",
+                "runtimeMiddlewareConfig": {
+                    "networkPolicy": "public_with_domain_approval",
+                    "approvalMode": "mutating",
+                },
+            },
+        },
+        {
+            "id": "browser-hitl",
+            "type": "runtime_middleware",
+            "data": {
+                "kind": "runtime_middleware",
+                "runtimeMiddlewareId": "human_in_the_loop",
+                "runtimeMiddlewareKind": "runtime_middleware.human_in_the_loop",
+                "runtimeMiddlewareConfig": {
+                    "interrupt_on_tools": "*",
+                    "timeout_seconds": 3600,
+                },
+            },
+        },
+    ]
+    for raw in middleware_nodes:
+        draft.workflow.nodes.append(type(agent).model_validate(raw))
+        draft.workflow.edges.append(
+            type(draft.workflow.edges[0]).model_validate(
+                {
+                    "id": f"bind-{raw['id']}",
+                    "source": raw["id"],
+                    "target": agent.id,
+                    "sourceHandle": "middleware-binding",
+                    "targetHandle": "middleware",
+                }
+            )
+        )
+    updated = xpert_store.update_xpert(
+        created.id, {"draft": draft.model_dump(mode="json")}
+    )
+    version = xpert_store.publish_xpert(
+        created.id, expected_revision=updated.draft_revision
+    )
+
+    result = _deployment_preflight(version, XpertAppPolicy())
+    assert result["valid"] is False
+    assert any(issue["code"] == "app_browser_forbidden" for issue in result["issues"])
+
+
 @pytest.mark.asyncio
 async def test_openai_json_and_sse_use_pinned_version_and_register_run(
     client: httpx.AsyncClient,

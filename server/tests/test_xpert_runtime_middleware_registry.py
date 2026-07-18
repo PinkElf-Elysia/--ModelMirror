@@ -32,6 +32,7 @@ def test_registry_list_returns_builtin_nodes() -> None:
         "sandbox_files",
         "sandbox_shell",
         "skills_runtime",
+        "browser_automation",
     }
     for node in nodes:
         assert node.id

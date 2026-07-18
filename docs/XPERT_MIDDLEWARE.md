@@ -1,5 +1,13 @@
 # Xpert Agent Middleware
 
+## Browser Automation（2026-07-16）
+
+`browser_automation` 已进入私有 Agent 真实执行：Playwright Chromium 位于独立联网 sidecar，主服务通过 Unix Domain Socket 调用受限 ARIA/ref 工具。首次访问新域名必须完成仅当前 session 有效的 `browser_domain` 审批；所有 mutating 工具还必须由绑定的 `human_in_the_loop` 覆盖。工具继续经过 policy、审批、audit 与安全 checkpoint。
+
+Browser sidecar 不加入应用默认网络，不挂载源码、`.env`、Runtime Store 或 Docker Socket。内置 egress guard 与 Playwright route 双重拒绝私网、本机、Docker service、云元数据、危险协议和 DNS 混合解析。公开 Xpert App/API 的部署预检拒绝 Browser 中间件。完整契约见 `docs/XPERT_BROWSER.md`。
+
+后续阶段依次为 `XPERT-MIDDLEWARE-CLIENT-05`、`XPERT-MIDDLEWARE-AUTOMATION-06` 和 `XPERT-MIDDLEWARE-CONSOLIDATION-07`；客户端宿主桥不混入本轮服务端 Browser 安全边界。
+
 最后更新日期：2026-07-16
 
 ## 目标

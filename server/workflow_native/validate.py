@@ -260,6 +260,12 @@ def validate_workflow_graph(workflow: NativeWorkflowDefinition) -> ValidateWorkf
         issues,
         kinds_by_id=kinds_by_id,
     )
+    validate_browser_middleware_bindings(
+        workflow.nodes,
+        valid_edges,
+        issues,
+        kinds_by_id=kinds_by_id,
+    )
     order = topological_order(workflow.nodes, valid_edges, issues)
 
     has_errors = any(issue.severity == "error" for issue in issues)
@@ -1633,6 +1639,65 @@ def validate_node_configuration(
                         node_id=node.id,
                     )
                 )
+        if middleware_id == "browser_automation":
+            if str(
+                config.get("networkPolicy") or "public_with_domain_approval"
+            ) != "public_with_domain_approval":
+                issues.append(
+                    ValidationIssue(
+                        code="invalid_runtime_middleware_browser_network_policy",
+                        message="browser_automation only supports public_with_domain_approval.",
+                        node_id=node.id,
+                    )
+                )
+            if str(config.get("approvalMode") or "mutating") != "mutating":
+                issues.append(
+                    ValidationIssue(
+                        code="invalid_runtime_middleware_browser_approval_mode",
+                        message="browser_automation approvalMode must be mutating.",
+                        node_id=node.id,
+                    )
+                )
+            for field_name, minimum, maximum in (
+                ("maxPages", 1, 3),
+                ("maxActions", 1, 100),
+                ("navigationTimeoutSeconds", 5, 120),
+                ("downloadLimitMb", 1, 50),
+            ):
+                _validate_middleware_number(
+                    issues,
+                    node.id,
+                    config,
+                    field_name,
+                    minimum,
+                    maximum,
+                    integer=True,
+                )
+            for field_name in ("allowedDomains", "blockedDomains"):
+                domains = [
+                    value.strip().lower().rstrip(".")
+                    for value in re.split(
+                        r"[,\n]+", str(config.get(field_name) or "")
+                    )
+                    if value.strip()
+                ]
+                invalid = [
+                    domain
+                    for domain in domains
+                    if len(domain) > 253
+                    or not re.fullmatch(
+                        r"(?:\*\.)?(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?",
+                        domain,
+                    )
+                ]
+                if len(domains) > 100 or invalid:
+                    issues.append(
+                        ValidationIssue(
+                            code="invalid_runtime_middleware_browser_domains",
+                            message=f"browser_automation {field_name} must contain valid public domain names.",
+                            node_id=node.id,
+                        )
+                    )
         if middleware_id == "human_in_the_loop":
             _validate_middleware_number(
                 issues,
@@ -2233,6 +2298,84 @@ def validate_sandbox_middleware_bindings(
                         node_id=shell_node.id,
                     )
                 )
+
+
+def validate_browser_middleware_bindings(
+    nodes: list[NativeWorkflowNode],
+    edges: list[NativeWorkflowEdge],
+    issues: list[ValidationIssue],
+    *,
+    kinds_by_id: dict[str, str],
+) -> None:
+    """Require durable HITL coverage for browser mutations."""
+
+    nodes_by_id = {node.id: node for node in nodes}
+    bound_by_agent: dict[str, list[NativeWorkflowNode]] = defaultdict(list)
+    for edge in edges:
+        if not is_middleware_binding_edge(edge):
+            continue
+        source = nodes_by_id.get(edge.source)
+        if source is not None and kinds_by_id.get(source.id) == "runtime_middleware":
+            bound_by_agent[edge.target].append(source)
+
+    required = {
+        "browser_click",
+        "browser_fill",
+        "browser_select",
+        "browser_press",
+        "browser_upload_file",
+        "browser_download",
+    }
+    for agent_id, middleware_nodes in bound_by_agent.items():
+        browser_nodes = [
+            node
+            for node in middleware_nodes
+            if str(node.data.get("runtimeMiddlewareId") or "")
+            == "browser_automation"
+        ]
+        if not browser_nodes:
+            continue
+        agent_node = nodes_by_id.get(agent_id)
+        if (
+            agent_node is not None
+            and str(agent_node.data.get("toolMode") or "none") != "mcp_tools"
+        ):
+            for browser_node in browser_nodes:
+                issues.append(
+                    ValidationIssue(
+                        code="browser_automation_requires_runtime_tool_mode",
+                        message=(
+                            "browser_automation requires its workflow_agent to use "
+                            "toolMode=mcp_tools."
+                        ),
+                        node_id=browser_node.id,
+                    )
+                )
+        hitl_tools: set[str] = set()
+        for node in middleware_nodes:
+            if str(node.data.get("runtimeMiddlewareId") or "") != "human_in_the_loop":
+                continue
+            config = node.data.get("runtimeMiddlewareConfig") or {}
+            hitl_tools.update(
+                value.strip()
+                for value in re.split(
+                    r"[,\n]+", str(config.get("interrupt_on_tools") or "")
+                )
+                if value.strip()
+            )
+        if "*" in hitl_tools or required.issubset(hitl_tools):
+            continue
+        for browser_node in browser_nodes:
+            issues.append(
+                ValidationIssue(
+                    code="browser_automation_requires_hitl",
+                    message=(
+                        "browser_automation needs human_in_the_loop coverage for "
+                        "click, fill, select, press, upload, and download tools."
+                    ),
+                    node_id=browser_node.id,
+                )
+            )
 
 
 def topological_order(

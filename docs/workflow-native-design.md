@@ -1,5 +1,7 @@
 # workflow-native 自研工作流设计
 
+> 2026-07-16 Browser Runtime：`browser_automation` 可通过 middleware binding 绑定到 `workflow_agent`，仅增加受控 Browser Runtime 工具，不参与控制流。首次域名访问使用持久 `browser_domain` 审批，mutating 工具要求 HITL 覆盖；网络访问由独立 sidecar 双重阻断私网和本机。公开 Xpert App/API 禁止该中间件，完整边界见 `docs/XPERT_BROWSER.md`。
+
 > 2026-07-08 路线重整：classic `/workflow` 后续节点规划改为按 Xpert 真实菜单分类推进。下一步不再盲目追加单点节点，而是先做节点注册表、调色板分类和右侧配置面板对齐；已有执行语义保持不变。
 > 2026-07-08 工作空间入口：`/studio` 已纳入 Xpert 式工作空间资源 Hub，统一展示工作流、知识库、MCP、Skill、提示词、环境与 RunRegistry 摘要。Classic `/workflow` 仍是画布主入口，后续节点与配置面板对齐会从该 Hub 进入。
 > 2026-07-09 配置侧栏：`agent` 与 `workflow_agent` 的右侧配置已进入 Xpert 式分区侧栏第一版，包含节点、参数、提示词/模型、中间件、知识库、工具、运行策略、输出结构、记忆写入。当前只保存新增配置草稿，不改变 runner、validate、SSE 或节点协议。

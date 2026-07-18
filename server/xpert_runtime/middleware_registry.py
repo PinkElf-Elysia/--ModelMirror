@@ -562,6 +562,95 @@ def register_builtin_middleware_nodes(
         )
     )
 
+    registry.register(
+        RuntimeMiddlewareNode(
+            id="browser_automation",
+            kind="runtime_middleware.browser_automation",
+            title="隔离浏览器自动化",
+            description="在独立 Playwright sidecar 中访问公共网站，首次域名和写操作均受持久审批保护。",
+            category="tool",
+            icon="GlobeLock",
+            fields=[
+                RuntimeMiddlewareField(
+                    name="networkPolicy",
+                    label="网络策略",
+                    type="select",
+                    default="public_with_domain_approval",
+                    options=["public_with_domain_approval"],
+                ),
+                RuntimeMiddlewareField(
+                    name="allowedDomains",
+                    label="允许域名（可选）",
+                    type="textarea",
+                    rows=3,
+                    placeholder="example.com\ndocs.example.com",
+                    description="留空允许任意公网域名；首次访问仍需本会话授权。",
+                ),
+                RuntimeMiddlewareField(
+                    name="blockedDomains",
+                    label="阻止域名",
+                    type="textarea",
+                    rows=3,
+                ),
+                RuntimeMiddlewareField(
+                    name="persistSession",
+                    label="持久化 Cookie 与站点状态",
+                    type="boolean",
+                    default=True,
+                ),
+                RuntimeMiddlewareField(
+                    name="maxPages",
+                    label="最大页面数",
+                    type="number",
+                    default=3,
+                    min_value=1,
+                    max_value=3,
+                ),
+                RuntimeMiddlewareField(
+                    name="maxActions",
+                    label="单会话最大操作数",
+                    type="number",
+                    default=100,
+                    min_value=1,
+                    max_value=100,
+                ),
+                RuntimeMiddlewareField(
+                    name="navigationTimeoutSeconds",
+                    label="导航超时（秒）",
+                    type="number",
+                    default=30,
+                    min_value=5,
+                    max_value=120,
+                ),
+                RuntimeMiddlewareField(
+                    name="downloadLimitMb",
+                    label="单次下载上限（MB）",
+                    type="number",
+                    default=50,
+                    min_value=1,
+                    max_value=50,
+                ),
+                RuntimeMiddlewareField(
+                    name="approvalMode",
+                    label="审批模式",
+                    type="select",
+                    default="mutating",
+                    options=["mutating"],
+                    description="点击、填写、选择、按键、上传和下载必须经过 HITL。",
+                ),
+            ],
+            tags=["agent", "browser", "playwright", "hitl", "network"],
+            metadata={
+                "middleware_name": "browser_automation",
+                "runtime_hook": "agent_tools",
+                "capability_name": "browser_tools",
+                "network": "public_with_domain_approval",
+                "real_execution": True,
+                "app_forbidden": True,
+            },
+        )
+    )
+
 
 runtime_middleware_registry = RuntimeMiddlewareRegistry()
 register_builtin_middleware_nodes(runtime_middleware_registry)

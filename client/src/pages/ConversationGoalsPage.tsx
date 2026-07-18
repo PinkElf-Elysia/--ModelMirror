@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import PageContainer from "../components/PageContainer";
 import RuntimeApprovalPanel from "../components/runtime/RuntimeApprovalPanel";
+import BrowserSessionPanel from "../components/runtime/BrowserSessionPanel";
 import SandboxWorkspacePanel from "../components/runtime/SandboxWorkspacePanel";
 import {
   type ConversationGoal,
@@ -345,6 +346,11 @@ export default function ConversationGoalsPage() {
                 />
                 <div className="mt-3 overflow-hidden rounded-lg border border-white/10">
                   <SandboxWorkspacePanel
+                    compact
+                    scopeIdPrefix={`${goal.goal_id}:`}
+                    scopeType="goal"
+                  />
+                  <BrowserSessionPanel
                     compact
                     scopeIdPrefix={`${goal.goal_id}:`}
                     scopeType="goal"

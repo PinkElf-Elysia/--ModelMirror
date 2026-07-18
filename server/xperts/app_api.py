@@ -120,6 +120,7 @@ def _deployment_preflight(version: XpertVersion, policy: XpertAppPolicy) -> dict
     has_dynamic_knowledge_write = False
     has_interactive_hitl = False
     has_sandbox_runtime = False
+    has_browser_runtime = False
     for node in version.workflow.nodes:
         data = node.data if isinstance(node.data, dict) else {}
         kind = str(data.get("kind") or node.type)
@@ -154,6 +155,11 @@ def _deployment_preflight(version: XpertVersion, policy: XpertAppPolicy) -> dict
             in {"sandbox_files", "sandbox_shell", "skills_runtime"}
         ):
             has_sandbox_runtime = True
+        if (
+            kind == "runtime_middleware"
+            and data.get("runtimeMiddlewareId") == "browser_automation"
+        ):
+            has_browser_runtime = True
         if kind in {"agent_handoff", "handoff_router"}:
             has_handoff = True
         if kind in {"knowledge_retrieval", "knowledge_citation"}:
@@ -207,6 +213,13 @@ def _deployment_preflight(version: XpertVersion, policy: XpertAppPolicy) -> dict
             {
                 "code": "app_sandbox_forbidden",
                 "message": "Public Xpert Apps cannot deploy Sandbox or Skill runtime middleware.",
+            }
+        )
+    if has_browser_runtime:
+        issues.append(
+            {
+                "code": "app_browser_forbidden",
+                "message": "Public Xpert Apps cannot deploy browser automation middleware.",
             }
         )
     if has_knowledge or has_dynamic_knowledge_read:

@@ -1,5 +1,11 @@
 # Xpert Runtime Contract
 
+## Isolated Browser Runtime
+
+Private Workflow, Xpert Chat, Goal, and Handoff runs can bind `browser_automation` to a `workflow_agent`. Chromium runs in a dedicated Playwright sidecar reached only through a Unix Domain Socket. A public-only egress guard and Playwright request routing both reject local, private, metadata, Docker service, mixed-DNS, and unsupported-protocol destinations.
+
+Browser sessions, per-session domain grants, idempotent operations, screenshots, and downloads use a file-backed store. Conversation, goal/step, handoff, and workflow task/node scopes remain isolated. Mutating actions require durable HITL coverage; public Xpert App/API deployments reject Browser middleware. API, audit, event, and checkpoint payloads expose only safe metadata. See `docs/XPERT_BROWSER.md`.
+
 Last updated: 2026-07-16
 
 ## Purpose
