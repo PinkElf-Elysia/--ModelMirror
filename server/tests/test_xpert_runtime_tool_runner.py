@@ -7,9 +7,11 @@ import pytest
 from server.xpert_runtime import (
     AgentMiddleware,
     CapabilityRegistry,
+    InMemoryToolAuditStore,
     MiddlewareContext,
     MiddlewarePipeline,
     RuntimeEventStore,
+    RuntimeInterrupt,
     RuntimeMiddlewareFatalError,
     RuntimeToolCall,
     RuntimeToolResult,
@@ -46,6 +48,48 @@ async def test_run_tool_with_registered_capability() -> None:
     called = provider.call_tool.await_args.args[0]
     assert called.tool_name == "echo"
     assert called.arguments == {"msg": "hi"}
+
+
+@pytest.mark.asyncio
+async def test_provider_preflight_interrupts_before_middleware_and_audit() -> None:
+    provider = MagicMock()
+    provider.prepare_call = AsyncMock(
+        side_effect=RuntimeInterrupt(
+            "approval-browser-domain",
+            task_id="task-1",
+            run_id="run-1",
+        )
+    )
+    provider.call_tool = AsyncMock(
+        return_value=RuntimeToolResult(output="must not run")
+    )
+    registry = CapabilityRegistry()
+    registry.register("browser_tools", provider)
+    audit_store = InMemoryToolAuditStore()
+    middleware_calls = {"count": 0}
+
+    async def wrap_tool_call(request, handler, context):
+        middleware_calls["count"] += 1
+        return await handler(request)
+
+    with pytest.raises(RuntimeInterrupt):
+        await run_tool_with_runtime(
+            RuntimeToolCall(
+                tool_name="browser_navigate",
+                arguments={"url": "https://example.com"},
+            ),
+            registry,
+            MiddlewarePipeline(
+                [AgentMiddleware(name="must-not-run", wrap_tool_call=wrap_tool_call)]
+            ),
+            MiddlewareContext(),
+            capability_name="browser_tools",
+            audit_store=audit_store,
+        )
+
+    provider.call_tool.assert_not_awaited()
+    assert middleware_calls["count"] == 0
+    assert await audit_store.list_records() == []
 
 
 @pytest.mark.asyncio

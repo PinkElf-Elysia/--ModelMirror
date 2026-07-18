@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 export interface RuntimeApproval {
   approval_id: string;
-  request_type: "tool_call" | "final_output" | "manual_input";
+  request_type: "tool_call" | "final_output" | "manual_input" | "browser_domain";
   task_id: string;
   run_id: string;
   node_id: string;
@@ -54,6 +54,7 @@ function formatDeadline(timestamp: number) {
 function requestTypeLabel(type: RuntimeApproval["request_type"]) {
   if (type === "tool_call") return "工具调用审批";
   if (type === "final_output") return "最终输出确认";
+  if (type === "browser_domain") return "浏览器域名授权";
   return "人工输入";
 }
 
@@ -252,13 +253,19 @@ export default function RuntimeApprovalPanel({
                 </span>
               </div>
 
-              {approval.request_type === "tool_call" ? (
+              {approval.request_type === "tool_call" || approval.request_type === "browser_domain" ? (
                 <pre className="mt-3 max-h-48 overflow-auto whitespace-pre-wrap rounded-md bg-black/25 p-2.5 text-[11px] leading-5 text-slate-300">
                   {JSON.stringify(approval.arguments, null, 2)}
                 </pre>
               ) : approval.content_preview ? (
                 <p className="mt-3 max-h-48 overflow-y-auto whitespace-pre-wrap rounded-md bg-black/25 p-2.5 text-xs leading-5 text-slate-300">
                   {approval.content_preview}
+                </p>
+              ) : null}
+
+              {approval.request_type === "browser_domain" ? (
+                <p className="mt-2 text-[11px] leading-5 text-amber-100/80">
+                  授权仅对当前私有浏览器会话生效，可在浏览器会话面板随时撤销。
                 </p>
               ) : null}
 

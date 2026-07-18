@@ -1,4 +1,47 @@
 services:
+  browser:
+    build:
+      context: ./server/browser_sidecar
+    container_name: modelmirror-browser
+    networks:
+      - browser_egress
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    mem_limit: 1g
+    cpus: 1.5
+    shm_size: 256m
+    tmpfs:
+      - /tmp:rw,nosuid,size=256m
+      - /home/pwuser:rw,nosuid,size=128m
+    environment:
+      BROWSER_SOCKET_PATH: /run/modelmirror-browser/browser.sock
+      BROWSER_DATA_ROOT: /browser-data
+      SANDBOX_WORKSPACE_ROOT: /sandbox-workspaces
+      # Docker Desktop/VPN DNS may map public hostnames into the RFC 2544 Fake-IP range.
+      # Literal access to that range remains blocked by the sidecar policy.
+      BROWSER_ALLOW_SYNTHETIC_DNS: "true"
+    volumes:
+      - browser_socket:/run/modelmirror-browser
+      - browser_data:/browser-data
+      - sandbox_workspaces:/sandbox-workspaces:ro
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "const n=require('net');const s=n.createConnection('/run/modelmirror-browser/browser.sock');s.on('connect',()=>s.write('{\"action\":\"health\"}\\n'));s.on('data',d=>{const x=JSON.parse(d);process.exit(x.ok?0:1)});s.on('error',()=>process.exit(1));setTimeout(()=>process.exit(1),3000)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 8
+      start_period: 30s
+
   sandbox:
     build:
       context: ./server/sandbox_sidecar
@@ -57,12 +100,15 @@ services:
       context: ./server
     container_name: modelmirror-server
     depends_on:
+      browser:
+        condition: service_healthy
       sandbox:
         condition: service_healthy
       new-api:
         condition: service_healthy
     env_file:
-      - ./server/.env
+      - path: ./server/.env
+        required: false
     environment:
       LLM_GATEWAY_URL: http://new-api:3000/v1/chat/completions
       RAG_STORAGE_DIR: /app/rag/storage
@@ -77,6 +123,8 @@ services:
       GOAL_COORDINATOR_ENABLED: "true"
       SANDBOX_SOCKET_PATH: /run/modelmirror-sandbox/sandbox.sock
       SANDBOX_WORKSPACE_ROOT: /app/sandbox-workspaces
+      BROWSER_SOCKET_PATH: /run/modelmirror-browser/browser.sock
+      BROWSER_DATA_ROOT: /app/browser-data
     ports:
       - "8000:8000"
     volumes:
@@ -87,6 +135,8 @@ services:
       - ./server/xpert_runtime/storage:/app/xpert_runtime/storage
       - sandbox_socket:/run/modelmirror-sandbox
       - sandbox_workspaces:/app/sandbox-workspaces:ro
+      - browser_socket:/run/modelmirror-browser
+      - browser_data:/app/browser-data:ro
     restart: unless-stopped
     healthcheck:
       test:
@@ -115,3 +165,9 @@ services:
 volumes:
   sandbox_socket:
   sandbox_workspaces:
+  browser_socket:
+  browser_data:
+
+networks:
+  browser_egress:
+    driver: bridge

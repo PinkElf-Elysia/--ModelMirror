@@ -37,3 +37,15 @@ uses official CPython and Node.js runtime images plus Debian packages for Git
 and ripgrep. Its complete runtime notice is included at
 `/usr/share/doc/modelmirror-sandbox/THIRD_PARTY_NOTICES.md` inside the sidecar
 image. No Xpert or Dify source code is copied into the Sandbox implementation.
+
+## Browser sidecar
+
+The isolated Browser sidecar uses Playwright 1.58.2 under the Apache License
+2.0 and `ipaddr.js` under the MIT License. Chromium and bundled components are
+distributed with the BSD-style and component-specific notices retained by the
+official Playwright browser image.
+
+The sidecar includes its runtime notice at
+`/usr/share/doc/modelmirror-browser/THIRD_PARTY_NOTICES.md`. ModelMirror's
+Browser implementation is independently written; no Xpert AGPL source code is
+copied into this component.

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import logging
 from typing import Any
 
@@ -50,6 +51,15 @@ async def run_tool_with_runtime(
             logger.warning("Tool policy check failed, allowing by default: %s", exc)
 
     provider = capability_registry.require(capability_name).implementation
+    try:
+        static_prepare_call = inspect.getattr_static(provider, "prepare_call")
+    except AttributeError:
+        static_prepare_call = None
+    if static_prepare_call is not None:
+        prepare_call = getattr(provider, "prepare_call")
+        result = prepare_call(tool_call)
+        if inspect.isawaitable(result):
+            await result
     request = _to_tool_call_request(tool_call)
     provider_called = False
     provider_response: ToolCallResponse | None = None

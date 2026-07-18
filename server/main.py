@@ -185,6 +185,9 @@ try:
         SandboxSidecarClient,
         SandboxToolsetProvider,
         SandboxWorkspaceStore,
+        BrowserSidecarClient,
+        BrowserToolsetProvider,
+        BrowserSessionStore,
         WorkflowExecution,
         WorkflowExecutionStore,
         RuntimeToolCall,
@@ -198,6 +201,7 @@ try:
         configure_runtime_approvals,
         configure_runtime_todo_store,
         configure_runtime_sandbox,
+        configure_runtime_browser,
         control_flow_edges,
         create_default_runtime,
         event_recorder,
@@ -208,11 +212,13 @@ try:
         middleware_spec_from_node,
         register_todo_toolset_capability,
         register_sandbox_toolset_capability,
+        register_browser_toolset_capability,
         run_tool_with_runtime,
         runtime_middleware_registry,
         runtime_approval_router,
         runtime_todo_router,
         runtime_sandbox_router,
+        runtime_browser_router,
         select_runtime_tools,
         todo_planning_instruction,
         validate_structured_output,
@@ -258,6 +264,9 @@ except ModuleNotFoundError:
         SandboxSidecarClient,
         SandboxToolsetProvider,
         SandboxWorkspaceStore,
+        BrowserSidecarClient,
+        BrowserToolsetProvider,
+        BrowserSessionStore,
         WorkflowExecution,
         WorkflowExecutionStore,
         RuntimeToolCall,
@@ -271,6 +280,7 @@ except ModuleNotFoundError:
         configure_runtime_approvals,
         configure_runtime_todo_store,
         configure_runtime_sandbox,
+        configure_runtime_browser,
         control_flow_edges,
         create_default_runtime,
         event_recorder,
@@ -281,11 +291,13 @@ except ModuleNotFoundError:
         middleware_spec_from_node,
         register_todo_toolset_capability,
         register_sandbox_toolset_capability,
+        register_browser_toolset_capability,
         run_tool_with_runtime,
         runtime_middleware_registry,
         runtime_approval_router,
         runtime_todo_router,
         runtime_sandbox_router,
+        runtime_browser_router,
         select_runtime_tools,
         todo_planning_instruction,
         validate_structured_output,
@@ -442,6 +454,7 @@ app.include_router(workflow_native_router)
 app.include_router(runtime_todo_router)
 app.include_router(runtime_approval_router)
 app.include_router(runtime_sandbox_router)
+app.include_router(runtime_browser_router)
 
 request_windows: dict[str, deque[float]] = defaultdict(deque)
 mcp_connect_windows: dict[str, deque[float]] = defaultdict(deque)
@@ -452,6 +465,9 @@ workflow_mcp_provider = MCPToolsetProvider(tool_registry, mcp_manager)
 xpert_context_store = get_xpert_context_store()
 workflow_memory_provider = MemoryToolsetProvider(xpert_context_store)
 workflow_knowledge_provider = KnowledgeToolsetProvider(get_rag_service)
+runtime_approval_store = RuntimeApprovalStore(
+    storage_dir=AGENT_TASK_STORAGE_DIR or None
+)
 runtime_todo_store = configure_runtime_todo_store(
     RuntimeTodoStore(storage_dir=AGENT_TASK_STORAGE_DIR or None)
 )
@@ -468,6 +484,18 @@ workflow_sandbox_provider = SandboxToolsetProvider(
     context_store=xpert_context_store,
 )
 configure_runtime_sandbox(sandbox_workspace_store, sandbox_sidecar_client)
+browser_session_store = BrowserSessionStore(
+    storage_dir=AGENT_TASK_STORAGE_DIR or None,
+    data_root=os.getenv("BROWSER_DATA_ROOT", "").strip() or None,
+)
+browser_sidecar_client = BrowserSidecarClient()
+workflow_browser_provider = BrowserToolsetProvider(
+    browser_session_store,
+    browser_sidecar_client,
+    runtime_approval_store,
+    sandbox_store=sandbox_workspace_store,
+)
+configure_runtime_browser(browser_session_store, browser_sidecar_client)
 runtime_capabilities = CapabilityRegistry()
 workflow_mcp_pipeline = MiddlewarePipeline([event_recorder])
 workflow_tool_policy = ToolPermissionPolicy(allow_by_default=True)
@@ -479,9 +507,6 @@ agent_task_store = AgentTaskStore(
 )
 goal_store = GoalStore(storage_dir=AGENT_TASK_STORAGE_DIR or None)
 run_registry = RunRegistry()
-runtime_approval_store = RuntimeApprovalStore(
-    storage_dir=AGENT_TASK_STORAGE_DIR or None
-)
 workflow_execution_store = WorkflowExecutionStore(
     storage_dir=AGENT_TASK_STORAGE_DIR or None
 )
@@ -498,6 +523,7 @@ runtime_capabilities.register(
 )
 register_todo_toolset_capability(runtime_capabilities, workflow_todo_provider)
 register_sandbox_toolset_capability(runtime_capabilities, workflow_sandbox_provider)
+register_browser_toolset_capability(runtime_capabilities, workflow_browser_provider)
 runtime_capabilities.register(
     "memory_tools",
     workflow_memory_provider,
@@ -527,6 +553,7 @@ async def validate_runtime_approval_decision(
         workflow_knowledge_provider,
         workflow_todo_provider,
         workflow_sandbox_provider,
+        workflow_browser_provider,
     ):
         matched_tool = await provider.find_tool(tool_name)
         if matched_tool is not None:
@@ -2967,6 +2994,7 @@ async def _run_workflow_response(
             sandbox_files = middleware_spec(specs, "sandbox_files")
             sandbox_shell = middleware_spec(specs, "sandbox_shell")
             skills_runtime = middleware_spec(specs, "skills_runtime")
+            browser_automation = middleware_spec(specs, "browser_automation")
             if (
                 sandbox_shell is not None
                 and workflow_truthy(
@@ -2989,12 +3017,57 @@ async def _run_workflow_response(
                     raise RuntimeMiddlewareFatalError(
                         "sandbox_shell requires human_in_the_loop approval coverage."
                     )
+            if browser_automation is not None:
+                if str(
+                    browser_automation.config.get("networkPolicy")
+                    or "public_with_domain_approval"
+                ) != "public_with_domain_approval":
+                    raise RuntimeMiddlewareFatalError(
+                        "browser_automation only supports public_with_domain_approval."
+                    )
+                if str(
+                    browser_automation.config.get("approvalMode") or "mutating"
+                ) != "mutating":
+                    raise RuntimeMiddlewareFatalError(
+                        "browser_automation requires mutating action approval."
+                    )
+                browser_hitl_tools = {
+                    item.strip()
+                    for item in re.split(
+                        r"[,\n]",
+                        str(
+                            hitl.config.get("interrupt_on_tools")
+                            if hitl is not None
+                            else ""
+                        ),
+                    )
+                    if item.strip()
+                }
+                required_browser_tools = {
+                    "browser_click",
+                    "browser_fill",
+                    "browser_select",
+                    "browser_press",
+                    "browser_upload_file",
+                    "browser_download",
+                }
+                if "*" not in browser_hitl_tools and not required_browser_tools.issubset(
+                    browser_hitl_tools
+                ):
+                    raise RuntimeMiddlewareFatalError(
+                        "browser_automation requires human_in_the_loop coverage for every mutating browser tool."
+                    )
             context_metadata["sandbox_config"] = {
                 **(sandbox_files.config if sandbox_files is not None else {}),
                 **(sandbox_shell.config if sandbox_shell is not None else {}),
             }
             context_metadata["skills_config"] = (
                 dict(skills_runtime.config) if skills_runtime is not None else {}
+            )
+            context_metadata["browser_config"] = (
+                dict(browser_automation.config)
+                if browser_automation is not None
+                else {}
             )
             context_metadata["runtime_run_type"] = runtime_run_type
             run_context = task_state.get("runtime_metadata") or {}
@@ -3134,6 +3207,9 @@ async def _run_workflow_response(
             if not matched_tool:
                 matched_tool = await workflow_sandbox_provider.find_tool(tool_name)
                 capability_name = "sandbox_tools"
+            if not matched_tool:
+                matched_tool = await workflow_browser_provider.find_tool(tool_name)
+                capability_name = "browser_tools"
             if capability_name == "mcp_tools" and not app_capability_allowed(
                 "allow_tools"
             ):
@@ -3151,6 +3227,8 @@ async def _run_workflow_response(
                     raise PermissionError("Xpert App knowledge read access is disabled.")
             if capability_name == "sandbox_tools" and runtime_run_type == "xpert_app":
                 raise PermissionError("Xpert App Sandbox and Skill access is disabled.")
+            if capability_name == "browser_tools" and runtime_run_type == "xpert_app":
+                raise PermissionError("Xpert App browser automation is disabled.")
             if not matched_tool:
                 raise ValueError(f"MCP 工具未注册：{tool_name}")
             run_context = task_state.get("runtime_metadata") or {}
@@ -3192,6 +3270,7 @@ async def _run_workflow_response(
                         "session_id": matched_tool.session_id,
                         "server_id": matched_tool.server_id,
                         "node_id": node.id,
+                        "node_title": title,
                         "task_id": task_id,
                         "run_id": effective_context.metadata.get("run_id"),
                         "runtime_run_type": runtime_run_type,
@@ -3205,6 +3284,7 @@ async def _run_workflow_response(
                         "file_conversation_id": run_context.get("file_conversation_id"),
                         "sandbox_config": effective_context.metadata.get("sandbox_config") or {},
                         "skills_config": effective_context.metadata.get("skills_config") or {},
+                        "browser_config": effective_context.metadata.get("browser_config") or {},
                         "todo_scope_type": todo_scope_type,
                         "todo_scope_id": todo_scope_id,
                         **dict(metadata or {}),
@@ -3250,6 +3330,7 @@ async def _run_workflow_response(
             include_todo: bool = False,
             include_sandbox: bool = False,
             include_skills: bool = False,
+            include_browser: bool = False,
             middleware_specs: list[RuntimeMiddlewareSpec] | None = None,
             apply_policy_filter: bool = False,
         ) -> list[Any]:
@@ -3307,6 +3388,8 @@ async def _run_workflow_response(
                     tools.extend(
                         tool for tool in sandbox_tools if tool.name.startswith("skill_")
                     )
+            if include_browser and runtime_run_type != "xpert_app":
+                tools.extend(await workflow_browser_provider.list_tools())
             if middleware_specs is not None and apply_policy_filter:
                 allowed_tools: list[Any] = []
                 for tool in tools:
@@ -3316,6 +3399,7 @@ async def _run_workflow_response(
                         "todo": "todo_tools",
                         "sandbox": "sandbox_tools",
                         "skill": "sandbox_tools",
+                        "browser": "browser_tools",
                     }.get(str(tool.provider or ""), "mcp_tools")
                     if agent_tool_policy(
                         middleware_specs,
@@ -3347,6 +3431,7 @@ async def _run_workflow_response(
             include_todo: bool = False,
             include_sandbox: bool = False,
             include_skills: bool = False,
+            include_browser: bool = False,
             pipeline: MiddlewarePipeline | None = None,
             middleware_context: MiddlewareContext | None = None,
             middleware_specs: list[RuntimeMiddlewareSpec] | None = None,
@@ -3364,6 +3449,7 @@ async def _run_workflow_response(
                 include_todo=include_todo,
                 include_sandbox=include_sandbox,
                 include_skills=include_skills,
+                include_browser=include_browser,
                 middleware_specs=middleware_specs,
                 apply_policy_filter=selector_spec is not None,
             )
@@ -3375,6 +3461,14 @@ async def _run_workflow_response(
                 )
                 if include_skills:
                     required_tools.update({"skill_list", "skill_read", "skill_stage"})
+                if include_browser:
+                    required_tools.update(
+                        {
+                            "browser_navigate",
+                            "browser_snapshot",
+                            "browser_read",
+                        }
+                    )
                 required_tools.update(
                     item.strip()
                     for item in re.split(
@@ -3749,6 +3843,56 @@ async def _run_workflow_response(
                         if run_id:
                             sandbox_event["run_id"] = run_id
                         events.append(sandbox_event)
+                    if tool_name.startswith("browser_"):
+                        if call_result.metadata.get("session_started"):
+                            session_event = {
+                                "event": "browser_session_started",
+                                "node_id": node.id,
+                                "node_title": title,
+                                "node_type": kind,
+                                "browser_session_id": call_result.metadata.get(
+                                    "browser_session_id"
+                                ),
+                            }
+                            if run_id:
+                                session_event["run_id"] = run_id
+                            events.append(session_event)
+                        if not call_result.metadata.get("replayed"):
+                            started_event = {
+                                "event": "browser_operation_started",
+                                "node_id": node.id,
+                                "node_title": title,
+                                "node_type": kind,
+                                "tool_name": tool_name,
+                                "browser_session_id": call_result.metadata.get(
+                                    "browser_session_id"
+                                ),
+                                "operation_id": call_result.metadata.get("operation_id"),
+                            }
+                            if run_id:
+                                started_event["run_id"] = run_id
+                            events.append(started_event)
+                        browser_event = {
+                            "event": (
+                                "browser_artifact_published"
+                                if call_result.metadata.get("artifact_id")
+                                else "browser_operation_finished"
+                            ),
+                            "node_id": node.id,
+                            "node_title": title,
+                            "node_type": kind,
+                            "tool_name": tool_name,
+                            "browser_session_id": call_result.metadata.get(
+                                "browser_session_id"
+                            ),
+                            "operation_id": call_result.metadata.get("operation_id"),
+                            "artifact_id": call_result.metadata.get("artifact_id"),
+                            "domain": call_result.metadata.get("domain"),
+                            "page_title": call_result.metadata.get("page_title"),
+                        }
+                        if run_id:
+                            browser_event["run_id"] = run_id
+                        events.append(browser_event)
                     if run_id:
                         await run_registry.record_checkpoint(
                             run_id,
@@ -5010,11 +5154,15 @@ async def _run_workflow_response(
                         skills_runtime_spec = middleware_spec(
                             agent_specs, "skills_runtime"
                         )
+                        browser_automation_spec = middleware_spec(
+                            agent_specs, "browser_automation"
+                        )
                         sandbox_enabled = (
                             sandbox_files_spec is not None
                             or sandbox_shell_spec is not None
                         )
                         skills_enabled = skills_runtime_spec is not None
+                        browser_enabled = browser_automation_spec is not None
                         selector_spec = middleware_spec(
                             agent_specs,
                             "llm_tool_selector",
@@ -5229,6 +5377,10 @@ async def _run_workflow_response(
                             raise ValueError("workflow_agent 缺少任务输入。")
                         if tool_mode not in {"none", "mcp_tools"}:
                             raise ValueError(f"workflow_agent 工具模式不支持：{tool_mode}")
+                        if browser_enabled and tool_mode != "mcp_tools":
+                            raise ValueError(
+                                "browser_automation requires workflow_agent toolMode=mcp_tools."
+                            )
                         if exception_handling not in {"none", "fail", "empty_output"}:
                             raise ValueError(
                                 "workflow_agent exceptionHandling must be none, fail, or empty_output."
@@ -5611,6 +5763,7 @@ async def _run_workflow_response(
                                     and todo_spec is None
                                     and not sandbox_enabled
                                     and not skills_enabled
+                                    and not browser_enabled
                                 ):
                                     direct_messages = base_agent_messages(
                                         role_prompt,
@@ -5703,6 +5856,7 @@ async def _run_workflow_response(
                                         include_todo=todo_spec is not None,
                                         include_sandbox=sandbox_enabled,
                                         include_skills=skills_enabled,
+                                        include_browser=browser_enabled,
                                         pipeline=agent_pipeline,
                                         middleware_context=agent_context,
                                         middleware_specs=agent_specs,

@@ -2135,3 +2135,125 @@ async def test_templates_endpoint_returns_starter_template(
     data = response.json()
     assert len(data) == 1
     assert data[0]["workflow"]["nodes"]
+
+
+def browser_middleware_workflow(hitl_tools: str) -> dict:
+    workflow = linear_workflow()
+    workflow["nodes"][1] = {
+        "id": "agent",
+        "type": "workflow_agent",
+        "data": {
+            "kind": "workflow_agent",
+            "agentName": "browser-agent",
+            "modelId": "openai/gpt-4o-mini",
+            "rolePrompt": "Use the private browser safely.",
+            "taskInput": "{{user_input}}",
+            "outputVariable": "agent_output",
+            "toolMode": "mcp_tools",
+        },
+    }
+    workflow["nodes"][2]["data"]["outputVariable"] = "agent_output"
+    for edge in workflow["edges"]:
+        if edge["source"] == "llm":
+            edge["source"] = "agent"
+        if edge["target"] == "llm":
+            edge["target"] = "agent"
+    workflow["nodes"].extend(
+        [
+            {
+                "id": "browser",
+                "type": "runtime_middleware",
+                "data": {
+                    "kind": "runtime_middleware",
+                    "runtimeMiddlewareId": "browser_automation",
+                    "runtimeMiddlewareKind": "runtime_middleware.browser_automation",
+                    "runtimeMiddlewareConfig": {
+                        "networkPolicy": "public_with_domain_approval",
+                        "approvalMode": "mutating",
+                        "persistSession": True,
+                        "maxPages": 3,
+                        "maxActions": 100,
+                        "navigationTimeoutSeconds": 30,
+                        "downloadLimitMb": 50,
+                    },
+                },
+            },
+            {
+                "id": "hitl",
+                "type": "runtime_middleware",
+                "data": {
+                    "kind": "runtime_middleware",
+                    "runtimeMiddlewareId": "human_in_the_loop",
+                    "runtimeMiddlewareKind": "runtime_middleware.human_in_the_loop",
+                    "runtimeMiddlewareConfig": {
+                        "interrupt_on_tools": hitl_tools,
+                        "timeout_seconds": 3600,
+                    },
+                },
+            },
+        ]
+    )
+    workflow["edges"].extend(
+        [
+            {
+                "id": "bind-browser",
+                "source": "browser",
+                "target": "agent",
+                "sourceHandle": "middleware-binding",
+                "targetHandle": "middleware",
+            },
+            {
+                "id": "bind-hitl",
+                "source": "hitl",
+                "target": "agent",
+                "sourceHandle": "middleware-binding",
+                "targetHandle": "middleware",
+            },
+        ]
+    )
+    return workflow
+
+
+@pytest.mark.asyncio
+async def test_browser_middleware_requires_complete_hitl_coverage(
+    client: httpx.AsyncClient,
+) -> None:
+    invalid = await validate(client, browser_middleware_workflow("browser_click"))
+    assert "browser_automation_requires_hitl" in issue_codes(invalid)
+
+    valid = await validate(client, browser_middleware_workflow("*"))
+    assert valid["valid"] is True
+    assert "browser_automation_requires_hitl" not in issue_codes(valid)
+
+
+@pytest.mark.asyncio
+async def test_browser_middleware_requires_runtime_tool_mode(
+    client: httpx.AsyncClient,
+) -> None:
+    workflow = browser_middleware_workflow("*")
+    agent = next(node for node in workflow["nodes"] if node["id"] == "agent")
+    agent["data"]["toolMode"] = "none"
+
+    data = await validate(client, workflow)
+
+    assert "browser_automation_requires_runtime_tool_mode" in issue_codes(data)
+
+
+@pytest.mark.asyncio
+async def test_browser_middleware_validates_policy_limits_and_domains(
+    client: httpx.AsyncClient,
+) -> None:
+    workflow = browser_middleware_workflow("*")
+    browser = next(node for node in workflow["nodes"] if node["id"] == "browser")
+    browser["data"]["runtimeMiddlewareConfig"].update(
+        {
+            "networkPolicy": "unrestricted",
+            "maxPages": 9,
+            "allowedDomains": "localhost, https://bad.example.com",
+        }
+    )
+    data = await validate(client, workflow)
+    codes = issue_codes(data)
+    assert "invalid_runtime_middleware_browser_network_policy" in codes
+    assert "invalid_runtime_middleware_config" in codes
+    assert "invalid_runtime_middleware_browser_domains" in codes
