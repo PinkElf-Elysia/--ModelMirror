@@ -2257,3 +2257,58 @@ async def test_browser_middleware_validates_policy_limits_and_domains(
     assert "invalid_runtime_middleware_browser_network_policy" in codes
     assert "invalid_runtime_middleware_config" in codes
     assert "invalid_runtime_middleware_browser_domains" in codes
+
+
+def client_tools_middleware_workflow(hitl_tools: str) -> dict:
+    workflow = browser_middleware_workflow(hitl_tools)
+    browser = next(node for node in workflow["nodes"] if node["id"] == "browser")
+    browser["id"] = "client-tools"
+    browser["data"] = {
+        "kind": "runtime_middleware",
+        "runtimeMiddlewareId": "client_tools",
+        "runtimeMiddlewareKind": "runtime_middleware.client_tools",
+        "runtimeMiddlewareConfig": {
+            "clientHostId": "host_test",
+            "clientToolNames": "host_page_read,host_page_fill",
+            "clientToolTimeoutSeconds": 1800,
+            "requireBoundTab": True,
+        },
+    }
+    binding = next(edge for edge in workflow["edges"] if edge["id"] == "bind-browser")
+    binding["source"] = "client-tools"
+    return workflow
+
+
+@pytest.mark.asyncio
+async def test_client_tools_require_runtime_mode_host_and_hitl(
+    client: httpx.AsyncClient,
+) -> None:
+    invalid = await validate(client, client_tools_middleware_workflow("host_page_click"))
+    assert "client_tools_requires_hitl" in issue_codes(invalid)
+
+    valid = await validate(client, client_tools_middleware_workflow("host_page_fill"))
+    assert valid["valid"] is True
+    assert "client_tools_requires_hitl" not in issue_codes(valid)
+
+    missing_host = client_tools_middleware_workflow("*")
+    node = next(item for item in missing_host["nodes"] if item["id"] == "client-tools")
+    node["data"]["runtimeMiddlewareConfig"]["clientHostId"] = ""
+    data = await validate(client, missing_host)
+    assert "client_tools_host_required" in issue_codes(data)
+
+
+@pytest.mark.asyncio
+async def test_client_tools_validate_timeout_and_runtime_tool_mode(
+    client: httpx.AsyncClient,
+) -> None:
+    workflow = client_tools_middleware_workflow("*")
+    node = next(item for item in workflow["nodes"] if item["id"] == "client-tools")
+    node["data"]["runtimeMiddlewareConfig"]["clientToolTimeoutSeconds"] = 2
+    agent = next(item for item in workflow["nodes"] if item["id"] == "agent")
+    agent["data"]["toolMode"] = "none"
+
+    data = await validate(client, workflow)
+    codes = issue_codes(data)
+
+    assert "client_tools_timeout_invalid" in codes
+    assert "client_tools_requires_runtime_tool_mode" in codes

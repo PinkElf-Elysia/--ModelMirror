@@ -3,6 +3,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import PageContainer from "../components/PageContainer";
 import RuntimeApprovalPanel from "../components/runtime/RuntimeApprovalPanel";
 import BrowserSessionPanel from "../components/runtime/BrowserSessionPanel";
+import ClientToolPanel from "../components/runtime/ClientToolPanel";
 import SandboxWorkspacePanel from "../components/runtime/SandboxWorkspacePanel";
 import {
   type ConversationGoal,
@@ -352,6 +353,14 @@ export default function ConversationGoalsPage() {
                   />
                   <BrowserSessionPanel
                     compact
+                    scopeIdPrefix={`${goal.goal_id}:`}
+                    scopeType="goal"
+                  />
+                  <ClientToolPanel
+                    compact
+                    onResolved={async () => {
+                      await Promise.all([loadDetail(goal.goal_id), loadList()]);
+                    }}
                     scopeIdPrefix={`${goal.goal_id}:`}
                     scopeType="goal"
                   />

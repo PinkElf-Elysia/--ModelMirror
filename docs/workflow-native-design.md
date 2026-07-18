@@ -1,5 +1,7 @@
 # workflow-native 自研工作流设计
 
+> 2026-07-18 Client Tools：`client_tools` 可通过 middleware binding 绑定到 `workflow_agent`。工具请求使用持久 `wait_kind=client_tool` 暂停并由配对 Chrome 当前标签页执行；绑定边、classic workflow definition 和既有 SSE 仍兼容。修改页面的工具必须有 HITL 覆盖，公开 Xpert App/API 禁止该中间件，完整边界见 `docs/XPERT_CLIENT_TOOLS.md`。
+
 > 2026-07-16 Browser Runtime：`browser_automation` 可通过 middleware binding 绑定到 `workflow_agent`，仅增加受控 Browser Runtime 工具，不参与控制流。首次域名访问使用持久 `browser_domain` 审批，mutating 工具要求 HITL 覆盖；网络访问由独立 sidecar 双重阻断私网和本机。公开 Xpert App/API 禁止该中间件，完整边界见 `docs/XPERT_BROWSER.md`。
 
 > 2026-07-08 路线重整：classic `/workflow` 后续节点规划改为按 Xpert 真实菜单分类推进。下一步不再盲目追加单点节点，而是先做节点注册表、调色板分类和右侧配置面板对齐；已有执行语义保持不变。

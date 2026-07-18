@@ -14,6 +14,7 @@ AgentTaskStatus = Literal[
     "pending",
     "running",
     "waiting_approval",
+    "waiting_client",
     "needs_attention",
     "completed",
     "failed",
@@ -24,6 +25,7 @@ AgentHandoffStatus = Literal[
     "accepted",
     "retry_wait",
     "waiting_approval",
+    "waiting_client",
     "needs_attention",
     "rejected",
     "completed",
@@ -31,8 +33,9 @@ AgentHandoffStatus = Literal[
 ]
 HANDOFF_TRANSITIONS: dict[AgentHandoffStatus, set[AgentHandoffStatus]] = {
     "pending": {"accepted", "rejected", "dead_letter"},
-    "accepted": {"completed", "retry_wait", "waiting_approval", "dead_letter"},
+    "accepted": {"completed", "retry_wait", "waiting_approval", "waiting_client", "dead_letter"},
     "waiting_approval": {"completed", "accepted", "needs_attention", "dead_letter"},
+    "waiting_client": {"completed", "accepted", "needs_attention", "dead_letter"},
     "needs_attention": {"completed", "accepted", "dead_letter"},
     "retry_wait": {"accepted", "dead_letter", "pending"},
     "rejected": set(),

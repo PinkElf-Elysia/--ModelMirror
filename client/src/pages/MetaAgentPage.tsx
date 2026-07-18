@@ -11,6 +11,7 @@ import { Link, useNavigate } from "react-router-dom";
 import PageContainer from "../components/PageContainer";
 import RuntimeApprovalPanel from "../components/runtime/RuntimeApprovalPanel";
 import BrowserSessionPanel from "../components/runtime/BrowserSessionPanel";
+import ClientToolPanel from "../components/runtime/ClientToolPanel";
 import SandboxWorkspacePanel from "../components/runtime/SandboxWorkspacePanel";
 import WorkflowNodeCard from "../components/workflow/WorkflowNodeCard";
 import WorkflowRun from "../components/workflow/WorkflowRun";
@@ -1262,6 +1263,12 @@ export default function MetaAgentPage() {
                       />
                       <BrowserSessionPanel
                         compact
+                        scopeId={handoff.handoff_id}
+                        scopeType="handoff"
+                      />
+                      <ClientToolPanel
+                        compact
+                        onResolved={() => loadHandoffInbox()}
                         scopeId={handoff.handoff_id}
                         scopeType="handoff"
                       />

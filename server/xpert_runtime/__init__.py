@@ -177,6 +177,33 @@ from .browser_toolset import (
     BrowserToolsetProvider,
     register_browser_toolset_capability,
 )
+from .client_tool_store import (
+    MUTATING_CLIENT_TOOLS,
+    ClientHost,
+    ClientHostPairing,
+    ClientToolArtifact,
+    ClientToolAuthenticationError,
+    ClientToolConflictError,
+    ClientToolNotFoundError,
+    ClientToolRequest,
+    ClientToolStore,
+)
+from .client_toolset import (
+    CLIENT_TOOLS,
+    CLIENT_TOOL_NAMES,
+    ClientToolsetProvider,
+    client_tool_schema_hash,
+    register_client_toolset_capability,
+)
+from .client_tool_coordinator import (
+    ClientToolConnectionManager,
+    ClientToolCoordinator,
+)
+from .client_tool_api import (
+    configure_client_tool_coordinator,
+    configure_runtime_client_tools,
+    router as runtime_client_tool_router,
+)
 
 __all__ = [
     "AgentMiddleware",
@@ -322,4 +349,23 @@ __all__ = [
     "BROWSER_TOOL_NAMES",
     "BrowserToolsetProvider",
     "register_browser_toolset_capability",
+    "MUTATING_CLIENT_TOOLS",
+    "ClientHost",
+    "ClientHostPairing",
+    "ClientToolArtifact",
+    "ClientToolAuthenticationError",
+    "ClientToolConflictError",
+    "ClientToolNotFoundError",
+    "ClientToolRequest",
+    "ClientToolStore",
+    "CLIENT_TOOLS",
+    "CLIENT_TOOL_NAMES",
+    "ClientToolsetProvider",
+    "client_tool_schema_hash",
+    "register_client_toolset_capability",
+    "ClientToolConnectionManager",
+    "ClientToolCoordinator",
+    "configure_client_tool_coordinator",
+    "configure_runtime_client_tools",
+    "runtime_client_tool_router",
 ]

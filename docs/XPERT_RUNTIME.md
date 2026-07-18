@@ -1,12 +1,18 @@
 # Xpert Runtime Contract
 
+## Client Tool Host Runtime
+
+Private Workflow、Xpert Chat、Goal 与 Handoff 可以把 `client_tools` 绑定到 `workflow_agent`。Chrome MV3 扩展只在用户主动授权的当前标签页执行固定工具；服务端通过持久请求、通用 `wait_kind=client_tool` 和 `ClientToolCoordinator` 从原执行断点恢复。
+
+Client host 使用一次性配对码和哈希 token 认证。工具必须同时通过 Agent 配置、host capability/schema hash、ToolPermissionPolicy 和 mutating HITL。读操作断线可重放，执行中的写操作进入 `uncertain`。GoalStep、AgentTask 和 Handoff 使用 `waiting_client` 表示等待，不消耗模型/工具重试。公开 App/API 禁止 Client Tools。详见 `docs/XPERT_CLIENT_TOOLS.md`。
+
 ## Isolated Browser Runtime
 
 Private Workflow, Xpert Chat, Goal, and Handoff runs can bind `browser_automation` to a `workflow_agent`. Chromium runs in a dedicated Playwright sidecar reached only through a Unix Domain Socket. A public-only egress guard and Playwright request routing both reject local, private, metadata, Docker service, mixed-DNS, and unsupported-protocol destinations.
 
 Browser sessions, per-session domain grants, idempotent operations, screenshots, and downloads use a file-backed store. Conversation, goal/step, handoff, and workflow task/node scopes remain isolated. Mutating actions require durable HITL coverage; public Xpert App/API deployments reject Browser middleware. API, audit, event, and checkpoint payloads expose only safe metadata. See `docs/XPERT_BROWSER.md`.
 
-Last updated: 2026-07-16
+Last updated: 2026-07-18
 
 ## Purpose
 

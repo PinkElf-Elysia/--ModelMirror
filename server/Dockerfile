@@ -29,6 +29,7 @@ COPY skills ./skills
 COPY xperts ./xperts
 COPY workflow_native ./workflow_native
 COPY xpert_runtime ./xpert_runtime
+COPY client_extension ./client_extension
 COPY meta_agent ./meta_agent
 
 EXPOSE 8000

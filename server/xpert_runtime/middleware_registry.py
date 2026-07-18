@@ -651,6 +651,64 @@ def register_builtin_middleware_nodes(
         )
     )
 
+    registry.register(
+        RuntimeMiddlewareNode(
+            id="client_tools",
+            kind="runtime_middleware.client_tools",
+            title="客户端工具桥",
+            description="将 Agent 工具请求持久化后派发到用户主动绑定的 Chrome 当前标签页，并从断点恢复执行。",
+            category="tool",
+            icon="MonitorSmartphone",
+            fields=[
+                RuntimeMiddlewareField(
+                    name="clientHostId",
+                    label="客户端宿主 ID",
+                    type="text",
+                    required=True,
+                    placeholder="host_...",
+                    description="在 Runtime Ops 完成 Chrome 扩展配对后填写。",
+                ),
+                RuntimeMiddlewareField(
+                    name="clientToolNames",
+                    label="允许的客户端工具",
+                    type="textarea",
+                    required=True,
+                    rows=5,
+                    default=(
+                        "host_page_snapshot, host_page_read, host_page_click, "
+                        "host_page_fill, host_page_select, host_page_press, "
+                        "host_page_hover, host_page_scroll, host_page_wait_for, "
+                        "host_page_navigate, host_page_screenshot"
+                    ),
+                    description="逗号或换行分隔；只能选择宿主声明且 schema 匹配的工具。",
+                ),
+                RuntimeMiddlewareField(
+                    name="clientToolTimeoutSeconds",
+                    label="客户端等待超时（秒）",
+                    type="number",
+                    default=1800,
+                    min_value=30,
+                    max_value=86400,
+                ),
+                RuntimeMiddlewareField(
+                    name="requireBoundTab",
+                    label="要求用户主动绑定当前标签页",
+                    type="boolean",
+                    default=True,
+                ),
+            ],
+            tags=["agent", "client", "chrome", "hitl", "durable"],
+            metadata={
+                "middleware_name": "client_tools",
+                "runtime_hook": "agent_tools",
+                "capability_name": "client_tools",
+                "durable": True,
+                "real_execution": True,
+                "app_forbidden": True,
+            },
+        )
+    )
+
 
 runtime_middleware_registry = RuntimeMiddlewareRegistry()
 register_builtin_middleware_nodes(runtime_middleware_registry)

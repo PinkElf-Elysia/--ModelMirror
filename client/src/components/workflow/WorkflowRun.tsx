@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import RuntimeApprovalPanel from "../runtime/RuntimeApprovalPanel";
 import BrowserSessionPanel from "../runtime/BrowserSessionPanel";
+import ClientToolPanel from "../runtime/ClientToolPanel";
 import SandboxWorkspacePanel from "../runtime/SandboxWorkspacePanel";
 import {
   type WorkflowDefinition,
@@ -296,6 +297,15 @@ function buildRunSteps(events: WorkflowRunEvent[]) {
     if (event.event === "runtime_approval_resolved") {
       step.status = "running";
       step.output = appendStepOutput(step.output, event.message || "审批已处理，继续执行。", step.type);
+      return;
+    }
+    if (event.event === "client_tool_waiting") {
+      step.status = "waiting";
+      step.output = appendStepOutput(
+        step.output,
+        event.message || `等待客户端工具：${event.tool_name ?? "client tool"}`,
+        step.type,
+      );
       return;
     }
     if (event.event === "node_delta") {
@@ -694,6 +704,14 @@ export default function WorkflowRun({
           compact
           scopeIdPrefix={`${taskId}:`}
           scopeType="workflow"
+        />
+      ) : null}
+
+      {taskId ? (
+        <ClientToolPanel
+          compact
+          onResolved={() => resumeDurableExecution()}
+          taskId={taskId}
         />
       ) : null}
 

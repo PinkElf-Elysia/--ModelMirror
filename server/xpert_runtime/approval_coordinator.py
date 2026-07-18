@@ -80,9 +80,13 @@ class ApprovalCoordinator:
 
         ready: list[tuple[WorkflowExecution, RuntimeApprovalRequest]] = []
         for execution in self.executions.list_items(limit=1000):
-            if execution.status != "waiting" or not execution.approval_id:
+            if (
+                execution.status != "waiting"
+                or execution.wait_kind != "approval"
+                or not execution.wait_id
+            ):
                 continue
-            approval = self.approvals.get(execution.approval_id)
+            approval = self.approvals.get(execution.wait_id)
             if approval is not None and approval.status == "decided":
                 try:
                     self.executions.mark_ready(
@@ -91,9 +95,13 @@ class ApprovalCoordinator:
                 except WorkflowExecutionConflictError:
                     continue
         for execution in self.executions.list_items(status="ready", limit=1000):
-            if execution.task_id in self._active or not execution.approval_id:
+            if (
+                execution.task_id in self._active
+                or execution.wait_kind != "approval"
+                or not execution.wait_id
+            ):
                 continue
-            approval = self.approvals.get(execution.approval_id)
+            approval = self.approvals.get(execution.wait_id)
             if approval is not None and approval.status == "decided":
                 ready.append((execution, approval))
 

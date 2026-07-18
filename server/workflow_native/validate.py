@@ -266,6 +266,12 @@ def validate_workflow_graph(workflow: NativeWorkflowDefinition) -> ValidateWorkf
         issues,
         kinds_by_id=kinds_by_id,
     )
+    validate_client_tool_middleware_bindings(
+        workflow.nodes,
+        valid_edges,
+        issues,
+        kinds_by_id=kinds_by_id,
+    )
     order = topological_order(workflow.nodes, valid_edges, issues)
 
     has_errors = any(issue.severity == "error" for issue in issues)
@@ -2376,6 +2382,118 @@ def validate_browser_middleware_bindings(
                     node_id=browser_node.id,
                 )
             )
+
+
+def validate_client_tool_middleware_bindings(
+    nodes: list[NativeWorkflowNode],
+    edges: list[NativeWorkflowEdge],
+    issues: list[ValidationIssue],
+    *,
+    kinds_by_id: dict[str, str],
+) -> None:
+    """Require an explicit host, runtime tool mode, and HITL for mutations."""
+
+    nodes_by_id = {node.id: node for node in nodes}
+    bound_by_agent: dict[str, list[NativeWorkflowNode]] = defaultdict(list)
+    for edge in edges:
+        if not is_middleware_binding_edge(edge):
+            continue
+        source = nodes_by_id.get(edge.source)
+        if source is not None and kinds_by_id.get(source.id) == "runtime_middleware":
+            bound_by_agent[edge.target].append(source)
+
+    mutating = {
+        "host_page_click",
+        "host_page_fill",
+        "host_page_select",
+        "host_page_press",
+        "host_page_navigate",
+    }
+    for agent_id, middleware_nodes in bound_by_agent.items():
+        client_nodes = [
+            node
+            for node in middleware_nodes
+            if str(node.data.get("runtimeMiddlewareId") or "") == "client_tools"
+        ]
+        if not client_nodes:
+            continue
+        agent_node = nodes_by_id.get(agent_id)
+        if (
+            agent_node is not None
+            and str(agent_node.data.get("toolMode") or "none") != "mcp_tools"
+        ):
+            for client_node in client_nodes:
+                issues.append(
+                    ValidationIssue(
+                        code="client_tools_requires_runtime_tool_mode",
+                        message=(
+                            "client_tools requires its workflow_agent to use "
+                            "toolMode=mcp_tools."
+                        ),
+                        node_id=client_node.id,
+                    )
+                )
+        hitl_tools: set[str] = set()
+        for node in middleware_nodes:
+            if str(node.data.get("runtimeMiddlewareId") or "") != "human_in_the_loop":
+                continue
+            config = node.data.get("runtimeMiddlewareConfig") or {}
+            hitl_tools.update(
+                value.strip()
+                for value in re.split(
+                    r"[,\n]+", str(config.get("interrupt_on_tools") or "")
+                )
+                if value.strip()
+            )
+        for client_node in client_nodes:
+            config = client_node.data.get("runtimeMiddlewareConfig") or {}
+            if not str(config.get("clientHostId") or "").strip():
+                issues.append(
+                    ValidationIssue(
+                        code="client_tools_host_required",
+                        message="client_tools requires clientHostId.",
+                        node_id=client_node.id,
+                    )
+                )
+            names = {
+                value.strip()
+                for value in re.split(
+                    r"[,\n]+", str(config.get("clientToolNames") or "")
+                )
+                if value.strip()
+            }
+            if not names:
+                issues.append(
+                    ValidationIssue(
+                        code="client_tools_names_required",
+                        message="client_tools requires at least one client tool name.",
+                        node_id=client_node.id,
+                    )
+                )
+            try:
+                timeout = int(config.get("clientToolTimeoutSeconds", 1800))
+            except (TypeError, ValueError):
+                timeout = 0
+            if not 30 <= timeout <= 86400:
+                issues.append(
+                    ValidationIssue(
+                        code="client_tools_timeout_invalid",
+                        message="clientToolTimeoutSeconds must be between 30 and 86400.",
+                        node_id=client_node.id,
+                    )
+                )
+            required = names & mutating
+            if required and "*" not in hitl_tools and not required.issubset(hitl_tools):
+                issues.append(
+                    ValidationIssue(
+                        code="client_tools_requires_hitl",
+                        message=(
+                            "Mutating client tools require human_in_the_loop "
+                            "coverage for every configured mutation."
+                        ),
+                        node_id=client_node.id,
+                    )
+                )
 
 
 def topological_order(

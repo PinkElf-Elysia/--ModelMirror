@@ -23,6 +23,7 @@ GoalStepStatus = Literal[
     "pending",
     "running",
     "waiting_approval",
+    "waiting_client",
     "completed",
     "failed",
     "blocked",
