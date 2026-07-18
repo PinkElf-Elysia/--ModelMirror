@@ -1347,6 +1347,13 @@ function NodeConfig({
   const [registryToolsError, setRegistryToolsError] = useState("");
   const [publishedXperts, setPublishedXperts] = useState<XpertSummary[]>([]);
   const [publishedXpertsError, setPublishedXpertsError] = useState("");
+  const [clientHosts, setClientHosts] = useState<Array<{
+    host_id: string;
+    name: string;
+    status: string;
+    bound_tab?: { bound?: boolean; title?: string; origin?: string };
+    revoked?: boolean;
+  }>>([]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1396,8 +1403,20 @@ function NodeConfig({
       }
     }
 
+    async function loadClientHosts() {
+      try {
+        const response = await fetch("/api/runtime/client-hosts");
+        const payload = (await response.json()) as { hosts?: typeof clientHosts };
+        if (!response.ok) throw new Error("客户端宿主列表暂不可用");
+        if (!cancelled) setClientHosts(payload.hosts ?? []);
+      } catch {
+        if (!cancelled) setClientHosts([]);
+      }
+    }
+
     void loadRegistryTools();
     void loadPublishedXperts();
+    void loadClientHosts();
 
     return () => {
       cancelled = true;
@@ -2369,7 +2388,27 @@ function NodeConfig({
                   key={field.name}
                   label={`${field.label}${field.required ? " *" : ""}`}
                 >
-                  {field.type === "text" ? (
+                  {field.type === "text" && field.name === "clientHostId" ? (
+                    <select
+                      className={textInputClass()}
+                      onChange={(event) =>
+                        updateRuntimeMiddlewareConfig(field.name, event.target.value)
+                      }
+                      value={runtimeMiddlewareStringValue(
+                        runtimeMiddlewareConfig,
+                        field,
+                      )}
+                    >
+                      <option className="bg-slate-950" value="">选择已配对 Chrome 宿主</option>
+                      {clientHosts.filter((host) => !host.revoked).map((host) => (
+                        <option className="bg-slate-950" key={host.host_id} value={host.host_id}>
+                          {host.name} · {host.status}{host.bound_tab?.bound ? " · 已绑定标签页" : " · 未绑定标签页"}
+                        </option>
+                      ))}
+                    </select>
+                  ) : null}
+
+                  {field.type === "text" && field.name !== "clientHostId" ? (
                     <input
                       className={textInputClass()}
                       onChange={(event) =>

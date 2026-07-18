@@ -12,6 +12,8 @@ export type GoalStatus =
 export type GoalStepStatus =
   | "pending"
   | "running"
+  | "waiting_approval"
+  | "waiting_client"
   | "completed"
   | "failed"
   | "blocked"

@@ -42,6 +42,8 @@ class WorkflowExecution:
     inputs: dict[str, Any]
     runtime_metadata: dict[str, Any] = field(default_factory=dict)
     continuation: dict[str, Any] = field(default_factory=dict)
+    wait_kind: str | None = None
+    wait_id: str | None = None
     approval_id: str | None = None
     result: str | None = None
     error: str | None = None
@@ -125,14 +127,23 @@ class WorkflowExecutionStore:
         self,
         task_id: str,
         *,
-        approval_id: str,
+        approval_id: str | None = None,
+        wait_kind: str = "approval",
+        wait_id: str | None = None,
         continuation: dict[str, Any],
         safe_event: dict[str, Any] | None = None,
     ) -> WorkflowExecution:
         with self._lock:
             item = self._require_unlocked(task_id)
             item.status = "waiting"
-            item.approval_id = approval_id
+            resolved_wait_id = str(wait_id or approval_id or "").strip()
+            if not resolved_wait_id:
+                raise WorkflowExecutionConflictError("A wait identifier is required.")
+            item.wait_kind = str(wait_kind or "approval")
+            item.wait_id = resolved_wait_id
+            item.approval_id = (
+                resolved_wait_id if item.wait_kind == "approval" else None
+            )
             item.continuation = dict(continuation)
             item.lease_owner = None
             item.lease_token = None
@@ -144,15 +155,23 @@ class WorkflowExecutionStore:
             self._persist_unlocked()
             return item
 
-    def mark_ready(self, task_id: str, *, approval_id: str) -> WorkflowExecution:
+    def mark_ready(
+        self,
+        task_id: str,
+        *,
+        approval_id: str | None = None,
+        wait_kind: str = "approval",
+        wait_id: str | None = None,
+    ) -> WorkflowExecution:
         with self._lock:
             item = self._require_unlocked(task_id)
             if item.status not in {"waiting", "ready"}:
                 raise WorkflowExecutionConflictError(
                     f"Workflow execution cannot resume from {item.status}."
                 )
-            if item.approval_id != approval_id:
-                raise WorkflowExecutionConflictError("Approval does not match execution.")
+            resolved_wait_id = str(wait_id or approval_id or "").strip()
+            if item.wait_kind != wait_kind or item.wait_id != resolved_wait_id:
+                raise WorkflowExecutionConflictError("Wait target does not match execution.")
             item.status = "ready"
             item.updated_at = time.time()
             item.revision += 1
@@ -241,6 +260,8 @@ class WorkflowExecutionStore:
             item.result = str(result or "")[:200_000] if result is not None else item.result
             item.error = str(error or "")[:4_000] if error is not None else None
             item.approval_id = None
+            item.wait_kind = None
+            item.wait_id = None
             item.continuation = {}
             item.lease_owner = None
             item.lease_token = None
@@ -259,6 +280,8 @@ class WorkflowExecutionStore:
             "run_type": item.run_type,
             "status": item.status,
             "approval_id": item.approval_id,
+            "wait_kind": item.wait_kind,
+            "wait_id": item.wait_id,
             "result": item.result,
             "error": item.error,
             "revision": item.revision,
@@ -291,8 +314,13 @@ class WorkflowExecutionStore:
             "node_title",
             "node_type",
             "approval_id",
+            "wait_kind",
+            "wait_id",
             "approval_status",
             "request_type",
+            "request_id",
+            "request_status",
+            "host_id",
             "tool_name",
             "message",
             "final_output",
@@ -331,9 +359,12 @@ class WorkflowExecutionStore:
             for raw in payload.get("items", []):
                 if not isinstance(raw, dict):
                     continue
+                if not raw.get("wait_kind") and raw.get("approval_id"):
+                    raw["wait_kind"] = "approval"
+                    raw["wait_id"] = raw.get("approval_id")
                 item = WorkflowExecution(**raw)
                 if item.status == "running":
-                    item.status = "ready" if item.approval_id is None else "waiting"
+                    item.status = "ready" if item.wait_id is None else "waiting"
                     item.lease_owner = None
                     item.lease_token = None
                     item.lease_expires_at = 0.0

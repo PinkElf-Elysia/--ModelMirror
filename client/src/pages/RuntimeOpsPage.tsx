@@ -74,6 +74,29 @@ interface EnvironmentSummaryPayload {
   updated_at: number;
 }
 
+interface ClientHostPayload {
+  host_id: string;
+  name: string;
+  token_prefix: string;
+  status: string;
+  version: string;
+  capabilities: Array<{ name: string }>;
+  bound_tab: {
+    bound?: boolean;
+    origin?: string;
+    title?: string;
+  };
+  revoked: boolean;
+  last_heartbeat_at?: number | null;
+}
+
+interface ClientPairingPayload {
+  pairing_id: string;
+  pairing_code: string;
+  expires_at: number;
+  single_use: boolean;
+}
+
 type RuntimeFilter = "all" | "workflow" | "workflow_agent" | "agent_task" | "agent_handoff" | "chat" | "goal";
 type StatusFilter = "all" | "pending" | "running" | "completed" | "failed" | "cancelled";
 type McpStatusFilter = "all" | "active" | "failed" | "closed" | "unknown";
@@ -308,6 +331,11 @@ export default function RuntimeOpsPage() {
   const [environment, setEnvironment] = useState(
     createLoadable<EnvironmentSummaryPayload | null>(null, true),
   );
+  const [clientHosts, setClientHosts] = useState(
+    createLoadable<ClientHostPayload[]>([], true),
+  );
+  const [clientPairing, setClientPairing] = useState<ClientPairingPayload | null>(null);
+  const [clientHostBusy, setClientHostBusy] = useState("");
   const [runType, setRunType] = useState<RuntimeFilter>("all");
   const [status, setStatus] = useState<StatusFilter>("all");
   const [mcpStatusFilter, setMcpStatusFilter] = useState<McpStatusFilter>("all");
@@ -396,13 +424,69 @@ export default function RuntimeOpsPage() {
     }
   }, []);
 
+  const loadClientHosts = useCallback(async () => {
+    setClientHosts((current) => ({ ...current, loading: true, error: "" }));
+    try {
+      const data = await readJson<{ hosts: ClientHostPayload[] }>(
+        "/api/runtime/client-hosts",
+      );
+      setClientHosts(createLoadable(data.hosts ?? []));
+    } catch (error) {
+      setClientHosts({
+        data: [],
+        error: error instanceof Error ? error.message : "客户端宿主加载失败",
+        loading: false,
+      });
+    }
+  }, []);
+
   const refreshAll = useCallback(() => {
     void loadMcp();
     void loadTools();
     void loadRuns();
     void loadSkills();
     void loadEnvironment();
-  }, [loadEnvironment, loadMcp, loadRuns, loadSkills, loadTools]);
+    void loadClientHosts();
+  }, [loadClientHosts, loadEnvironment, loadMcp, loadRuns, loadSkills, loadTools]);
+
+  async function createClientPairing() {
+    setClientHostBusy("pairing");
+    try {
+      const response = await fetch("/api/runtime/client-hosts/pairings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "Chrome Host" }),
+      });
+      if (!response.ok) throw new Error("生成配对码失败");
+      setClientPairing((await response.json()) as ClientPairingPayload);
+    } catch (error) {
+      setClientHosts((current) => ({
+        ...current,
+        error: error instanceof Error ? error.message : "生成配对码失败",
+      }));
+    } finally {
+      setClientHostBusy("");
+    }
+  }
+
+  async function revokeClientHost(hostId: string) {
+    setClientHostBusy(hostId);
+    try {
+      const response = await fetch(
+        `/api/runtime/client-hosts/${encodeURIComponent(hostId)}/revoke`,
+        { method: "POST" },
+      );
+      if (!response.ok) throw new Error("撤销客户端宿主失败");
+      await loadClientHosts();
+    } catch (error) {
+      setClientHosts((current) => ({
+        ...current,
+        error: error instanceof Error ? error.message : "撤销客户端宿主失败",
+      }));
+    } finally {
+      setClientHostBusy("");
+    }
+  }
 
   useEffect(() => {
     refreshAll();
@@ -665,7 +749,79 @@ export default function RuntimeOpsPage() {
         </button>
       </section>
 
-      <div className="grid gap-5 2xl:grid-cols-[minmax(0,1fr)_minmax(360px,0.58fr)]">
+      <SectionShell
+        action={
+          <div className="flex flex-wrap gap-2">
+            <a
+              className="rounded-full border border-white/10 bg-white/[0.055] px-3 py-1.5 text-xs font-semibold text-slate-200 transition hover:border-cyan-300/30 hover:text-cyan-100"
+              href="/api/runtime/client-hosts/extension.zip"
+            >
+              下载 Chrome 扩展
+            </a>
+            <button
+              className="rounded-full bg-cyan-300 px-3 py-1.5 text-xs font-semibold text-slate-950 disabled:opacity-50"
+              disabled={clientHostBusy === "pairing"}
+              onClick={() => void createClientPairing()}
+              type="button"
+            >
+              生成配对码
+            </button>
+          </div>
+        }
+        description="将私有 Xpert 请求派发到用户主动绑定的当前 Chrome 标签页；Token 只保存在扩展本地。"
+        error={clientHosts.error}
+        title="客户端宿主"
+      >
+        {clientPairing ? (
+          <div className="border-b border-white/10 bg-cyan-300/[0.07] px-4 py-3">
+            <p className="text-xs text-cyan-100">在扩展 Popup 中输入以下一次性配对码，5 分钟内有效：</p>
+            <div className="mt-2 flex flex-wrap items-center gap-3">
+              <code className="rounded-md border border-cyan-300/20 bg-black/25 px-4 py-2 text-xl font-semibold text-white">
+                {clientPairing.pairing_code}
+              </code>
+              <span className="text-[11px] text-slate-400">失效时间 {formatTime(clientPairing.expires_at)}</span>
+              <button className="text-[11px] text-slate-400 hover:text-white" onClick={() => setClientPairing(null)} type="button">隐藏</button>
+            </div>
+          </div>
+        ) : null}
+        {clientHosts.loading ? (
+          <div className="p-4 text-sm text-slate-400">客户端宿主加载中...</div>
+        ) : clientHosts.data.length === 0 ? (
+          <div className="p-8 text-center">
+            <p className="text-base font-semibold text-white">尚未配对客户端宿主</p>
+            <p className="mt-2 text-sm text-slate-400">下载扩展并使用一次性配对码连接。配对后仍需在扩展中主动绑定当前标签页。</p>
+            <a className="mt-3 inline-flex text-xs font-semibold text-cyan-200 hover:text-cyan-100" href="/api/runtime/client-tools/fixture" target="_blank" rel="noreferrer">打开无敏感数据测试页</a>
+          </div>
+        ) : (
+          <div className="grid gap-3 p-4 lg:grid-cols-2">
+            {clientHosts.data.map((host) => (
+              <article className="rounded-lg border border-white/10 bg-white/[0.045] p-3" key={host.host_id}>
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-semibold text-white">{host.name}</p>
+                    <p className="mt-1 truncate font-mono text-[10px] text-slate-500">{host.host_id} · {host.token_prefix}...</p>
+                  </div>
+                  <span className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold ${statusClass(host.status)}`}>{host.status}</span>
+                </div>
+                <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-slate-400">
+                  <p>扩展 v{host.version || "-"}</p>
+                  <p>{host.capabilities.length} 个工具</p>
+                  <p className="col-span-2 truncate">{host.bound_tab?.bound ? `已绑定 · ${host.bound_tab.title || host.bound_tab.origin}` : "标签页未绑定"}</p>
+                  <p className="col-span-2">最近心跳 {formatTime(host.last_heartbeat_at)}</p>
+                </div>
+                <div className="mt-3 flex items-center justify-between border-t border-white/10 pt-2">
+                  <a className="text-[11px] text-cyan-200 hover:text-cyan-100" href="/api/runtime/client-tools/fixture" target="_blank" rel="noreferrer">测试标签页</a>
+                  {!host.revoked ? (
+                    <button className="text-[11px] text-rose-200 hover:text-rose-100 disabled:opacity-50" disabled={clientHostBusy === host.host_id} onClick={() => void revokeClientHost(host.host_id)} type="button">撤销 Token</button>
+                  ) : null}
+                </div>
+              </article>
+            ))}
+          </div>
+        )}
+      </SectionShell>
+
+      <div className="mt-5 grid gap-5 2xl:grid-cols-[minmax(0,1fr)_minmax(360px,0.58fr)]">
         <div className="space-y-5">
           <SectionShell
             action={

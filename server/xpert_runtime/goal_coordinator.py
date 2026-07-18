@@ -495,7 +495,11 @@ class GoalCoordinator:
     async def _reconcile_steps(self, goal: ConversationGoal, run: RuntimeRun) -> None:
         failed_step: GoalStep | None = None
         for step in goal.steps:
-            if step.status not in {"running", "waiting_approval"} or not step.handoff_id:
+            if step.status not in {
+                "running",
+                "waiting_approval",
+                "waiting_client",
+            } or not step.handoff_id:
                 continue
             handoff = await self.task_store.get_handoff(step.handoff_id)
             if handoff is None:
@@ -545,21 +549,57 @@ class GoalCoordinator:
                         },
                         severity="warning",
                     )
+            elif handoff.status == "waiting_client":
+                if step.status != "waiting_client":
+                    await self.goal_store.update_step(
+                        goal.goal_id,
+                        step.step_id,
+                        status="waiting_client",
+                        attempts=int(
+                            handoff.metadata.get("attempts") or step.attempts
+                        ),
+                    )
+                    await self._checkpoint(
+                        run,
+                        "goal.step.waiting_client",
+                        "Goal step is waiting for a client host",
+                        str(handoff.metadata.get("client_request_id") or ""),
+                        {
+                            "goal_id": goal.goal_id,
+                            "step_id": step.step_id,
+                            "client_request_id": handoff.metadata.get(
+                                "client_request_id"
+                            ),
+                        },
+                        severity="warning",
+                    )
             elif handoff.status == "needs_attention":
+                waiting_for_client = bool(
+                    handoff.metadata.get("client_request_id")
+                )
                 await self.goal_store.update_step(
                     goal.goal_id,
                     step.step_id,
-                    status="waiting_approval",
+                    status=(
+                        "waiting_client"
+                        if waiting_for_client
+                        else "waiting_approval"
+                    ),
                     error=str(
                         handoff.metadata.get("last_error")
-                        or "Runtime approval requires attention."
+                        or (
+                            "Client tool request requires attention."
+                            if waiting_for_client
+                            else "Runtime approval requires attention."
+                        )
                     )[:2000],
                 )
 
                 def apply_approval_attention(current: ConversationGoal) -> None:
                     current.status = "needs_attention"
                     current.error = (
-                        f"Step {step.step_id} has an expired runtime approval."
+                        f"Step {step.step_id} has an expired "
+                        f"{'client tool request' if waiting_for_client else 'runtime approval'}."
                     )
 
                 await self.goal_store.mutate_steps(
@@ -575,6 +615,9 @@ class GoalCoordinator:
                         "goal_id": goal.goal_id,
                         "step_id": step.step_id,
                         "approval_id": handoff.metadata.get("approval_id"),
+                        "client_request_id": handoff.metadata.get(
+                            "client_request_id"
+                        ),
                     },
                     severity="warning",
                 )
@@ -638,7 +681,7 @@ class GoalCoordinator:
         active = sum(
             1
             for step in goal.steps
-            if step.status in {"running", "waiting_approval"}
+            if step.status in {"running", "waiting_approval", "waiting_client"}
         )
         slots = max(0, goal.max_parallel - active)
         if slots == 0:

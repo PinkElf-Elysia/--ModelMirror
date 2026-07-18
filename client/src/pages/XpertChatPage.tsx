@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import PageContainer from "../components/PageContainer";
 import RuntimeApprovalPanel from "../components/runtime/RuntimeApprovalPanel";
 import BrowserSessionPanel from "../components/runtime/BrowserSessionPanel";
+import ClientToolPanel from "../components/runtime/ClientToolPanel";
 import SandboxWorkspacePanel from "../components/runtime/SandboxWorkspacePanel";
 import {
   type XpertConversationMessage,
@@ -43,6 +44,7 @@ interface XpertRunEvent {
   xpert_id?: string;
   xpert_version?: number;
   approval_id?: string;
+  request_id?: string;
   approval_status?: string;
   request_type?: "tool_call" | "final_output" | "manual_input";
   tool_name?: string;
@@ -543,6 +545,7 @@ export default function XpertChatPage() {
       let nextRunId = "";
       let nextTaskId = "";
       let approvalPending = false;
+      let clientToolPending = false;
 
       const processBlock = (block: string) => {
         for (const line of block.split(/\r?\n/)) {
@@ -565,6 +568,7 @@ export default function XpertChatPage() {
           if (event.event === "runtime_approval_pending") {
             approvalPending = true;
           }
+          if (event.event === "client_tool_waiting") clientToolPending = true;
           if (event.event === "error") {
             throw new Error(event.message || "Xpert 运行失败");
           }
@@ -583,7 +587,7 @@ export default function XpertChatPage() {
         if (done) break;
       }
       if (buffer.trim()) processBlock(buffer);
-      if (!approvalPending) {
+      if (!approvalPending && !clientToolPending) {
         setMessages((current) => [
           ...current,
           { role: "assistant", content: finalOutput || "运行完成，但没有返回文本输出。" },
@@ -615,6 +619,7 @@ export default function XpertChatPage() {
       let buffer = "";
       let finalOutput = "";
       let approvalPending = false;
+      let clientToolPending = false;
       let nextRunId = runId;
       setEvents([]);
 
@@ -631,6 +636,7 @@ export default function XpertChatPage() {
           }
           if (event.event === "workflow_end") finalOutput = event.final_output || "";
           if (event.event === "runtime_approval_pending") approvalPending = true;
+          if (event.event === "client_tool_waiting") clientToolPending = true;
           if (event.event === "error") throw new Error(event.message || "Xpert 恢复执行失败");
         }
       };
@@ -647,7 +653,7 @@ export default function XpertChatPage() {
         if (done) break;
       }
       if (buffer.trim()) processBlock(buffer);
-      if (!approvalPending && finalOutput) {
+      if (!approvalPending && !clientToolPending && finalOutput) {
         setMessages((current) => [...current, { role: "assistant", content: finalOutput }]);
       }
       if (nextRunId) await loadTrace(nextRunId, taskId);
@@ -841,6 +847,12 @@ export default function XpertChatPage() {
                 />
                 <BrowserSessionPanel
                   compact
+                  scopeId={`${xpert.id}:${conversationId}`}
+                  scopeType="conversation"
+                />
+                <ClientToolPanel
+                  compact
+                  onResolved={() => resumeApprovalExecution()}
                   scopeId={`${xpert.id}:${conversationId}`}
                   scopeType="conversation"
                 />

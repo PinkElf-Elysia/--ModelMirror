@@ -67,6 +67,21 @@ async def run_tool_with_runtime(
 
     async def handler(req: ToolCallRequest) -> ToolCallResponse:
         nonlocal provider_called, provider_response, audit_record_id
+        try:
+            static_prepare_dispatch = inspect.getattr_static(provider, "prepare_dispatch")
+        except AttributeError:
+            static_prepare_dispatch = None
+        if static_prepare_dispatch is not None:
+            prepare_dispatch = getattr(provider, "prepare_dispatch")
+            dispatch_result = prepare_dispatch(
+                RuntimeToolCall(
+                    tool_name=req.tool_name,
+                    arguments=dict(req.arguments or {}),
+                    metadata=dict(req.metadata or {}),
+                )
+            )
+            if inspect.isawaitable(dispatch_result):
+                await dispatch_result
         provider_called = True
         if audit_record_id is None:
             audit_record_id = await _safe_record_started(

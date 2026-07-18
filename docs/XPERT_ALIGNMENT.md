@@ -1,12 +1,18 @@
 # Xpert 对齐总纲
 
+## 2026-07-18 增量：XPERT-MIDDLEWARE-CLIENT-05
+
+私有 Workflow、Xpert Chat、Goal 与 Handoff 已具备客户端宿主闭环：`workflow_agent` 可通过 `client_tools` 请求用户已配对 Chrome 在主动绑定的当前标签页执行 snapshot、read、受审批交互和 screenshot。请求持久化等待，扩展断线或容器重启后由 Coordinator 从原 ReAct 断点继续。
+
+安全边界固定为一次性配对、高熵哈希 token、`activeTab` 临时授权、固定工具 schema、opaque ref、mutating HITL、跨 host/作用域拒绝和幂等恢复。服务端 Browser sidecar 与客户端当前标签页桥保持分离；公开 Xpert App/API 禁止 Client Tools。下一阶段进入 `XPERT-MIDDLEWARE-AUTOMATION-06`。
+
 ## 2026-07-16 增量：XPERT-MIDDLEWARE-BROWSER-04
 
 私有 Workflow、Xpert Chat、Goal 与 Handoff 已具备隔离联网浏览器闭环。`browser_automation` 通过独立 Playwright Chromium sidecar 提供导航、ARIA snapshot、页面读取、受审批交互、同作用域文件上传、下载与产物发布；会话、域名授权和操作幂等状态可在容器重启后恢复。
 
-网络边界固定为公网访问、私网阻断与首域名逐 session 审批。egress guard 和 Playwright route 双重拒绝本机、Docker service、云元数据、危险协议和混合 DNS；写操作继续经过 tool policy、HITL 与 audit。公开 Xpert App/API 禁止部署 Browser。下一步进入 `XPERT-MIDDLEWARE-CLIENT-05`，客户端宿主桥与服务端 Browser 分离建设。
+网络边界固定为公网访问、私网阻断与首域名逐 session 审批。egress guard 和 Playwright route 双重拒绝本机、Docker service、云元数据、危险协议和混合 DNS；写操作继续经过 tool policy、HITL 与 audit。公开 Xpert App/API 禁止部署 Browser。该阶段规划的客户端宿主桥现已由上方 `XPERT-MIDDLEWARE-CLIENT-05` 增量完成，并继续与服务端 Browser 保持边界分离。
 
-最后更新日期：2026-07-16
+最后更新日期：2026-07-18
 维护人：模镜团队
 
 ## 2026-07-16 增量：XPERT-MIDDLEWARE-HITL-02

@@ -188,6 +188,11 @@ try:
         BrowserSidecarClient,
         BrowserToolsetProvider,
         BrowserSessionStore,
+        ClientToolConnectionManager,
+        ClientToolCoordinator,
+        ClientToolRequest,
+        ClientToolStore,
+        ClientToolsetProvider,
         WorkflowExecution,
         WorkflowExecutionStore,
         RuntimeToolCall,
@@ -202,6 +207,8 @@ try:
         configure_runtime_todo_store,
         configure_runtime_sandbox,
         configure_runtime_browser,
+        configure_runtime_client_tools,
+        configure_client_tool_coordinator,
         control_flow_edges,
         create_default_runtime,
         event_recorder,
@@ -213,12 +220,14 @@ try:
         register_todo_toolset_capability,
         register_sandbox_toolset_capability,
         register_browser_toolset_capability,
+        register_client_toolset_capability,
         run_tool_with_runtime,
         runtime_middleware_registry,
         runtime_approval_router,
         runtime_todo_router,
         runtime_sandbox_router,
         runtime_browser_router,
+        runtime_client_tool_router,
         select_runtime_tools,
         todo_planning_instruction,
         validate_structured_output,
@@ -267,6 +276,11 @@ except ModuleNotFoundError:
         BrowserSidecarClient,
         BrowserToolsetProvider,
         BrowserSessionStore,
+        ClientToolConnectionManager,
+        ClientToolCoordinator,
+        ClientToolRequest,
+        ClientToolStore,
+        ClientToolsetProvider,
         WorkflowExecution,
         WorkflowExecutionStore,
         RuntimeToolCall,
@@ -281,6 +295,8 @@ except ModuleNotFoundError:
         configure_runtime_todo_store,
         configure_runtime_sandbox,
         configure_runtime_browser,
+        configure_runtime_client_tools,
+        configure_client_tool_coordinator,
         control_flow_edges,
         create_default_runtime,
         event_recorder,
@@ -292,12 +308,14 @@ except ModuleNotFoundError:
         register_todo_toolset_capability,
         register_sandbox_toolset_capability,
         register_browser_toolset_capability,
+        register_client_toolset_capability,
         run_tool_with_runtime,
         runtime_middleware_registry,
         runtime_approval_router,
         runtime_todo_router,
         runtime_sandbox_router,
         runtime_browser_router,
+        runtime_client_tool_router,
         select_runtime_tools,
         todo_planning_instruction,
         validate_structured_output,
@@ -455,6 +473,7 @@ app.include_router(runtime_todo_router)
 app.include_router(runtime_approval_router)
 app.include_router(runtime_sandbox_router)
 app.include_router(runtime_browser_router)
+app.include_router(runtime_client_tool_router)
 
 request_windows: dict[str, deque[float]] = defaultdict(deque)
 mcp_connect_windows: dict[str, deque[float]] = defaultdict(deque)
@@ -496,6 +515,9 @@ workflow_browser_provider = BrowserToolsetProvider(
     sandbox_store=sandbox_workspace_store,
 )
 configure_runtime_browser(browser_session_store, browser_sidecar_client)
+client_tool_store = ClientToolStore(storage_dir=AGENT_TASK_STORAGE_DIR or None)
+client_tool_connections = ClientToolConnectionManager(client_tool_store)
+workflow_client_tool_provider = ClientToolsetProvider(client_tool_store)
 runtime_capabilities = CapabilityRegistry()
 workflow_mcp_pipeline = MiddlewarePipeline([event_recorder])
 workflow_tool_policy = ToolPermissionPolicy(allow_by_default=True)
@@ -516,6 +538,7 @@ knowledge_evaluation_executor = configure_evaluation_executor(run_registry=run_r
 handoff_executor: HandoffExecutor | None = None
 goal_coordinator: GoalCoordinator | None = None
 approval_coordinator: ApprovalCoordinator | None = None
+client_tool_coordinator: ClientToolCoordinator | None = None
 runtime_capabilities.register(
     "mcp_tools",
     workflow_mcp_provider,
@@ -524,6 +547,9 @@ runtime_capabilities.register(
 register_todo_toolset_capability(runtime_capabilities, workflow_todo_provider)
 register_sandbox_toolset_capability(runtime_capabilities, workflow_sandbox_provider)
 register_browser_toolset_capability(runtime_capabilities, workflow_browser_provider)
+register_client_toolset_capability(
+    runtime_capabilities, workflow_client_tool_provider
+)
 runtime_capabilities.register(
     "memory_tools",
     workflow_memory_provider,
@@ -808,6 +834,9 @@ class WorkflowTaskStatusResponse(BaseModel):
     ttl_seconds_left: float
     runtime_status: str | None = None
     approval_id: str | None = None
+    wait_kind: str | None = None
+    wait_id: str | None = None
+    client_request_id: str | None = None
 
 
 def client_ip(request: Request) -> str:
@@ -2663,6 +2692,7 @@ async def _run_workflow_response(
     runtime_parent_run_id: str | None = None,
     resume_execution: WorkflowExecution | None = None,
     resolved_approval: RuntimeApprovalRequest | None = None,
+    resolved_client_request: ClientToolRequest | None = None,
 ):
     requires_model = any(
         (node.data.get("kind") if isinstance(node.data.get("kind"), str) else node.type)
@@ -2739,7 +2769,11 @@ async def _run_workflow_response(
             workflow_run.run_id,
             status="running",
             clear_error=True,
-            metadata={"resumed_from_approval": True},
+            metadata={
+                "resumed_from_wait": (
+                    resume_execution.wait_kind if resume_execution is not None else None
+                )
+            },
         )
     if (
         resume_execution is not None
@@ -2752,12 +2786,12 @@ async def _run_workflow_response(
     await run_registry.record_checkpoint(
         workflow_run.run_id,
         event_type=(
-            "runtime.approval.resumed"
+            f"runtime.{resume_execution.wait_kind}.resumed"
             if resume_execution is not None
             else f"{runtime_run_type}.started"
         ),
         title=(
-            "Runtime approval resumed"
+            "Runtime execution resumed"
             if resume_execution is not None
             else ("Xpert started" if runtime_run_type == "xpert" else "Workflow started")
         ),
@@ -2802,7 +2836,22 @@ async def _run_workflow_response(
         "resolved_approval": (
             asdict(resolved_approval) if resolved_approval is not None else None
         ),
+        "resolved_client_tool": (
+            asdict(resolved_client_request)
+            if resolved_client_request is not None
+            else None
+        ),
     }
+    if (
+        task_state["resolved_approval"] is None
+        and isinstance(task_state["agent_resume_state"], dict)
+        and isinstance(
+            task_state["agent_resume_state"].get("resolved_approval"), dict
+        )
+    ):
+        task_state["resolved_approval"] = dict(
+            task_state["agent_resume_state"]["resolved_approval"]
+        )
     workflow_task_store[task_id] = task_state
     if resume_execution is None:
         workflow_execution_store.create(
@@ -2995,6 +3044,7 @@ async def _run_workflow_response(
             sandbox_shell = middleware_spec(specs, "sandbox_shell")
             skills_runtime = middleware_spec(specs, "skills_runtime")
             browser_automation = middleware_spec(specs, "browser_automation")
+            client_tools = middleware_spec(specs, "client_tools")
             if (
                 sandbox_shell is not None
                 and workflow_truthy(
@@ -3057,6 +3107,50 @@ async def _run_workflow_response(
                     raise RuntimeMiddlewareFatalError(
                         "browser_automation requires human_in_the_loop coverage for every mutating browser tool."
                     )
+            if client_tools is not None:
+                client_host_id = str(
+                    client_tools.config.get("clientHostId") or ""
+                ).strip()
+                if not client_host_id:
+                    raise RuntimeMiddlewareFatalError(
+                        "client_tools requires a paired clientHostId."
+                    )
+                client_names = {
+                    item.strip()
+                    for item in re.split(
+                        r"[,\n]",
+                        str(client_tools.config.get("clientToolNames") or ""),
+                    )
+                    if item.strip()
+                }
+                mutating_client_tools = {
+                    "host_page_click",
+                    "host_page_fill",
+                    "host_page_select",
+                    "host_page_press",
+                    "host_page_navigate",
+                }
+                client_hitl_tools = {
+                    item.strip()
+                    for item in re.split(
+                        r"[,\n]",
+                        str(
+                            hitl.config.get("interrupt_on_tools")
+                            if hitl is not None
+                            else ""
+                        ),
+                    )
+                    if item.strip()
+                }
+                required_client_tools = client_names & mutating_client_tools
+                if (
+                    required_client_tools
+                    and "*" not in client_hitl_tools
+                    and not required_client_tools.issubset(client_hitl_tools)
+                ):
+                    raise RuntimeMiddlewareFatalError(
+                        "client_tools requires human_in_the_loop coverage for configured mutating tools."
+                    )
             context_metadata["sandbox_config"] = {
                 **(sandbox_files.config if sandbox_files is not None else {}),
                 **(sandbox_shell.config if sandbox_shell is not None else {}),
@@ -3068,6 +3162,9 @@ async def _run_workflow_response(
                 dict(browser_automation.config)
                 if browser_automation is not None
                 else {}
+            )
+            context_metadata["client_tools_config"] = (
+                dict(client_tools.config) if client_tools is not None else {}
             )
             context_metadata["runtime_run_type"] = runtime_run_type
             run_context = task_state.get("runtime_metadata") or {}
@@ -3210,6 +3307,9 @@ async def _run_workflow_response(
             if not matched_tool:
                 matched_tool = await workflow_browser_provider.find_tool(tool_name)
                 capability_name = "browser_tools"
+            if not matched_tool:
+                matched_tool = await workflow_client_tool_provider.find_tool(tool_name)
+                capability_name = "client_tools"
             if capability_name == "mcp_tools" and not app_capability_allowed(
                 "allow_tools"
             ):
@@ -3229,6 +3329,8 @@ async def _run_workflow_response(
                 raise PermissionError("Xpert App Sandbox and Skill access is disabled.")
             if capability_name == "browser_tools" and runtime_run_type == "xpert_app":
                 raise PermissionError("Xpert App browser automation is disabled.")
+            if capability_name == "client_tools" and runtime_run_type == "xpert_app":
+                raise PermissionError("Xpert App client tools are disabled.")
             if not matched_tool:
                 raise ValueError(f"MCP 工具未注册：{tool_name}")
             run_context = task_state.get("runtime_metadata") or {}
@@ -3285,6 +3387,7 @@ async def _run_workflow_response(
                         "sandbox_config": effective_context.metadata.get("sandbox_config") or {},
                         "skills_config": effective_context.metadata.get("skills_config") or {},
                         "browser_config": effective_context.metadata.get("browser_config") or {},
+                        "client_tools_config": effective_context.metadata.get("client_tools_config") or {},
                         "todo_scope_type": todo_scope_type,
                         "todo_scope_id": todo_scope_id,
                         **dict(metadata or {}),
@@ -3331,6 +3434,8 @@ async def _run_workflow_response(
             include_sandbox: bool = False,
             include_skills: bool = False,
             include_browser: bool = False,
+            include_client: bool = False,
+            client_tools_config: dict[str, Any] | None = None,
             middleware_specs: list[RuntimeMiddlewareSpec] | None = None,
             apply_policy_filter: bool = False,
         ) -> list[Any]:
@@ -3390,6 +3495,24 @@ async def _run_workflow_response(
                     )
             if include_browser and runtime_run_type != "xpert_app":
                 tools.extend(await workflow_browser_provider.list_tools())
+            if include_client and runtime_run_type != "xpert_app":
+                config = dict(client_tools_config or {})
+                configured_names = {
+                    item.strip()
+                    for item in re.split(
+                        r"[,\n]", str(config.get("clientToolNames") or "")
+                    )
+                    if item.strip()
+                }
+                tools.extend(
+                    await workflow_client_tool_provider.list_tools_for_host(
+                        str(config.get("clientHostId") or ""),
+                        configured_names,
+                        require_bound_tab=workflow_truthy(
+                            config.get("requireBoundTab", True)
+                        ),
+                    )
+                )
             if middleware_specs is not None and apply_policy_filter:
                 allowed_tools: list[Any] = []
                 for tool in tools:
@@ -3400,6 +3523,7 @@ async def _run_workflow_response(
                         "sandbox": "sandbox_tools",
                         "skill": "sandbox_tools",
                         "browser": "browser_tools",
+                        "client": "client_tools",
                     }.get(str(tool.provider or ""), "mcp_tools")
                     if agent_tool_policy(
                         middleware_specs,
@@ -3432,6 +3556,8 @@ async def _run_workflow_response(
             include_sandbox: bool = False,
             include_skills: bool = False,
             include_browser: bool = False,
+            include_client: bool = False,
+            client_tools_config: dict[str, Any] | None = None,
             pipeline: MiddlewarePipeline | None = None,
             middleware_context: MiddlewareContext | None = None,
             middleware_specs: list[RuntimeMiddlewareSpec] | None = None,
@@ -3450,6 +3576,8 @@ async def _run_workflow_response(
                 include_sandbox=include_sandbox,
                 include_skills=include_skills,
                 include_browser=include_browser,
+                include_client=include_client,
+                client_tools_config=client_tools_config,
                 middleware_specs=middleware_specs,
                 apply_policy_filter=selector_spec is not None,
             )
@@ -3467,6 +3595,13 @@ async def _run_workflow_response(
                             "browser_navigate",
                             "browser_snapshot",
                             "browser_read",
+                        }
+                    )
+                if include_client:
+                    required_tools.update(
+                        {
+                            "host_page_snapshot",
+                            "host_page_read",
                         }
                     )
                 required_tools.update(
@@ -3658,29 +3793,37 @@ async def _run_workflow_response(
                     int(pending_state.get("iteration_index") or 0),
                 )
                 approval_payload = task_state.get("resolved_approval")
-                if not isinstance(approval_payload, dict):
-                    raise RuntimeMiddlewareFatalError(
-                        "Resolved approval is missing from the resumed execution."
+                client_payload = task_state.get("resolved_client_tool")
+                resume_metadata = {
+                    "agent_kind": kind,
+                    "agent_node_id": node.id,
+                    "iteration": pending_iteration + 1,
+                    "run_id": run_id,
+                    "knowledge_read_enabled": include_knowledge_read,
+                    "knowledge_write_enabled": include_knowledge_write,
+                    "knowledge_base_ids": list(knowledge_base_ids or []),
+                }
+                if isinstance(approval_payload, dict):
+                    resume_metadata["resolved_approval"] = approval_payload
+                if isinstance(client_payload, dict):
+                    resume_metadata["resolved_client_tool"] = client_payload
+                try:
+                    call_result = await call_workflow_runtime_tool(
+                        tool_name=pending_tool_name,
+                        arguments=pending_arguments,
+                        node=node,
+                        title=title,
+                        metadata=resume_metadata,
+                        pipeline=pipeline,
+                        middleware_context=middleware_context,
+                        middleware_specs=middleware_specs,
                     )
-                call_result = await call_workflow_runtime_tool(
-                    tool_name=pending_tool_name,
-                    arguments=pending_arguments,
-                    node=node,
-                    title=title,
-                    metadata={
-                        "agent_kind": kind,
-                        "agent_node_id": node.id,
-                        "iteration": pending_iteration + 1,
-                        "run_id": run_id,
-                        "knowledge_read_enabled": include_knowledge_read,
-                        "knowledge_write_enabled": include_knowledge_write,
-                        "knowledge_base_ids": list(knowledge_base_ids or []),
-                        "resolved_approval": approval_payload,
-                    },
-                    pipeline=pipeline,
-                    middleware_context=middleware_context,
-                    middleware_specs=middleware_specs,
-                )
+                except RuntimeInterrupt as interrupt:
+                    pending_state["resolved_approval"] = (
+                        approval_payload if isinstance(approval_payload, dict) else None
+                    )
+                    interrupt.continuation["agent_state"] = pending_state
+                    raise
                 pending_result_text = runtime_tool_result_text(call_result)
                 events.append(
                     {
@@ -3716,6 +3859,7 @@ async def _run_workflow_response(
                 start_iteration = pending_iteration + 1
                 task_state["agent_resume_state"] = {}
                 task_state["resolved_approval"] = None
+                task_state["resolved_client_tool"] = None
 
             for iteration_index in range(start_iteration, max_iterations):
                 if not get_llm_gateway_config()[0]:
@@ -5157,12 +5301,16 @@ async def _run_workflow_response(
                         browser_automation_spec = middleware_spec(
                             agent_specs, "browser_automation"
                         )
+                        client_tools_spec = middleware_spec(
+                            agent_specs, "client_tools"
+                        )
                         sandbox_enabled = (
                             sandbox_files_spec is not None
                             or sandbox_shell_spec is not None
                         )
                         skills_enabled = skills_runtime_spec is not None
                         browser_enabled = browser_automation_spec is not None
+                        client_tools_enabled = client_tools_spec is not None
                         selector_spec = middleware_spec(
                             agent_specs,
                             "llm_tool_selector",
@@ -5380,6 +5528,10 @@ async def _run_workflow_response(
                         if browser_enabled and tool_mode != "mcp_tools":
                             raise ValueError(
                                 "browser_automation requires workflow_agent toolMode=mcp_tools."
+                            )
+                        if client_tools_enabled and tool_mode != "mcp_tools":
+                            raise ValueError(
+                                "client_tools requires workflow_agent toolMode=mcp_tools."
                             )
                         if exception_handling not in {"none", "fail", "empty_output"}:
                             raise ValueError(
@@ -5857,6 +6009,12 @@ async def _run_workflow_response(
                                         include_sandbox=sandbox_enabled,
                                         include_skills=skills_enabled,
                                         include_browser=browser_enabled,
+                                        include_client=client_tools_enabled,
+                                        client_tools_config=(
+                                            dict(client_tools_spec.config)
+                                            if client_tools_spec is not None
+                                            else {}
+                                        ),
                                         pipeline=agent_pipeline,
                                         middleware_context=agent_context,
                                         middleware_specs=agent_specs,
@@ -7079,51 +7237,102 @@ async def _run_workflow_response(
                     ],
                 },
             }
-            approval = runtime_approval_store.require(interrupt.approval_id)
-            pending_event = {
-                "event": "runtime_approval_pending",
-                "task_id": task_id,
-                "run_id": workflow_run.run_id,
-                "approval_id": approval.approval_id,
-                "approval_status": approval.status,
-                "request_type": approval.request_type,
-                "node_id": approval.node_id,
-                "node_title": approval.node_title,
-                "tool_name": approval.tool_name,
-                "message": approval.description,
-            }
-            workflow_execution_store.suspend(
-                task_id,
-                approval_id=approval.approval_id,
-                continuation=continuation,
-                safe_event=pending_event,
-            )
-            task_state["created_at"] = time.monotonic()
-            task_state["ttl"] = max(
-                WORKFLOW_TASK_TTL_SECONDS,
-                int(max(0, approval.expires_at - time.time())) + 3600,
-            )
-            await run_registry.update_run(
-                workflow_run.run_id,
-                status="waiting",
-                metadata={
+            if interrupt.wait_kind == "client_tool":
+                client_request = client_tool_store.require_request(interrupt.wait_id)
+                pending_event = {
+                    "event": "client_tool_waiting",
+                    "task_id": task_id,
+                    "run_id": workflow_run.run_id,
+                    "request_id": client_request.request_id,
+                    "request_status": client_request.status,
+                    "host_id": client_request.host_id,
+                    "node_id": client_request.node_id,
+                    "tool_name": client_request.tool_name,
+                    "message": "Waiting for the paired Chrome host.",
+                }
+                workflow_execution_store.suspend(
+                    task_id,
+                    wait_kind="client_tool",
+                    wait_id=client_request.request_id,
+                    continuation=continuation,
+                    safe_event=pending_event,
+                )
+                task_state["ttl"] = max(
+                    WORKFLOW_TASK_TTL_SECONDS,
+                    int(max(0, client_request.expires_at - time.time())) + 3600,
+                )
+                await run_registry.update_run(
+                    workflow_run.run_id,
+                    status="waiting",
+                    metadata={
+                        "client_request_id": client_request.request_id,
+                        "client_host_id": client_request.host_id,
+                    },
+                )
+                await run_registry.record_checkpoint(
+                    workflow_run.run_id,
+                    event_type="runtime.client_tool.waiting",
+                    title="Client tool waiting",
+                    summary=f"request_id={client_request.request_id}",
+                    severity="warning",
+                    metadata={
+                        "request_id": client_request.request_id,
+                        "host_id": client_request.host_id,
+                        "tool_name": client_request.tool_name,
+                    },
+                )
+                if client_tool_coordinator is not None:
+                    client_tool_coordinator.wake()
+            else:
+                if not interrupt.approval_id:
+                    raise RuntimeMiddlewareFatalError(
+                        "Approval interrupt is missing approval_id."
+                    )
+                approval = runtime_approval_store.require(interrupt.approval_id)
+                pending_event = {
+                    "event": "runtime_approval_pending",
+                    "task_id": task_id,
+                    "run_id": workflow_run.run_id,
                     "approval_id": approval.approval_id,
-                    "approval_type": approval.request_type,
-                },
-            )
-            await run_registry.record_checkpoint(
-                workflow_run.run_id,
-                event_type="runtime.approval.pending",
-                title="Runtime approval pending",
-                summary=f"approval_id={approval.approval_id}",
-                severity="warning",
-                metadata={
-                    "approval_id": approval.approval_id,
+                    "approval_status": approval.status,
                     "request_type": approval.request_type,
                     "node_id": approval.node_id,
+                    "node_title": approval.node_title,
                     "tool_name": approval.tool_name,
-                },
-            )
+                    "message": approval.description,
+                }
+                workflow_execution_store.suspend(
+                    task_id,
+                    approval_id=approval.approval_id,
+                    continuation=continuation,
+                    safe_event=pending_event,
+                )
+                task_state["ttl"] = max(
+                    WORKFLOW_TASK_TTL_SECONDS,
+                    int(max(0, approval.expires_at - time.time())) + 3600,
+                )
+                await run_registry.update_run(
+                    workflow_run.run_id,
+                    status="waiting",
+                    metadata={
+                        "approval_id": approval.approval_id,
+                        "approval_type": approval.request_type,
+                    },
+                )
+                await run_registry.record_checkpoint(
+                    workflow_run.run_id,
+                    event_type="runtime.approval.pending",
+                    title="Runtime approval pending",
+                    summary=f"approval_id={approval.approval_id}",
+                    severity="warning",
+                    metadata={
+                        "approval_id": approval.approval_id,
+                        "request_type": approval.request_type,
+                        "node_id": approval.node_id,
+                        "tool_name": approval.tool_name,
+                    },
+                )
+            task_state["created_at"] = time.monotonic()
             yield sse_payload(pending_event)
         except Exception as exc:
             logger.exception("Workflow run failed workflow=%s", payload.workflow.id)
@@ -7183,7 +7392,7 @@ async def consume_workflow_stream(response: Any) -> dict[str, Any]:
         raise RuntimeError("Xpert workflow returned an unsupported response.")
 
     final_event: dict[str, Any] | None = None
-    pending_approval_event: dict[str, Any] | None = None
+    pending_wait_event: dict[str, Any] | None = None
     error_message = ""
     buffer = ""
     async for chunk in response.body_iterator:
@@ -7205,11 +7414,13 @@ async def consume_workflow_stream(response: Any) -> dict[str, Any]:
                 elif event.get("event") == "workflow_end":
                     final_event = event
                 elif event.get("event") == "runtime_approval_pending":
-                    pending_approval_event = event
+                    pending_wait_event = event
+                elif event.get("event") == "client_tool_waiting":
+                    pending_wait_event = event
     if error_message:
         raise RuntimeError(error_message)
-    if pending_approval_event is not None:
-        return pending_approval_event
+    if pending_wait_event is not None:
+        return pending_wait_event
     if final_event is None:
         raise RuntimeError("Xpert workflow ended without a final result.")
     return final_event
@@ -7301,6 +7512,17 @@ async def execute_xpert_handoff_target(
             xpert_version=prepared.version.version,
             waiting_approval=True,
             approval_id=str(final_event.get("approval_id") or "") or None,
+            task_id=str(final_event.get("task_id") or "") or None,
+        )
+    if final_event.get("event") == "client_tool_waiting":
+        return HandoffExecutionResult(
+            output="",
+            run_id=str(final_event.get("run_id") or ""),
+            xpert_id=prepared.xpert.id,
+            xpert_slug=prepared.xpert.slug,
+            xpert_version=prepared.version.version,
+            waiting_client=True,
+            client_request_id=str(final_event.get("request_id") or "") or None,
             task_id=str(final_event.get("task_id") or "") or None,
         )
     return HandoffExecutionResult(
@@ -7416,6 +7638,147 @@ async def resume_runtime_approval_execution(
                 )
 
 
+async def resume_runtime_client_tool_execution(
+    execution: WorkflowExecution,
+    client_request: ClientToolRequest,
+) -> None:
+    workflow = WorkflowPayload.model_validate(execution.workflow)
+    payload = WorkflowRunRequest(
+        workflow=workflow,
+        inputs={str(key): str(value) for key, value in execution.inputs.items()},
+    )
+    metadata = dict(execution.runtime_metadata or {})
+    response = await _run_workflow_response(
+        payload,
+        None,
+        runtime_run_type=execution.run_type,
+        runtime_source_id=str(
+            metadata.get("xpert_id")
+            or metadata.get("workflow_id")
+            or workflow.id
+        ),
+        runtime_metadata=metadata,
+        runtime_parent_run_id=(
+            str(metadata.get("runtime_parent_run_id"))
+            if metadata.get("runtime_parent_run_id")
+            else None
+        ),
+        resume_execution=execution,
+        resolved_client_request=client_request,
+    )
+    final_event = await consume_workflow_stream(response)
+    if final_event.get("event") in {
+        "runtime_approval_pending",
+        "client_tool_waiting",
+    }:
+        return
+    result = str(final_event.get("final_output") or "")
+    handoff_id = str(metadata.get("handoff_id") or "").strip()
+    agent_task_id = str(metadata.get("agent_task_id") or "").strip()
+    if handoff_id:
+        handoff = await agent_task_store.get_handoff(handoff_id)
+        if handoff is not None and handoff.status in {
+            "waiting_client",
+            "needs_attention",
+        }:
+            await agent_task_store.update_handoff_status(
+                handoff_id,
+                "completed",
+                metadata={
+                    "completed_by": "client-tool-coordinator",
+                    "completed_at": time.time(),
+                    "result": result[:100_000],
+                    "result_length": len(result),
+                    "xpert_run_id": str(final_event.get("run_id") or ""),
+                    "client_request_id": client_request.request_id,
+                    "client_request_status": client_request.status,
+                },
+            )
+        if agent_task_id:
+            await agent_task_store.update_task(
+                agent_task_id,
+                status="completed",
+                result=result[:100_000],
+                clear_error=True,
+                metadata={
+                    "handoff_id": handoff_id,
+                    "client_request_id": client_request.request_id,
+                    "xpert_run_id": str(final_event.get("run_id") or ""),
+                },
+            )
+        for run_type, source_id in (
+            ("agent_handoff", handoff_id),
+            ("agent_task", agent_task_id),
+        ):
+            if not source_id:
+                continue
+            runs = await run_registry.list_runs(
+                run_type=run_type,  # type: ignore[arg-type]
+                source_id=source_id,
+                limit=1,
+            )
+            if runs:
+                await run_registry.update_run(
+                    runs[0].run_id,
+                    status="completed",
+                    clear_error=True,
+                    metadata={
+                        "client_request_id": client_request.request_id,
+                        "result_length": len(result),
+                    },
+                )
+
+
+async def expire_runtime_client_tool_execution(
+    execution: WorkflowExecution,
+    client_request: ClientToolRequest,
+) -> None:
+    metadata = dict(execution.runtime_metadata or {})
+    try:
+        await run_registry.update_run(
+            execution.run_id,
+            status="waiting",
+            metadata={
+                "client_request_id": client_request.request_id,
+                "client_request_status": "expired",
+            },
+        )
+        await run_registry.record_checkpoint(
+            execution.run_id,
+            event_type="runtime.client_tool.expired",
+            title="Client tool request expired",
+            summary=f"request_id={client_request.request_id}",
+            severity="warning",
+            metadata={"client_request_id": client_request.request_id},
+        )
+    except KeyError:
+        pass
+    handoff_id = str(metadata.get("handoff_id") or "").strip()
+    agent_task_id = str(metadata.get("agent_task_id") or "").strip()
+    if handoff_id:
+        handoff = await agent_task_store.get_handoff(handoff_id)
+        if handoff is not None and handoff.status == "waiting_client":
+            await agent_task_store.update_handoff_status(
+                handoff_id,
+                "needs_attention",
+                metadata={
+                    "client_request_id": client_request.request_id,
+                    "client_request_status": "expired",
+                    "last_error": "Client tool request expired.",
+                },
+            )
+    if agent_task_id:
+        await agent_task_store.update_task(
+            agent_task_id,
+            status="needs_attention",
+            error="Client tool request expired.",
+            metadata={
+                "handoff_id": handoff_id,
+                "client_request_id": client_request.request_id,
+            },
+        )
+
+
 async def expire_runtime_approval_execution(
     execution: WorkflowExecution,
     approval: RuntimeApprovalRequest,
@@ -7478,6 +7841,26 @@ def get_approval_coordinator() -> ApprovalCoordinator:
         )
         configure_approval_coordinator(approval_coordinator)
     return approval_coordinator
+
+
+def get_client_tool_coordinator() -> ClientToolCoordinator:
+    global client_tool_coordinator
+    if client_tool_coordinator is None:
+        client_tool_coordinator = ClientToolCoordinator(
+            client_tool_store,
+            workflow_execution_store,
+            client_tool_connections,
+            resume_runtime_client_tool_execution,
+            expire_execution=expire_runtime_client_tool_execution,
+            enabled=True,
+        )
+        configure_client_tool_coordinator(client_tool_coordinator)
+        configure_runtime_client_tools(
+            client_tool_store,
+            client_tool_connections,
+            client_tool_coordinator,
+        )
+    return client_tool_coordinator
 
 
 async def resolve_published_xpert(reference: str) -> PinnedXpert:
@@ -7702,8 +8085,13 @@ async def resume_workflow_task(
     if task is None and execution is None:
         raise HTTPException(status_code=404, detail="工作流任务不存在或已过期。")
 
-    if execution is not None and execution.status == "waiting" and execution.approval_id:
-        approval = runtime_approval_store.require(execution.approval_id)
+    if execution is not None and execution.status == "waiting":
+        if execution.wait_kind != "approval" or not execution.wait_id:
+            raise HTTPException(
+                status_code=400,
+                detail="当前工作流正在等待客户端工具，不能通过人工介入恢复接口继续。",
+            )
+        approval = runtime_approval_store.require(execution.wait_id)
         if approval.request_type != "manual_input":
             raise HTTPException(
                 status_code=400,
@@ -7761,6 +8149,11 @@ async def get_workflow_task_status(task_id: str):
             ttl_seconds_left=0,
             runtime_status=execution.status,
             approval_id=execution.approval_id,
+            wait_kind=execution.wait_kind,
+            wait_id=execution.wait_id,
+            client_request_id=(
+                execution.wait_id if execution.wait_kind == "client_tool" else None
+            ),
         )
     assert task is not None
     created_at = float(task.get("created_at", time.monotonic()))
@@ -7775,6 +8168,13 @@ async def get_workflow_task_status(task_id: str):
         ttl_seconds_left=ttl_seconds_left,
         runtime_status=execution.status if execution is not None else None,
         approval_id=execution.approval_id if execution is not None else None,
+        wait_kind=execution.wait_kind if execution is not None else None,
+        wait_id=execution.wait_id if execution is not None else None,
+        client_request_id=(
+            execution.wait_id
+            if execution is not None and execution.wait_kind == "client_tool"
+            else None
+        ),
     )
 
 
@@ -8505,6 +8905,7 @@ async def start_mcp_ttl_cleanup() -> None:
     get_handoff_executor().start()
     get_goal_coordinator().start()
     get_approval_coordinator().start()
+    get_client_tool_coordinator().start()
 
 
 @app.on_event("shutdown")
@@ -8517,6 +8918,8 @@ async def shutdown_mcp_sessions() -> None:
         await handoff_executor.stop()
     if approval_coordinator is not None:
         await approval_coordinator.stop()
+    if client_tool_coordinator is not None:
+        await client_tool_coordinator.stop()
     await mcp_manager.stop_ttl_cleanup()
     await mcp_manager.close_all()
     await tool_registry.clear()

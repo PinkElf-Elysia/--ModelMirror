@@ -34,7 +34,9 @@ class HandoffExecutionResult:
     xpert_slug: str
     xpert_version: int
     waiting_approval: bool = False
+    waiting_client: bool = False
     approval_id: str | None = None
+    client_request_id: str | None = None
     task_id: str | None = None
 
 
@@ -258,6 +260,59 @@ class HandoffExecutor:
                     metadata={
                         "handoff_id": waiting.handoff_id,
                         "approval_id": result.approval_id,
+                    },
+                )
+                return waiting
+            if result.waiting_client:
+                waiting = await self.store.update_handoff_status(
+                    claimed.handoff_id,
+                    "waiting_client",
+                    metadata={
+                        "client_request_id": result.client_request_id,
+                        "workflow_task_id": result.task_id,
+                        "xpert_run_id": result.run_id,
+                        "target_xpert_id": result.xpert_id,
+                        "target_xpert_slug": result.xpert_slug,
+                        "target_xpert_version": result.xpert_version,
+                        "lease_owner": "",
+                        "lease_token": "",
+                        "lease_expires_at": 0.0,
+                    },
+                )
+                await self.store.update_task(
+                    task.task_id,
+                    status="waiting_client",
+                    metadata={
+                        "handoff_id": waiting.handoff_id,
+                        "client_request_id": result.client_request_id,
+                        "workflow_task_id": result.task_id,
+                    },
+                )
+                await self._update_run(
+                    handoff_run,
+                    status="waiting",
+                    metadata={
+                        "handoff_status": "waiting_client",
+                        "client_request_id": result.client_request_id,
+                    },
+                )
+                await self._update_run(
+                    task_run,
+                    status="waiting",
+                    metadata={
+                        "handoff_id": waiting.handoff_id,
+                        "client_request_id": result.client_request_id,
+                    },
+                )
+                await self._checkpoint(
+                    handoff_run,
+                    event_type="agent_handoff.waiting_client",
+                    title="Xpert handoff is waiting for a client host",
+                    summary=f"request_id={result.client_request_id}",
+                    severity="warning",
+                    metadata={
+                        "handoff_id": waiting.handoff_id,
+                        "client_request_id": result.client_request_id,
                     },
                 )
                 return waiting
