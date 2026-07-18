@@ -176,6 +176,12 @@ const tagFilters: Array<{ key: ResourceTag; label: string }> = [
 
 const quickActions: QuickAction[] = [
   {
+    title: "Xpert 自动化",
+    description: "按单次、间隔或 Cron 调度固定版本 Xpert，处理重试、预算与死信。",
+    href: "/agents/automations",
+    label: "打开自动化工作台",
+  },
+  {
     title: "长期 Goal",
     description: "审核 Planner 生成的依赖计划，暂停、恢复并追踪多 Xpert 协作执行。",
     href: "/agents/goals",

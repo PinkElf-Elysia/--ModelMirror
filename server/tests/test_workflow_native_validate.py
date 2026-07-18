@@ -1166,6 +1166,79 @@ async def test_bound_middleware_does_not_participate_in_control_topology(
 
 
 @pytest.mark.asyncio
+async def test_scheduler_requires_runtime_tool_mode(
+    client: httpx.AsyncClient,
+) -> None:
+    workflow = middleware_binding_workflow()
+    middleware = workflow["nodes"][-1]
+    middleware["id"] = "scheduler"
+    middleware["data"].update(
+        {
+            "runtimeMiddlewareId": "scheduler",
+            "runtimeMiddlewareKind": "runtime_middleware.scheduler",
+            "runtimeMiddlewareConfig": {
+                "allow_agent_create": True,
+                "default_timezone": "Asia/Shanghai",
+                "max_runs_per_day": 10,
+            },
+        }
+    )
+    workflow["edges"][-1]["source"] = "scheduler"
+
+    invalid = await validate(client, workflow)
+    assert "scheduler_requires_runtime_tool_mode" in issue_codes(invalid)
+
+    workflow["nodes"][1]["data"]["toolMode"] = "mcp_tools"
+    valid = await validate(client, workflow)
+    assert valid["valid"] is True, valid["issues"]
+
+
+@pytest.mark.asyncio
+async def test_automation_middleware_configuration_is_validated(
+    client: httpx.AsyncClient,
+) -> None:
+    workflow = middleware_binding_workflow()
+    middleware = workflow["nodes"][-1]
+    middleware["id"] = "ralph"
+    middleware["data"].update(
+        {
+            "runtimeMiddlewareId": "ralph_loop",
+            "runtimeMiddlewareKind": "runtime_middleware.ralph_loop",
+            "runtimeMiddlewareConfig": {
+                "max_iterations": 0,
+                "max_output_chars": 100,
+            },
+        }
+    )
+    workflow["edges"][-1]["source"] = "ralph"
+    invalid_ralph = await validate(client, workflow)
+    assert "invalid_runtime_middleware_config" in issue_codes(invalid_ralph)
+
+    middleware["data"].update(
+        {
+            "runtimeMiddlewareId": "knowledge_writer",
+            "runtimeMiddlewareKind": "runtime_middleware.knowledge_writer",
+            "runtimeMiddlewareConfig": {
+                "knowledge_base_id": "",
+                "auto_propose_verified_output": True,
+            },
+        }
+    )
+    invalid_writer = await validate(client, workflow)
+    assert "knowledge_writer_kb_required" in issue_codes(invalid_writer)
+
+    middleware["data"].update(
+        {
+            "runtimeMiddlewareId": "plugin_hooks",
+            "runtimeMiddlewareKind": "runtime_middleware.plugin_hooks",
+            "runtimeMiddlewareConfig": {"skill_ids": "", "fail_closed": False},
+        }
+    )
+    invalid_hooks = await validate(client, workflow)
+    assert "plugin_hooks_skills_required" in issue_codes(invalid_hooks)
+
+
+@pytest.mark.asyncio
 async def test_middleware_binding_rejects_invalid_target(
     client: httpx.AsyncClient,
 ) -> None:

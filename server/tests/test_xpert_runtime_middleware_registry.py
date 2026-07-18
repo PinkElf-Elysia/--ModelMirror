@@ -34,6 +34,10 @@ def test_registry_list_returns_builtin_nodes() -> None:
         "skills_runtime",
         "browser_automation",
         "client_tools",
+        "scheduler",
+        "ralph_loop",
+        "knowledge_writer",
+        "plugin_hooks",
     }
     for node in nodes:
         assert node.id

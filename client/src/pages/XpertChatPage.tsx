@@ -767,6 +767,12 @@ export default function XpertChatPage() {
               >
                 <span aria-hidden="true" className="text-[10px] font-bold">GL</span>转为长期目标
               </button>
+              <Link
+                className="inline-flex h-9 items-center gap-2 rounded-lg border border-violet-300/25 bg-violet-300/10 px-3 text-xs font-semibold text-violet-100 transition hover:border-violet-200/45 hover:bg-violet-300/15"
+                to={`/agents/automations?xpert_id=${xpert.id}`}
+              >
+                <span aria-hidden="true" className="text-[10px] font-bold">AT</span>创建自动化
+              </Link>
               <select className="h-9 rounded-lg border border-white/10 bg-white/[0.055] px-3 text-xs text-white outline-none" onChange={(event) => setVersion(Number(event.target.value))} value={version}>
                 {publishedVersions.map((item) => <option className="bg-ink-950" key={item.version} value={item.version}>v{item.version} · revision {item.draft_revision}</option>)}
               </select>

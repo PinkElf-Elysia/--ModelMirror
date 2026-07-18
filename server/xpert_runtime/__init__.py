@@ -204,6 +204,33 @@ from .client_tool_api import (
     configure_runtime_client_tools,
     router as runtime_client_tool_router,
 )
+from .automation_store import (
+    AutomationBudget,
+    AutomationConflictError,
+    AutomationDefinition,
+    AutomationError,
+    AutomationExecution,
+    AutomationNotFoundError,
+    AutomationStore,
+    AutomationTrigger,
+    AutomationValidationError,
+    CronSchedule,
+)
+from .automation_coordinator import (
+    AutomationCoordinator,
+    AutomationTargetResult,
+)
+from .automation_toolset import (
+    AUTOMATION_TOOL_NAMES,
+    AutomationToolsetProvider,
+    register_automation_toolset_capability,
+)
+from .automation_api import (
+    configure_runtime_automations,
+    router as runtime_automation_router,
+)
+from .ralph_loop import RalphLoopResult, run_ralph_loop
+from .plugin_hooks import build_plugin_hooks_middleware
 
 __all__ = [
     "AgentMiddleware",
@@ -368,4 +395,24 @@ __all__ = [
     "configure_client_tool_coordinator",
     "configure_runtime_client_tools",
     "runtime_client_tool_router",
+    "AutomationBudget",
+    "AutomationConflictError",
+    "AutomationCoordinator",
+    "AutomationDefinition",
+    "AutomationError",
+    "AutomationExecution",
+    "AutomationNotFoundError",
+    "AutomationStore",
+    "AutomationTargetResult",
+    "AutomationToolsetProvider",
+    "AutomationTrigger",
+    "AutomationValidationError",
+    "AUTOMATION_TOOL_NAMES",
+    "CronSchedule",
+    "configure_runtime_automations",
+    "register_automation_toolset_capability",
+    "runtime_automation_router",
+    "RalphLoopResult",
+    "run_ralph_loop",
+    "build_plugin_hooks_middleware",
 ]

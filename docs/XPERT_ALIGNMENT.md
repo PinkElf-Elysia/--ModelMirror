@@ -1,10 +1,16 @@
 # Xpert 对齐总纲
 
+## 2026-07-18 增量：XPERT-MIDDLEWARE-AUTOMATION-06
+
+私有 Workflow、Xpert Chat、Goal 与 Handoff 已进入可靠自动化闭环：已发布 Xpert 可以按单次、间隔或带时区五字段 Cron 固定版本执行，并具备 occurrence 幂等、重叠/误触发策略、运行预算、lease、重试和死信。`/agents/automations` 提供创建、暂停、恢复、立即运行和 execution 处理入口；HITL 与 Client Tool 等待解决后会继续同一自动化 execution。
+
+本轮同时交付 `scheduler`、`ralph_loop`、`knowledge_writer` 和 `plugin_hooks` 四个真实 Agent 中间件。知识写入仍只创建待审批 proposal；Skill Hooks 仅在无网 Sandbox 执行显式 manifest；公开 App/API 拒绝这些私有自动化能力。下一阶段进入 `XPERT-MIDDLEWARE-CONSOLIDATION-07`，以真实使用反馈补齐策略矩阵与技术债，不再扩展纯目录页面。详细契约见 `docs/XPERT_AUTOMATION.md`。
+
 ## 2026-07-18 增量：XPERT-MIDDLEWARE-CLIENT-05
 
 私有 Workflow、Xpert Chat、Goal 与 Handoff 已具备客户端宿主闭环：`workflow_agent` 可通过 `client_tools` 请求用户已配对 Chrome 在主动绑定的当前标签页执行 snapshot、read、受审批交互和 screenshot。请求持久化等待，扩展断线或容器重启后由 Coordinator 从原 ReAct 断点继续。
 
-安全边界固定为一次性配对、高熵哈希 token、`activeTab` 临时授权、固定工具 schema、opaque ref、mutating HITL、跨 host/作用域拒绝和幂等恢复。服务端 Browser sidecar 与客户端当前标签页桥保持分离；公开 Xpert App/API 禁止 Client Tools。下一阶段进入 `XPERT-MIDDLEWARE-AUTOMATION-06`。
+安全边界固定为一次性配对、高熵哈希 token、`activeTab` 临时授权、固定工具 schema、opaque ref、mutating HITL、跨 host/作用域拒绝和幂等恢复。服务端 Browser sidecar 与客户端当前标签页桥保持分离；公开 Xpert App/API 禁止 Client Tools。后续自动化阶段现已完成。
 
 ## 2026-07-16 增量：XPERT-MIDDLEWARE-BROWSER-04
 
@@ -198,14 +204,14 @@ EvoAgentX 只保留为历史参考：此前元智能体曾借鉴其 `goal -> sub
 | --- | --- | --- | --- | --- |
 | 工作空间资源 | 部分实现 | `/studio` 已作为 Xpert 式资源 Hub，聚合智能体、工作流、知识库、MCP、API 工具、数据库、Skill、提示词、环境、运行记录，并支持快速入口、标签过滤和运行摘要 | 当前是前端只读聚合视图，不做 workspace 权限、持久化资源表或资源创建编排；API 工具与数据库仍为待接入卡片 | `XPERT-WORKFLOW-REGISTRY-API-01` |
 | Xpert Studio / 发布 | 部分实现 | classic `/workflow`、智能体配置侧栏、Xpert 草稿、不可变版本、聊天运行、Goal、自动 Handoff、文件/记忆与固定版本 App/API | 使用文件型 Store 和 classic runner；不做组织权限、多人协作或数据库迁移 | 基于真实使用反馈审计 |
-| Runtime Middleware | 部分实现 | middleware lifecycle、`event_recorder`、`system_prompt_injector`、`tool_policy`、`tool_audit` | 仍以内存态为主，部分 middleware 仅最小执行 | 继续挂到 Agent/Workflow 节点运行链 |
+| Runtime Middleware | 部分实现 | Agent 绑定、上下文压缩、结构化输出、Todo、工具选择、HITL、Sandbox/Skill、Browser、Client Tools、Scheduler、Ralph Loop、Knowledge Writer、Plugin Hooks | 文件型单进程协调器；公开 App 禁止交互式、客户端和自动化中间件 | `XPERT-MIDDLEWARE-CONSOLIDATION-07` |
 | Agent Task | 部分实现 | AgentTask API、MetaAgent 任务工作台、workflow `agent_task` 节点、可选文件持久化、Goal 步骤派发 | 单进程文件 Store，不是分布式任务队列 | 为文件与记忆任务补安全上下文 |
 | Handoff | 部分实现 | Handoff API、workflow `agent_handoff`、`handoff_router`、人工 Inbox、目标 Xpert 自动执行、同步结果回传、重试、死信与 Goal 协作 | 仅显式 `xpert:` 目标自动执行；单进程 lease，不做分布式调度 | 扩展文件与记忆上下文传递 |
 | RunRegistry / Trace | 部分实现 | workflow/xpert/chat/goal/agent_task/agent_handoff run、checkpoint、workflow/chat/Xpert/Goal 观测与 `/runtime` 运维总览 | 内存态，可观测索引，不是调度器；Goal 重启恢复会创建 recovery run | 为文件、记忆与知识执行提供护栏 |
 | Workflow Agent | 部分实现 | `workflow_agent` 节点，模型执行，Runtime Toolset 工具模式，Xpert 式配置侧栏分区，失败重试、备用模型、异常转空输出、禁用输出 | 轻量 JSON 决策，不是 function calling；文件理解、并行工具调用、记忆写入和结构化输出仍未接入执行 | 后续逐项接入真实运行语义 |
 | Chat Toolset | 部分实现 | `/api/chat` 可选 MCP 工具模式，chat run 与 checkpoint | 默认关闭，不改变普通聊天；无自动 handoff | 补工具偏好、安全提示和观测 UI |
 | Toolset / MCP | 部分实现 | `MCPToolsetProvider`、`run_tool_with_runtime`、tool policy/audit、MCP 管理基础、`/runtime` MCP Runtime 状态细分与只读运维，`/studio` 已提供 MCP 与 Runtime 入口 | 缺 Xpert 式 Toolset 资源模型；Runtime Ops 不执行 MCP start/stop | 后续抽象 Toolset 资源模型 |
-| Plugin / Skill | 部分实现 | `/skills` 与 Skill 安装基础，Docker 已补 git/npm/npx 依赖，`/runtime` 可查看已安装 Skill 摘要 | 尚未形成 Xpert 插件市场/Skill 工作区统一模型；运维页不执行安装/卸载 | 先补市场与安装状态，再抽象资源模型 |
+| Plugin / Skill | 部分实现 | `/skills`、安装运行时、Sandbox staging 与显式 Skill Plugin Hooks | Hook 仅支持已安装 Skill 的离线 manifest，不提供在线插件代码执行或组织权限 | 基于 Hook 实际使用反馈收敛协议 |
 | Knowledge Pipeline | 已实现 | FileAsset/Artifact/Chunk/CitationAnchor、结构感知 Processor、General/QA/Summary、可执行 Graph、逐文档/逐视觉页恢复、图片与扫描 PDF 的 OCR/VLM、版本化 ingestion job、递归与父子分块、向量/FTS5 双索引、混合检索、Rerank、离线评估、Promotion Gate、Knowledge Toolset、审批写入、预览、激活/回滚 | 成熟 RAG 基础闭环完成；仍为本地单进程 worker，旧上传保留 legacy index；评估标签需人工维护；图片向量、版面坐标与 GraphRAG 暂缓 | 真实使用反馈与技术债审计 |
 | Prompt / Slash Command | 下一步 | 仅有提示词资源页雏形和聊天 prompt 使用 | 尚无 Xpert 式工作区提示词/命令配置 | 放在工作空间资源后推进 |
 | Environment / Sandbox | 部分实现 | `/runtime` 已提供脱敏环境与依赖摘要，展示模型网关、OpenRouter、git/node/npm/npx/python 是否就绪 | 不展示密钥值，不编辑环境变量，不提供沙箱实例或文件工作区语义 | 评估 Xpert 式环境变量管理和沙箱资源模型 |

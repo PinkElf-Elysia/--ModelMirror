@@ -122,6 +122,8 @@ def _deployment_preflight(version: XpertVersion, policy: XpertAppPolicy) -> dict
     has_sandbox_runtime = False
     has_browser_runtime = False
     has_client_runtime = False
+    has_private_automation_runtime = False
+    has_knowledge_writer = False
     for node in version.workflow.nodes:
         data = node.data if isinstance(node.data, dict) else {}
         kind = str(data.get("kind") or node.type)
@@ -166,6 +168,17 @@ def _deployment_preflight(version: XpertVersion, policy: XpertAppPolicy) -> dict
             and data.get("runtimeMiddlewareId") == "client_tools"
         ):
             has_client_runtime = True
+        if kind == "runtime_middleware" and data.get("runtimeMiddlewareId") in {
+            "scheduler",
+            "ralph_loop",
+            "plugin_hooks",
+        }:
+            has_private_automation_runtime = True
+        if (
+            kind == "runtime_middleware"
+            and data.get("runtimeMiddlewareId") == "knowledge_writer"
+        ):
+            has_knowledge_writer = True
         if kind in {"agent_handoff", "handoff_router"}:
             has_handoff = True
         if kind in {"knowledge_retrieval", "knowledge_citation"}:
@@ -233,6 +246,22 @@ def _deployment_preflight(version: XpertVersion, policy: XpertAppPolicy) -> dict
             {
                 "code": "app_client_tools_forbidden",
                 "message": "Public Xpert Apps cannot use client_tools middleware.",
+            }
+        )
+    if has_private_automation_runtime:
+        issues.append(
+            {
+                "code": "app_private_automation_forbidden",
+                "message": (
+                    "Public Xpert Apps cannot deploy scheduler, Ralph loop, or plugin hook middleware."
+                ),
+            }
+        )
+    if has_knowledge_writer:
+        issues.append(
+            {
+                "code": "app_knowledge_writer_forbidden",
+                "message": "Public Xpert Apps cannot create knowledge write proposals.",
             }
         )
     if has_knowledge or has_dynamic_knowledge_read:

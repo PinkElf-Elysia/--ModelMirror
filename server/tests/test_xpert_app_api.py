@@ -611,6 +611,70 @@ def test_deploy_preflight_rejects_client_tools_runtime(stores) -> None:
     )
 
 
+def test_deploy_preflight_rejects_private_automation_and_writer(stores) -> None:
+    xpert_store, _ = stores
+    created = xpert_store.create_xpert(name="Automation Helper", slug="automation-helper")
+    draft = created.draft.model_copy(deep=True)
+    agent = next(
+        node for node in draft.workflow.nodes if node.data.get("kind") == "workflow_agent"
+    )
+    agent.data["toolMode"] = "mcp_tools"
+    for raw in [
+        {
+            "id": "scheduler",
+            "type": "runtime_middleware",
+            "data": {
+                "kind": "runtime_middleware",
+                "runtimeMiddlewareId": "scheduler",
+                "runtimeMiddlewareKind": "runtime_middleware.scheduler",
+                "runtimeMiddlewareConfig": {
+                    "allow_agent_create": True,
+                    "default_timezone": "UTC",
+                    "max_runs_per_day": 10,
+                },
+            },
+        },
+        {
+            "id": "writer",
+            "type": "runtime_middleware",
+            "data": {
+                "kind": "runtime_middleware",
+                "runtimeMiddlewareId": "knowledge_writer",
+                "runtimeMiddlewareKind": "runtime_middleware.knowledge_writer",
+                "runtimeMiddlewareConfig": {
+                    "knowledge_base_id": "kb-private",
+                    "auto_propose_verified_output": True,
+                },
+            },
+        },
+    ]:
+        draft.workflow.nodes.append(type(agent).model_validate(raw))
+        draft.workflow.edges.append(
+            type(draft.workflow.edges[0]).model_validate(
+                {
+                    "id": f"bind-{raw['id']}",
+                    "source": raw["id"],
+                    "target": agent.id,
+                    "sourceHandle": "middleware-binding",
+                    "targetHandle": "middleware",
+                }
+            )
+        )
+    updated = xpert_store.update_xpert(
+        created.id, {"draft": draft.model_dump(mode="json")}
+    )
+    version = xpert_store.publish_xpert(
+        created.id, expected_revision=updated.draft_revision
+    )
+
+    result = _deployment_preflight(version, XpertAppPolicy(allow_tools=True))
+    issue_codes = {issue["code"] for issue in result["issues"]}
+
+    assert result["valid"] is False
+    assert "app_private_automation_forbidden" in issue_codes
+    assert "app_knowledge_writer_forbidden" in issue_codes
+
+
 @pytest.mark.asyncio
 async def test_openai_json_and_sse_use_pinned_version_and_register_run(
     client: httpx.AsyncClient,

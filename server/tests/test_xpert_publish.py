@@ -19,6 +19,13 @@ from server.xperts import (
 )
 
 
+@pytest.fixture(autouse=True)
+def reset_xpert_rate_limit_window():
+    main_module.request_windows.clear()
+    yield
+    main_module.request_windows.clear()
+
+
 @pytest.fixture
 def xpert_store(tmp_path: Path):
     store = XpertStore(tmp_path / "xperts")

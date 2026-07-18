@@ -1175,6 +1175,158 @@ async def _checkpoint_types(
     return [item["event_type"] for item in checkpoints_response.json()]
 
 
+@pytest.mark.asyncio
+async def test_bound_ralph_loop_verifies_and_improves_agent_output(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    responses = iter(
+        [
+            "incomplete draft",
+            '{"complete":false,"reason":"missing evidence","feedback":"add concrete evidence"}',
+            "complete answer with concrete evidence",
+            '{"complete":true,"reason":"all requirements satisfied","feedback":""}',
+        ]
+    )
+
+    async def fake_collect_chat_completion_text(*args, **kwargs):
+        return next(responses)
+
+    monkeypatch.setattr(
+        main_module,
+        "get_llm_gateway_config",
+        lambda: ("http://test-gateway.local/v1/chat/completions", "test-key"),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "collect_chat_completion_text",
+        fake_collect_chat_completion_text,
+    )
+    workflow = _workflow_agent_strategy_workflow()
+    workflow["nodes"].append(
+        {
+            "id": "ralph",
+            "type": "runtime_middleware",
+            "data": {
+                "kind": "runtime_middleware",
+                "runtimeMiddlewareId": "ralph_loop",
+                "runtimeMiddlewareKind": "runtime_middleware.ralph_loop",
+                "middlewarePriority": "80",
+                "runtimeMiddlewareConfig": {
+                    "max_iterations": 4,
+                    "max_output_chars": 10000,
+                },
+            },
+        }
+    )
+    workflow["edges"].append(
+        {
+            "id": "bind-ralph",
+            "source": "ralph",
+            "target": "workflow_agent",
+            "sourceHandle": "middleware-binding",
+            "targetHandle": "middleware",
+        }
+    )
+
+    response = await client.post(
+        "/api/workflow/run",
+        json={"workflow": workflow, "inputs": {"user_input": "produce evidence"}},
+    )
+
+    assert response.status_code == 200, response.text
+    events = _parse_sse_events(response.text)
+    agent_end = next(
+        event
+        for event in events
+        if event.get("event") == "node_end"
+        and event.get("node_id") == "workflow_agent"
+    )
+    assert agent_end["output"] == "complete answer with concrete evidence"
+    workflow_meta = next(event for event in events if event.get("event") == "workflow_meta")
+    agent_run = await _workflow_agent_run(client, workflow_meta["run_id"])
+    checkpoints = await _checkpoint_types(client, agent_run["run_id"])
+    assert "middleware.ralph.continue" in checkpoints
+    assert "middleware.ralph.verified" in checkpoints
+    assert "middleware.ralph_loop.completed" in checkpoints
+
+
+@pytest.mark.asyncio
+async def test_bound_knowledge_writer_creates_pending_proposal_after_success(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proposals: list[dict[str, Any]] = []
+
+    class FakeRagService:
+        def get_pipeline_draft(self, kb_id: str):
+            assert kb_id == "kb-automation"
+            return {"kb_id": kb_id}
+
+        def create_knowledge_write_proposal(self, kb_id: str, **payload):
+            proposals.append({"kb_id": kb_id, **payload})
+            return {"proposal_id": "proposal-automation", "status": "pending"}
+
+    async def fake_stream_workflow_llm_text(*args, **kwargs):
+        yield "verified operational guidance"
+
+    monkeypatch.setattr(main_module, "get_rag_service", lambda: FakeRagService())
+    monkeypatch.setattr(
+        main_module,
+        "get_llm_gateway_config",
+        lambda: ("http://test-gateway.local/v1/chat/completions", "test-key"),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "stream_workflow_llm_text",
+        fake_stream_workflow_llm_text,
+    )
+    workflow = _workflow_agent_strategy_workflow()
+    workflow["nodes"].append(
+        {
+            "id": "writer",
+            "type": "runtime_middleware",
+            "data": {
+                "kind": "runtime_middleware",
+                "runtimeMiddlewareId": "knowledge_writer",
+                "runtimeMiddlewareKind": "runtime_middleware.knowledge_writer",
+                "middlewarePriority": "90",
+                "runtimeMiddlewareConfig": {
+                    "knowledge_base_id": "kb-automation",
+                    "auto_propose_verified_output": True,
+                    "title_prefix": "Verified result",
+                },
+            },
+        }
+    )
+    workflow["edges"].append(
+        {
+            "id": "bind-writer",
+            "source": "writer",
+            "target": "workflow_agent",
+            "sourceHandle": "middleware-binding",
+            "targetHandle": "middleware",
+        }
+    )
+
+    response = await client.post(
+        "/api/workflow/run",
+        json={"workflow": workflow, "inputs": {"user_input": "write guidance"}},
+    )
+
+    assert response.status_code == 200, response.text
+    assert len(proposals) == 1
+    assert proposals[0]["kb_id"] == "kb-automation"
+    assert proposals[0]["content"] == "verified operational guidance"
+    assert proposals[0]["source_run_id"]
+    workflow_meta = next(
+        event for event in _parse_sse_events(response.text) if event.get("event") == "workflow_meta"
+    )
+    agent_run = await _workflow_agent_run(client, workflow_meta["run_id"])
+    checkpoints = await _checkpoint_types(client, agent_run["run_id"])
+    assert "middleware.knowledge_writer.proposed" in checkpoints
+
+
 class FakeWorkflowToolProvider:
     def __init__(self) -> None:
         self.tools = [

@@ -708,3 +708,9 @@ The Xpert Studio fields `enableFileUnderstanding`, `memoryReadEnabled`, `memoryR
 `sandbox_files`、`sandbox_shell` 与 `skills_runtime` 已可绑定到 `workflow_agent`。绑定只增加目标 Agent 的 Runtime 工具，不参与控制流；`toolMode=none` 配合 Sandbox 时不会隐式注册 MCP 工具。工作区按 conversation、goal/step、handoff 或 workflow task/node 隔离，Xpert Chat 的显式附件会复制到 `inputs/`。
 
 实际文件与命令执行位于完全断网的 Docker sidecar。命令只接受 argv、固定白名单和有限超时；路径必须留在当前 workspace，副作用通过 operation ID 幂等。`sandbox_shell.require_approval=true` 时，静态校验和运行时均要求同一 Agent 的 HITL 覆盖该工具。公开 Xpert App/API 部署拒绝 Sandbox/Skill 中间件。详细边界见 `docs/XPERT_SANDBOX.md`。
+
+## 2026-07-18 Automation Runtime Middleware
+
+绑定到 `workflow_agent` 的 `scheduler` 提供作用域受限的 Automation Runtime 工具；它不改变控制流拓扑。自动化定义固定已发布 XpertVersion，支持单次、间隔和带时区五字段 Cron，并通过 occurrence ID、lease、重叠/误触发策略、预算、重试和死信持久执行。HITL 或 Client Tool 只会暂停当前 execution，解决后继续原执行。
+
+`ralph_loop` 在节点最终输出提交前运行有界改进/验证循环，失败仍进入节点原有 retry、fallback 与 `exceptionHandling`。`knowledge_writer` 只创建 Knowledge Inbox pending proposal，不能直接写活动索引。`plugin_hooks` 只在无网 Sandbox 运行已安装 Skill 的显式 Hook manifest。四类中间件均不改变 SSE wire format；公开 Xpert App 部署会被预检阻断。完整边界见 `docs/XPERT_AUTOMATION.md`。

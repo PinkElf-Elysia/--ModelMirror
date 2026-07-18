@@ -150,6 +150,12 @@ except ModuleNotFoundError:
 try:
     from server.xpert_runtime import (
         AgentTaskStore,
+        AutomationCoordinator,
+        AutomationDefinition,
+        AutomationExecution,
+        AutomationStore,
+        AutomationTargetResult,
+        AutomationToolsetProvider,
         AgentMiddleware,
         ApprovalCoordinator,
         CapabilityRegistry,
@@ -201,6 +207,7 @@ try:
         bound_middleware_specs,
         build_context_compression_middleware,
         build_human_in_the_loop_middleware,
+        build_plugin_hooks_middleware,
         configure_approval_coordinator,
         configure_approval_decision_validator,
         configure_runtime_approvals,
@@ -208,6 +215,7 @@ try:
         configure_runtime_sandbox,
         configure_runtime_browser,
         configure_runtime_client_tools,
+        configure_runtime_automations,
         configure_client_tool_coordinator,
         control_flow_edges,
         create_default_runtime,
@@ -221,6 +229,7 @@ try:
         register_sandbox_toolset_capability,
         register_browser_toolset_capability,
         register_client_toolset_capability,
+        register_automation_toolset_capability,
         run_tool_with_runtime,
         runtime_middleware_registry,
         runtime_approval_router,
@@ -228,6 +237,8 @@ try:
         runtime_sandbox_router,
         runtime_browser_router,
         runtime_client_tool_router,
+        runtime_automation_router,
+        run_ralph_loop,
         select_runtime_tools,
         todo_planning_instruction,
         validate_structured_output,
@@ -238,6 +249,12 @@ try:
 except ModuleNotFoundError:
     from xpert_runtime import (
         AgentTaskStore,
+        AutomationCoordinator,
+        AutomationDefinition,
+        AutomationExecution,
+        AutomationStore,
+        AutomationTargetResult,
+        AutomationToolsetProvider,
         AgentMiddleware,
         ApprovalCoordinator,
         CapabilityRegistry,
@@ -289,6 +306,7 @@ except ModuleNotFoundError:
         bound_middleware_specs,
         build_context_compression_middleware,
         build_human_in_the_loop_middleware,
+        build_plugin_hooks_middleware,
         configure_approval_coordinator,
         configure_approval_decision_validator,
         configure_runtime_approvals,
@@ -296,6 +314,7 @@ except ModuleNotFoundError:
         configure_runtime_sandbox,
         configure_runtime_browser,
         configure_runtime_client_tools,
+        configure_runtime_automations,
         configure_client_tool_coordinator,
         control_flow_edges,
         create_default_runtime,
@@ -309,6 +328,7 @@ except ModuleNotFoundError:
         register_sandbox_toolset_capability,
         register_browser_toolset_capability,
         register_client_toolset_capability,
+        register_automation_toolset_capability,
         run_tool_with_runtime,
         runtime_middleware_registry,
         runtime_approval_router,
@@ -316,6 +336,8 @@ except ModuleNotFoundError:
         runtime_sandbox_router,
         runtime_browser_router,
         runtime_client_tool_router,
+        runtime_automation_router,
+        run_ralph_loop,
         select_runtime_tools,
         todo_planning_instruction,
         validate_structured_output,
@@ -399,6 +421,18 @@ GOAL_COORDINATOR_ENABLED = os.getenv(
 GOAL_COORDINATOR_POLL_SECONDS = env_float(
     "GOAL_COORDINATOR_POLL_SECONDS", 1.0, 0.1
 )
+AUTOMATION_COORDINATOR_ENABLED = os.getenv(
+    "AUTOMATION_COORDINATOR_ENABLED", "true"
+).strip().lower() in {"1", "true", "yes", "on"}
+AUTOMATION_COORDINATOR_POLL_SECONDS = env_float(
+    "AUTOMATION_COORDINATOR_POLL_SECONDS", 1.0, 0.1
+)
+AUTOMATION_COORDINATOR_LEASE_SECONDS = env_float(
+    "AUTOMATION_COORDINATOR_LEASE_SECONDS", 120.0, 10.0
+)
+AUTOMATION_COORDINATOR_MAX_CONCURRENCY = env_int(
+    "AUTOMATION_COORDINATOR_MAX_CONCURRENCY", 2, 1
+)
 HANDOFF_MAX_DELEGATION_DEPTH = 5
 MAX_IMAGE_DATA_URL_BYTES = 5 * 1024 * 1024
 AGENTS_DATA_PATH = Path(__file__).parent / "data" / "agents.json"
@@ -474,6 +508,7 @@ app.include_router(runtime_approval_router)
 app.include_router(runtime_sandbox_router)
 app.include_router(runtime_browser_router)
 app.include_router(runtime_client_tool_router)
+app.include_router(runtime_automation_router)
 
 request_windows: dict[str, deque[float]] = defaultdict(deque)
 mcp_connect_windows: dict[str, deque[float]] = defaultdict(deque)
@@ -539,6 +574,9 @@ handoff_executor: HandoffExecutor | None = None
 goal_coordinator: GoalCoordinator | None = None
 approval_coordinator: ApprovalCoordinator | None = None
 client_tool_coordinator: ClientToolCoordinator | None = None
+automation_store = AutomationStore(storage_dir=AGENT_TASK_STORAGE_DIR or None)
+automation_coordinator: AutomationCoordinator | None = None
+workflow_automation_provider: AutomationToolsetProvider | None = None
 runtime_capabilities.register(
     "mcp_tools",
     workflow_mcp_provider,
@@ -3027,6 +3065,15 @@ async def _run_workflow_response(
                         runtime_approval_store,
                     )
                 )
+            plugin_hooks = middleware_spec(specs, "plugin_hooks")
+            if plugin_hooks is not None:
+                middlewares.append(
+                    build_plugin_hooks_middleware(
+                        plugin_hooks,
+                        get_skill_manager(),
+                        workflow_sandbox_provider,
+                    )
+                )
             pipeline = MiddlewarePipeline(middlewares)
             scope_type, scope_id = runtime_todo_scope(node.id)
             context_metadata: dict[str, Any] = {
@@ -3045,6 +3092,7 @@ async def _run_workflow_response(
             skills_runtime = middleware_spec(specs, "skills_runtime")
             browser_automation = middleware_spec(specs, "browser_automation")
             client_tools = middleware_spec(specs, "client_tools")
+            scheduler = middleware_spec(specs, "scheduler")
             if (
                 sandbox_shell is not None
                 and workflow_truthy(
@@ -3165,6 +3213,9 @@ async def _run_workflow_response(
             )
             context_metadata["client_tools_config"] = (
                 dict(client_tools.config) if client_tools is not None else {}
+            )
+            context_metadata["automation_config"] = (
+                dict(scheduler.config) if scheduler is not None else {}
             )
             context_metadata["runtime_run_type"] = runtime_run_type
             run_context = task_state.get("runtime_metadata") or {}
@@ -3310,6 +3361,9 @@ async def _run_workflow_response(
             if not matched_tool:
                 matched_tool = await workflow_client_tool_provider.find_tool(tool_name)
                 capability_name = "client_tools"
+            if not matched_tool and workflow_automation_provider is not None:
+                matched_tool = await workflow_automation_provider.find_tool(tool_name)
+                capability_name = "automation_tools"
             if capability_name == "mcp_tools" and not app_capability_allowed(
                 "allow_tools"
             ):
@@ -3331,6 +3385,8 @@ async def _run_workflow_response(
                 raise PermissionError("Xpert App browser automation is disabled.")
             if capability_name == "client_tools" and runtime_run_type == "xpert_app":
                 raise PermissionError("Xpert App client tools are disabled.")
+            if capability_name == "automation_tools" and runtime_run_type == "xpert_app":
+                raise PermissionError("Xpert App automation tools are disabled.")
             if not matched_tool:
                 raise ValueError(f"MCP 工具未注册：{tool_name}")
             run_context = task_state.get("runtime_metadata") or {}
@@ -3377,6 +3433,8 @@ async def _run_workflow_response(
                         "run_id": effective_context.metadata.get("run_id"),
                         "runtime_run_type": runtime_run_type,
                         "xpert_id": run_context.get("xpert_id"),
+                        "xpert_slug": run_context.get("xpert_slug"),
+                        "xpert_version": run_context.get("xpert_version"),
                         "conversation_id": run_context.get("conversation_id"),
                         "goal_id": run_context.get("goal_id"),
                         "goal_step_id": run_context.get("goal_step_id"),
@@ -3388,6 +3446,7 @@ async def _run_workflow_response(
                         "skills_config": effective_context.metadata.get("skills_config") or {},
                         "browser_config": effective_context.metadata.get("browser_config") or {},
                         "client_tools_config": effective_context.metadata.get("client_tools_config") or {},
+                        "automation_config": effective_context.metadata.get("automation_config") or {},
                         "todo_scope_type": todo_scope_type,
                         "todo_scope_id": todo_scope_id,
                         **dict(metadata or {}),
@@ -3435,6 +3494,7 @@ async def _run_workflow_response(
             include_skills: bool = False,
             include_browser: bool = False,
             include_client: bool = False,
+            include_automation: bool = False,
             client_tools_config: dict[str, Any] | None = None,
             middleware_specs: list[RuntimeMiddlewareSpec] | None = None,
             apply_policy_filter: bool = False,
@@ -3513,6 +3573,12 @@ async def _run_workflow_response(
                         ),
                     )
                 )
+            if (
+                include_automation
+                and runtime_run_type != "xpert_app"
+                and workflow_automation_provider is not None
+            ):
+                tools.extend(await workflow_automation_provider.list_tools())
             if middleware_specs is not None and apply_policy_filter:
                 allowed_tools: list[Any] = []
                 for tool in tools:
@@ -3524,6 +3590,7 @@ async def _run_workflow_response(
                         "skill": "sandbox_tools",
                         "browser": "browser_tools",
                         "client": "client_tools",
+                        "automation": "automation_tools",
                     }.get(str(tool.provider or ""), "mcp_tools")
                     if agent_tool_policy(
                         middleware_specs,
@@ -3557,6 +3624,7 @@ async def _run_workflow_response(
             include_skills: bool = False,
             include_browser: bool = False,
             include_client: bool = False,
+            include_automation: bool = False,
             client_tools_config: dict[str, Any] | None = None,
             pipeline: MiddlewarePipeline | None = None,
             middleware_context: MiddlewareContext | None = None,
@@ -3577,6 +3645,7 @@ async def _run_workflow_response(
                 include_skills=include_skills,
                 include_browser=include_browser,
                 include_client=include_client,
+                include_automation=include_automation,
                 client_tools_config=client_tools_config,
                 middleware_specs=middleware_specs,
                 apply_policy_filter=selector_spec is not None,
@@ -3604,6 +3673,8 @@ async def _run_workflow_response(
                             "host_page_read",
                         }
                     )
+                if include_automation:
+                    required_tools.update({"automation_list", "automation_get"})
                 required_tools.update(
                     item.strip()
                     for item in re.split(
@@ -5304,6 +5375,11 @@ async def _run_workflow_response(
                         client_tools_spec = middleware_spec(
                             agent_specs, "client_tools"
                         )
+                        scheduler_spec = middleware_spec(agent_specs, "scheduler")
+                        ralph_spec = middleware_spec(agent_specs, "ralph_loop")
+                        knowledge_writer_spec = middleware_spec(
+                            agent_specs, "knowledge_writer"
+                        )
                         sandbox_enabled = (
                             sandbox_files_spec is not None
                             or sandbox_shell_spec is not None
@@ -5311,6 +5387,7 @@ async def _run_workflow_response(
                         skills_enabled = skills_runtime_spec is not None
                         browser_enabled = browser_automation_spec is not None
                         client_tools_enabled = client_tools_spec is not None
+                        automation_enabled = scheduler_spec is not None
                         selector_spec = middleware_spec(
                             agent_specs,
                             "llm_tool_selector",
@@ -5457,6 +5534,12 @@ async def _run_workflow_response(
                                 if item.strip()
                             )
                         )
+                        if knowledge_writer_spec is not None:
+                            writer_kb_id = str(
+                                knowledge_writer_spec.config.get("knowledge_base_id") or ""
+                            ).strip()
+                            if writer_kb_id and writer_kb_id not in knowledge_base_ids:
+                                knowledge_base_ids.append(writer_kb_id)
                         if memory_read_scope not in {"conversation", "xpert", "both"}:
                             raise ValueError(
                                 "workflow_agent memoryReadScope must be conversation, xpert, or both."
@@ -5476,6 +5559,30 @@ async def _run_workflow_response(
                                 )
                             for knowledge_base_id in knowledge_base_ids:
                                 get_rag_service().get_pipeline_draft(knowledge_base_id)
+                        if automation_enabled and tool_mode != "mcp_tools":
+                            raise ValueError(
+                                "scheduler middleware requires workflow_agent Runtime tool mode."
+                            )
+                        if knowledge_writer_spec is not None:
+                            writer_kb_id = str(
+                                knowledge_writer_spec.config.get("knowledge_base_id") or ""
+                            ).strip()
+                            if not writer_kb_id:
+                                raise ValueError(
+                                    "knowledge_writer requires knowledge_base_id."
+                                )
+                            get_rag_service().get_pipeline_draft(writer_kb_id)
+                            if (
+                                not workflow_truthy(
+                                    knowledge_writer_spec.config.get(
+                                        "auto_propose_verified_output"
+                                    )
+                                )
+                                and tool_mode != "mcp_tools"
+                            ):
+                                raise ValueError(
+                                    "knowledge_writer requires Runtime tool mode unless automatic proposal is enabled."
+                                )
                         run_context = task_state.get("runtime_metadata") or {}
                         if enable_file_understanding:
                             file_context = variables.get("xpert_file_context", "").strip()
@@ -5921,7 +6028,7 @@ async def _run_workflow_response(
                                         role_prompt,
                                         task_input,
                                     )
-                                    if structured_spec is not None:
+                                    if structured_spec is not None or ralph_spec is not None:
                                         output = await buffered_agent_model_text(
                                             attempt_model_id,
                                             direct_messages,
@@ -6003,13 +6110,17 @@ async def _run_workflow_response(
                                         include_memory_read=memory_read_enabled,
                                         include_memory_write=memory_write_enabled,
                                         include_knowledge_read=knowledge_read_enabled,
-                                        include_knowledge_write=knowledge_write_enabled,
+                                        include_knowledge_write=(
+                                            knowledge_write_enabled
+                                            or knowledge_writer_spec is not None
+                                        ),
                                         knowledge_base_ids=knowledge_base_ids,
                                         include_todo=todo_spec is not None,
                                         include_sandbox=sandbox_enabled,
                                         include_skills=skills_enabled,
                                         include_browser=browser_enabled,
                                         include_client=client_tools_enabled,
+                                        include_automation=automation_enabled,
                                         client_tools_config=(
                                             dict(client_tools_spec.config)
                                             if client_tools_spec is not None
@@ -6031,7 +6142,7 @@ async def _run_workflow_response(
                                     )
                                     for agent_event in agent_events:
                                         yield sse_payload(agent_event)
-                                    if structured_spec is None:
+                                    if structured_spec is None and ralph_spec is None:
                                         yield sse_payload(
                                             {
                                                 "event": "node_delta",
@@ -6043,6 +6154,135 @@ async def _run_workflow_response(
                                                 "run_id": workflow_agent_run.run_id,
                                             }
                                         )
+                                if ralph_spec is not None:
+                                    ralph_events: list[dict[str, Any]] = []
+
+                                    async def ralph_continue_agent(
+                                        instruction: str,
+                                        iteration: int,
+                                    ) -> str:
+                                        if (
+                                            tool_mode == "none"
+                                            and todo_spec is None
+                                            and not sandbox_enabled
+                                            and not skills_enabled
+                                            and not browser_enabled
+                                            and not client_tools_enabled
+                                            and not automation_enabled
+                                        ):
+                                            return await buffered_agent_model_text(
+                                                attempt_model_id,
+                                                base_agent_messages(
+                                                    role_prompt,
+                                                    instruction,
+                                                ),
+                                                WORKFLOW_AGENT_MAX_TOKENS,
+                                                temperature=0.4,
+                                            )
+                                        next_output, next_events = await run_react_lite_agent(
+                                            node=node,
+                                            title=title,
+                                            kind=kind,
+                                            model_id=attempt_model_id,
+                                            system_prompt=role_prompt,
+                                            user_prompt=instruction,
+                                            tool_names_raw=node.data.get("toolNames"),
+                                            max_iterations=max_iterations,
+                                            temperature=0.4,
+                                            output_variable=output_variable,
+                                            run_id=workflow_agent_run.run_id,
+                                            include_mcp=(tool_mode == "mcp_tools"),
+                                            include_memory_read=memory_read_enabled,
+                                            include_memory_write=memory_write_enabled,
+                                            include_knowledge_read=knowledge_read_enabled,
+                                            include_knowledge_write=(
+                                                knowledge_write_enabled
+                                                or knowledge_writer_spec is not None
+                                            ),
+                                            knowledge_base_ids=knowledge_base_ids,
+                                            include_todo=todo_spec is not None,
+                                            include_sandbox=sandbox_enabled,
+                                            include_skills=skills_enabled,
+                                            include_browser=browser_enabled,
+                                            include_client=client_tools_enabled,
+                                            include_automation=automation_enabled,
+                                            client_tools_config=(
+                                                dict(client_tools_spec.config)
+                                                if client_tools_spec is not None
+                                                else {}
+                                            ),
+                                            pipeline=agent_pipeline,
+                                            middleware_context=agent_context,
+                                            middleware_specs=agent_specs,
+                                            selector_spec=selector_spec,
+                                            history_messages=history_messages,
+                                        )
+                                        ralph_events.extend(next_events)
+                                        return next_output
+
+                                    async def ralph_checkpoint(
+                                        event_type: str,
+                                        summary: str,
+                                        metadata: dict[str, Any],
+                                    ) -> None:
+                                        await run_registry.record_checkpoint(
+                                            workflow_agent_run.run_id,
+                                            event_type=f"middleware.{event_type}",
+                                            title="Ralph loop verification",
+                                            summary=str(summary)[:500],
+                                            severity=(
+                                                "warning"
+                                                if event_type in {"ralph.no_progress", "ralph.continue"}
+                                                else "info"
+                                            ),
+                                            metadata={"node_id": node.id, **metadata},
+                                        )
+
+                                    ralph_result = await run_ralph_loop(
+                                        output,
+                                        objective=task_input,
+                                        model_id=attempt_model_id,
+                                        verifier_model_id=str(
+                                            ralph_spec.config.get("verifier_model_id")
+                                            or attempt_model_id
+                                        ),
+                                        max_iterations=middleware_config_int(
+                                            ralph_spec.config,
+                                            "max_iterations",
+                                            5,
+                                            1,
+                                            20,
+                                        ),
+                                        max_output_chars=middleware_config_int(
+                                            ralph_spec.config,
+                                            "max_output_chars",
+                                            60_000,
+                                            4_000,
+                                            200_000,
+                                        ),
+                                        model_text=structured_repair_model_text,
+                                        continue_agent=ralph_continue_agent,
+                                        checkpoint=ralph_checkpoint,
+                                    )
+                                    for ralph_event in ralph_events:
+                                        yield sse_payload(ralph_event)
+                                    if not ralph_result.verified:
+                                        raise RuntimeError(
+                                            f"Ralph verification did not complete: {ralph_result.reason}"
+                                        )
+                                    output = ralph_result.output
+                                    await run_registry.record_checkpoint(
+                                        workflow_agent_run.run_id,
+                                        event_type="middleware.ralph_loop.completed",
+                                        title="Ralph loop completed",
+                                        summary=f"iterations={ralph_result.iterations}",
+                                        metadata={
+                                            "node_id": node.id,
+                                            "iterations": ralph_result.iterations,
+                                            "output_length": len(output),
+                                        },
+                                    )
+
                                 if structured_spec is not None:
                                     structured_started_at = time.perf_counter()
                                     output = await validate_structured_output(
@@ -6084,6 +6324,18 @@ async def _run_workflow_response(
                                             ),
                                         },
                                     )
+                                    yield sse_payload(
+                                        {
+                                            "event": "node_delta",
+                                            "node_id": node.id,
+                                            "node_title": title,
+                                            "node_type": kind,
+                                            "output": output,
+                                            "variable": output_variable,
+                                            "run_id": workflow_agent_run.run_id,
+                                        }
+                                    )
+                                elif ralph_spec is not None:
                                     yield sse_payload(
                                         {
                                             "event": "node_delta",
@@ -6217,6 +6469,63 @@ async def _run_workflow_response(
                             output = ""
                         else:
                             variables[output_variable] = output
+                        if (
+                            success
+                            and output.strip()
+                            and knowledge_writer_spec is not None
+                            and workflow_truthy(
+                                knowledge_writer_spec.config.get(
+                                    "auto_propose_verified_output"
+                                )
+                            )
+                        ):
+                            writer_kb_id = str(
+                                knowledge_writer_spec.config.get("knowledge_base_id")
+                                or ""
+                            ).strip()
+                            title_prefix = str(
+                                knowledge_writer_spec.config.get("title_prefix")
+                                or "Automation result"
+                            ).strip()[:100]
+                            proposal = await asyncio.to_thread(
+                                get_rag_service().create_knowledge_write_proposal,
+                                writer_kb_id,
+                                title=f"{title_prefix}: {agent_name}"[:160],
+                                content=output[:20_000],
+                                tags=["xpert", "automation", "middleware"],
+                                source_xpert_id=str(
+                                    run_context.get("xpert_id") or ""
+                                )
+                                or None,
+                                source_conversation_id=str(
+                                    run_context.get("conversation_id") or ""
+                                )
+                                or None,
+                                source_goal_id=str(
+                                    run_context.get("goal_id") or ""
+                                )
+                                or None,
+                                source_handoff_id=str(
+                                    run_context.get("handoff_id") or ""
+                                )
+                                or None,
+                                source_run_id=workflow_agent_run.run_id,
+                            )
+                            await run_registry.record_checkpoint(
+                                workflow_agent_run.run_id,
+                                event_type="middleware.knowledge_writer.proposed",
+                                title="Knowledge write proposed",
+                                summary=(
+                                    f"proposal_id={proposal.get('proposal_id')}, "
+                                    f"content_length={len(output[:20_000])}"
+                                ),
+                                metadata={
+                                    "node_id": node.id,
+                                    "knowledge_base_id": writer_kb_id,
+                                    "proposal_id": proposal.get("proposal_id"),
+                                    "content_length": len(output[:20_000]),
+                                },
+                            )
                         await agent_pipeline.after_agent(
                             {
                                 "model_id": model_id,
@@ -7550,6 +7859,96 @@ def get_handoff_executor() -> HandoffExecutor:
     return handoff_executor
 
 
+async def execute_automation_target(
+    definition: AutomationDefinition,
+    execution: AutomationExecution,
+    automation_run_id: str,
+) -> AutomationTargetResult:
+    prepared = await prepare_published_xpert_run(
+        definition.target_xpert_id,
+        XpertRunRequest(
+            message=definition.prompt,
+            messages=[],
+            version=definition.target_xpert_version,
+        ),
+        require_published=False,
+    )
+    response = await _run_workflow_response(
+        prepared.request,
+        None,
+        runtime_run_type="xpert",
+        runtime_source_id=prepared.xpert.id,
+        runtime_metadata={
+            **prepared.runtime_metadata,
+            "automation_id": definition.automation_id,
+            "automation_execution_id": execution.execution_id,
+            "automation_occurrence_key": execution.occurrence_key,
+        },
+        runtime_parent_run_id=automation_run_id,
+    )
+    task_id = str(
+        getattr(response, "headers", {}).get(
+            "X-ModelMirror-Runtime-Task-Id", ""
+        )
+    )
+    target_run_id = str(
+        getattr(response, "headers", {}).get(
+            "X-ModelMirror-Runtime-Run-Id", ""
+        )
+    )
+    final_event = await consume_workflow_stream(response)
+    event_type = str(final_event.get("event") or "")
+    if event_type == "runtime_approval_pending":
+        return AutomationTargetResult(
+            output="",
+            run_id=str(final_event.get("run_id") or target_run_id),
+            workflow_task_id=str(final_event.get("task_id") or task_id),
+            waiting_approval=True,
+            wait_id=str(final_event.get("approval_id") or "") or None,
+        )
+    if event_type == "client_tool_waiting":
+        return AutomationTargetResult(
+            output="",
+            run_id=str(final_event.get("run_id") or target_run_id),
+            workflow_task_id=str(final_event.get("task_id") or task_id),
+            waiting_client=True,
+            wait_id=str(final_event.get("request_id") or "") or None,
+        )
+    return AutomationTargetResult(
+        output=str(final_event.get("final_output") or ""),
+        run_id=str(final_event.get("run_id") or target_run_id),
+        workflow_task_id=task_id,
+    )
+
+
+def get_automation_coordinator() -> AutomationCoordinator:
+    global automation_coordinator, workflow_automation_provider
+    if automation_coordinator is None:
+        automation_coordinator = AutomationCoordinator(
+            automation_store,
+            run_registry,
+            execute_automation_target,
+            enabled=AUTOMATION_COORDINATOR_ENABLED,
+            poll_interval=AUTOMATION_COORDINATOR_POLL_SECONDS,
+            lease_seconds=AUTOMATION_COORDINATOR_LEASE_SECONDS,
+            max_concurrency=AUTOMATION_COORDINATOR_MAX_CONCURRENCY,
+        )
+        workflow_automation_provider = AutomationToolsetProvider(
+            automation_store,
+            automation_coordinator,
+        )
+        register_automation_toolset_capability(
+            runtime_capabilities,
+            workflow_automation_provider,
+        )
+        configure_runtime_automations(
+            automation_store,
+            automation_coordinator,
+            resolve_published_xpert,
+        )
+    return automation_coordinator
+
+
 async def resume_runtime_approval_execution(
     execution: WorkflowExecution,
     approval: RuntimeApprovalRequest,
@@ -7580,6 +7979,17 @@ async def resume_runtime_approval_execution(
     )
     final_event = await consume_workflow_stream(response)
     if final_event.get("event") == "runtime_approval_pending":
+        automation_execution_id = str(
+            metadata.get("automation_execution_id") or ""
+        ).strip()
+        if automation_execution_id:
+            automation_store.mark_waiting(
+                automation_execution_id,
+                status="waiting_approval",
+                run_id=str(final_event.get("run_id") or execution.run_id),
+                workflow_task_id=str(final_event.get("task_id") or execution.task_id),
+                wait_id=str(final_event.get("approval_id") or "") or None,
+            )
         return
     result = str(final_event.get("final_output") or "")
     handoff_id = str(metadata.get("handoff_id") or "").strip()
@@ -7636,6 +8046,16 @@ async def resume_runtime_approval_execution(
                         "result_length": len(result),
                     },
                 )
+    automation_execution_id = str(
+        metadata.get("automation_execution_id") or ""
+    ).strip()
+    if automation_execution_id:
+        await get_automation_coordinator().complete_waiting(
+            automation_execution_id,
+            result=result,
+            target_run_id=str(final_event.get("run_id") or execution.run_id),
+            workflow_task_id=str(final_event.get("task_id") or execution.task_id),
+        )
 
 
 async def resume_runtime_client_tool_execution(
@@ -7671,6 +8091,28 @@ async def resume_runtime_client_tool_execution(
         "runtime_approval_pending",
         "client_tool_waiting",
     }:
+        automation_execution_id = str(
+            metadata.get("automation_execution_id") or ""
+        ).strip()
+        if automation_execution_id:
+            waiting_for_approval = (
+                final_event.get("event") == "runtime_approval_pending"
+            )
+            automation_store.mark_waiting(
+                automation_execution_id,
+                status=(
+                    "waiting_approval" if waiting_for_approval else "waiting_client"
+                ),
+                run_id=str(final_event.get("run_id") or execution.run_id),
+                workflow_task_id=str(final_event.get("task_id") or execution.task_id),
+                wait_id=str(
+                    final_event.get("approval_id")
+                    if waiting_for_approval
+                    else final_event.get("request_id")
+                    or ""
+                )
+                or None,
+            )
         return
     result = str(final_event.get("final_output") or "")
     handoff_id = str(metadata.get("handoff_id") or "").strip()
@@ -7727,6 +8169,16 @@ async def resume_runtime_client_tool_execution(
                         "result_length": len(result),
                     },
                 )
+    automation_execution_id = str(
+        metadata.get("automation_execution_id") or ""
+    ).strip()
+    if automation_execution_id:
+        await get_automation_coordinator().complete_waiting(
+            automation_execution_id,
+            result=result,
+            target_run_id=str(final_event.get("run_id") or execution.run_id),
+            workflow_task_id=str(final_event.get("task_id") or execution.task_id),
+        )
 
 
 async def expire_runtime_client_tool_execution(
@@ -7777,6 +8229,15 @@ async def expire_runtime_client_tool_execution(
                 "client_request_id": client_request.request_id,
             },
         )
+    automation_execution_id = str(
+        metadata.get("automation_execution_id") or ""
+    ).strip()
+    if automation_execution_id:
+        automation_store.fail_execution(
+            automation_execution_id,
+            error="Client tool request expired.",
+            permanent=True,
+        )
 
 
 async def expire_runtime_approval_execution(
@@ -7826,6 +8287,15 @@ async def expire_runtime_approval_execution(
                 "handoff_id": handoff_id,
                 "approval_id": approval.approval_id,
             },
+        )
+    automation_execution_id = str(
+        metadata.get("automation_execution_id") or ""
+    ).strip()
+    if automation_execution_id:
+        automation_store.fail_execution(
+            automation_execution_id,
+            error="Runtime approval expired.",
+            permanent=True,
         )
 
 
@@ -8906,6 +9376,7 @@ async def start_mcp_ttl_cleanup() -> None:
     get_goal_coordinator().start()
     get_approval_coordinator().start()
     get_client_tool_coordinator().start()
+    get_automation_coordinator().start()
 
 
 @app.on_event("shutdown")
@@ -8920,6 +9391,8 @@ async def shutdown_mcp_sessions() -> None:
         await approval_coordinator.stop()
     if client_tool_coordinator is not None:
         await client_tool_coordinator.stop()
+    if automation_coordinator is not None:
+        await automation_coordinator.stop()
     await mcp_manager.stop_ttl_cleanup()
     await mcp_manager.close_all()
     await tool_registry.clear()
