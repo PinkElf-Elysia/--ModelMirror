@@ -49,6 +49,7 @@ server/xperts/storage/
 server/xpert_runtime/storage/
 server/mcp/installed/
 server/workflow_sandboxes/
+server/office_host/certs/
 
 # Temporary generated assets
 .tmp-*/

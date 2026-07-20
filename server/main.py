@@ -208,6 +208,8 @@ try:
         ClientToolRequest,
         ClientToolStore,
         ClientToolsetProvider,
+        OFFICE_MUTATING_TOOL_NAMES,
+        OfficeToolsetProvider,
         WorkflowExecution,
         WorkflowExecutionStore,
         RuntimeToolCall,
@@ -239,6 +241,7 @@ try:
         register_sandbox_toolset_capability,
         register_browser_toolset_capability,
         register_client_toolset_capability,
+        register_office_toolset_capability,
         register_automation_toolset_capability,
         register_authoring_toolset_capabilities,
         run_tool_with_runtime,
@@ -314,6 +317,8 @@ except ModuleNotFoundError:
         ClientToolRequest,
         ClientToolStore,
         ClientToolsetProvider,
+        OFFICE_MUTATING_TOOL_NAMES,
+        OfficeToolsetProvider,
         WorkflowExecution,
         WorkflowExecutionStore,
         RuntimeToolCall,
@@ -345,6 +350,7 @@ except ModuleNotFoundError:
         register_sandbox_toolset_capability,
         register_browser_toolset_capability,
         register_client_toolset_capability,
+        register_office_toolset_capability,
         register_automation_toolset_capability,
         register_authoring_toolset_capabilities,
         run_tool_with_runtime,
@@ -574,6 +580,7 @@ configure_runtime_browser(browser_session_store, browser_sidecar_client)
 client_tool_store = ClientToolStore(storage_dir=AGENT_TASK_STORAGE_DIR or None)
 client_tool_connections = ClientToolConnectionManager(client_tool_store)
 workflow_client_tool_provider = ClientToolsetProvider(client_tool_store)
+workflow_office_tool_provider = OfficeToolsetProvider(client_tool_store)
 runtime_capabilities = CapabilityRegistry()
 workflow_mcp_pipeline = MiddlewarePipeline([event_recorder])
 workflow_tool_policy = ToolPermissionPolicy(allow_by_default=True)
@@ -623,6 +630,9 @@ register_sandbox_toolset_capability(runtime_capabilities, workflow_sandbox_provi
 register_browser_toolset_capability(runtime_capabilities, workflow_browser_provider)
 register_client_toolset_capability(
     runtime_capabilities, workflow_client_tool_provider
+)
+register_office_toolset_capability(
+    runtime_capabilities, workflow_office_tool_provider
 )
 runtime_capabilities.register(
     "memory_tools",
@@ -3340,6 +3350,7 @@ async def _run_workflow_response(
             skills_runtime = middleware_spec(specs, "skills_runtime")
             browser_automation = middleware_spec(specs, "browser_automation")
             client_tools = middleware_spec(specs, "client_tools")
+            office_automation = middleware_spec(specs, "office_automation")
             scheduler = middleware_spec(specs, "scheduler")
             xpert_authoring = middleware_spec(specs, "xpert_authoring")
             skill_creator = middleware_spec(specs, "skill_creator")
@@ -3449,6 +3460,55 @@ async def _run_workflow_response(
                     raise RuntimeMiddlewareFatalError(
                         "client_tools requires human_in_the_loop coverage for configured mutating tools."
                     )
+            if office_automation is not None:
+                office_host_id = str(
+                    office_automation.config.get("clientHostId") or ""
+                ).strip()
+                office_scope = str(
+                    office_automation.config.get("host") or "all"
+                ).strip().lower()
+                if not office_host_id:
+                    raise RuntimeMiddlewareFatalError(
+                        "office_automation requires a paired clientHostId."
+                    )
+                if office_scope not in {"all", "word", "excel", "powerpoint"}:
+                    raise RuntimeMiddlewareFatalError(
+                        "office_automation host must be word, excel, powerpoint, or all."
+                    )
+                office_hitl_tools = {
+                    item.strip()
+                    for item in re.split(
+                        r"[,\n]",
+                        str(
+                            hitl.config.get("interrupt_on_tools")
+                            if hitl is not None
+                            else ""
+                        ),
+                    )
+                    if item.strip()
+                }
+                required_office_tools = {
+                    name
+                    for name in OFFICE_MUTATING_TOOL_NAMES
+                    if office_scope == "all" or name.startswith(f"office_{office_scope}_")
+                }
+                if not workflow_truthy(
+                    office_automation.config.get("allowDeletes", False)
+                ):
+                    required_office_tools = {
+                        name for name in required_office_tools if "_delete_" not in name
+                    }
+                if not workflow_truthy(
+                    office_automation.config.get("allowImageInsert", False)
+                ):
+                    required_office_tools.discard("office_powerpoint_insert_image")
+                if (
+                    "*" not in office_hitl_tools
+                    and not required_office_tools.issubset(office_hitl_tools)
+                ):
+                    raise RuntimeMiddlewareFatalError(
+                        "office_automation requires human_in_the_loop coverage for every enabled mutating Office tool."
+                    )
             context_metadata["sandbox_config"] = {
                 **(sandbox_files.config if sandbox_files is not None else {}),
                 **(sandbox_shell.config if sandbox_shell is not None else {}),
@@ -3463,6 +3523,11 @@ async def _run_workflow_response(
             )
             context_metadata["client_tools_config"] = (
                 dict(client_tools.config) if client_tools is not None else {}
+            )
+            context_metadata["office_automation_config"] = (
+                dict(office_automation.config)
+                if office_automation is not None
+                else {}
             )
             context_metadata["automation_config"] = (
                 dict(scheduler.config) if scheduler is not None else {}
@@ -3620,6 +3685,9 @@ async def _run_workflow_response(
             if not matched_tool:
                 matched_tool = await workflow_client_tool_provider.find_tool(tool_name)
                 capability_name = "client_tools"
+            if not matched_tool:
+                matched_tool = await workflow_office_tool_provider.find_tool(tool_name)
+                capability_name = "office_tools"
             if not matched_tool and workflow_automation_provider is not None:
                 matched_tool = await workflow_automation_provider.find_tool(tool_name)
                 capability_name = "automation_tools"
@@ -3654,6 +3722,8 @@ async def _run_workflow_response(
                 raise PermissionError("Xpert App browser automation is disabled.")
             if capability_name == "client_tools" and runtime_run_type == "xpert_app":
                 raise PermissionError("Xpert App client tools are disabled.")
+            if capability_name == "office_tools" and runtime_run_type == "xpert_app":
+                raise PermissionError("Xpert App Office automation is disabled.")
             if capability_name == "automation_tools" and runtime_run_type == "xpert_app":
                 raise PermissionError("Xpert App automation tools are disabled.")
             if capability_name in {
@@ -3720,6 +3790,7 @@ async def _run_workflow_response(
                         "skills_config": effective_context.metadata.get("skills_config") or {},
                         "browser_config": effective_context.metadata.get("browser_config") or {},
                         "client_tools_config": effective_context.metadata.get("client_tools_config") or {},
+                        "office_automation_config": effective_context.metadata.get("office_automation_config") or {},
                         "automation_config": effective_context.metadata.get("automation_config") or {},
                         "todo_scope_type": todo_scope_type,
                         "todo_scope_id": todo_scope_id,
@@ -3768,10 +3839,12 @@ async def _run_workflow_response(
             include_skills: bool = False,
             include_browser: bool = False,
             include_client: bool = False,
+            include_office: bool = False,
             include_automation: bool = False,
             include_xpert_authoring: bool = False,
             include_skill_creator: bool = False,
             client_tools_config: dict[str, Any] | None = None,
+            office_automation_config: dict[str, Any] | None = None,
             middleware_specs: list[RuntimeMiddlewareSpec] | None = None,
             apply_policy_filter: bool = False,
         ) -> list[Any]:
@@ -3849,6 +3922,29 @@ async def _run_workflow_response(
                         ),
                     )
                 )
+            if include_office and runtime_run_type != "xpert_app":
+                office_config = dict(office_automation_config or {})
+                office_scope = str(office_config.get("host") or "all").strip().lower()
+                configured_office_names = {
+                    name
+                    for name in workflow_office_tool_provider.tool_names
+                    if office_scope == "all" or name.startswith(f"office_{office_scope}_")
+                }
+                if not workflow_truthy(office_config.get("allowDeletes", False)):
+                    configured_office_names = {
+                        name for name in configured_office_names if "_delete_" not in name
+                    }
+                if not workflow_truthy(office_config.get("allowImageInsert", False)):
+                    configured_office_names.discard("office_powerpoint_insert_image")
+                tools.extend(
+                    await workflow_office_tool_provider.list_tools_for_host(
+                        str(office_config.get("clientHostId") or ""),
+                        configured_office_names,
+                        require_bound_tab=workflow_truthy(
+                            office_config.get("requireBoundDocument", True)
+                        ),
+                    )
+                )
             if (
                 include_automation
                 and runtime_run_type != "xpert_app"
@@ -3870,6 +3966,7 @@ async def _run_workflow_response(
                         "skill": "sandbox_tools",
                         "browser": "browser_tools",
                         "client": "client_tools",
+                        "office": "office_tools",
                         "automation": "automation_tools",
                         "authoring": (
                             "xpert_authoring_tools"
@@ -3909,10 +4006,12 @@ async def _run_workflow_response(
             include_skills: bool = False,
             include_browser: bool = False,
             include_client: bool = False,
+            include_office: bool = False,
             include_automation: bool = False,
             include_xpert_authoring: bool = False,
             include_skill_creator: bool = False,
             client_tools_config: dict[str, Any] | None = None,
+            office_automation_config: dict[str, Any] | None = None,
             pipeline: MiddlewarePipeline | None = None,
             middleware_context: MiddlewareContext | None = None,
             middleware_specs: list[RuntimeMiddlewareSpec] | None = None,
@@ -3932,10 +4031,12 @@ async def _run_workflow_response(
                 include_skills=include_skills,
                 include_browser=include_browser,
                 include_client=include_client,
+                include_office=include_office,
                 include_automation=include_automation,
                 include_xpert_authoring=include_xpert_authoring,
                 include_skill_creator=include_skill_creator,
                 client_tools_config=client_tools_config,
+                office_automation_config=office_automation_config,
                 middleware_specs=middleware_specs,
                 apply_policy_filter=selector_spec is not None,
             )
@@ -3960,6 +4061,14 @@ async def _run_workflow_response(
                         {
                             "host_page_snapshot",
                             "host_page_read",
+                        }
+                    )
+                if include_office:
+                    required_tools.update(
+                        {
+                            "office_word_snapshot",
+                            "office_excel_snapshot",
+                            "office_powerpoint_snapshot",
                         }
                     )
                 if include_automation:
@@ -5668,6 +5777,9 @@ async def _run_workflow_response(
                         client_tools_spec = middleware_spec(
                             agent_specs, "client_tools"
                         )
+                        office_automation_spec = middleware_spec(
+                            agent_specs, "office_automation"
+                        )
                         scheduler_spec = middleware_spec(agent_specs, "scheduler")
                         xpert_authoring_spec = middleware_spec(
                             agent_specs, "xpert_authoring"
@@ -5689,6 +5801,7 @@ async def _run_workflow_response(
                         skills_enabled = skills_runtime_spec is not None
                         browser_enabled = browser_automation_spec is not None
                         client_tools_enabled = client_tools_spec is not None
+                        office_automation_enabled = office_automation_spec is not None
                         automation_enabled = scheduler_spec is not None
                         xpert_authoring_enabled = xpert_authoring_spec is not None
                         skill_creator_enabled = skill_creator_spec is not None
@@ -5957,6 +6070,10 @@ async def _run_workflow_response(
                         if client_tools_enabled and tool_mode != "mcp_tools":
                             raise ValueError(
                                 "client_tools requires workflow_agent toolMode=mcp_tools."
+                            )
+                        if office_automation_enabled and tool_mode != "mcp_tools":
+                            raise ValueError(
+                                "office_automation requires workflow_agent toolMode=mcp_tools."
                             )
                         if exception_handling not in {"none", "fail", "empty_output"}:
                             raise ValueError(
@@ -6438,12 +6555,18 @@ async def _run_workflow_response(
                                         include_skills=skills_enabled,
                                         include_browser=browser_enabled,
                                         include_client=client_tools_enabled,
+                                        include_office=office_automation_enabled,
                                         include_automation=automation_enabled,
                                         include_xpert_authoring=xpert_authoring_enabled,
                                         include_skill_creator=skill_creator_enabled,
                                         client_tools_config=(
                                             dict(client_tools_spec.config)
                                             if client_tools_spec is not None
+                                            else {}
+                                        ),
+                                        office_automation_config=(
+                                            dict(office_automation_spec.config)
+                                            if office_automation_spec is not None
                                             else {}
                                         ),
                                         pipeline=agent_pipeline,
@@ -6488,6 +6611,7 @@ async def _run_workflow_response(
                                             and not skills_enabled
                                             and not browser_enabled
                                             and not client_tools_enabled
+                                            and not office_automation_enabled
                                             and not automation_enabled
                                         ):
                                             return await buffered_agent_model_text(
@@ -6525,12 +6649,18 @@ async def _run_workflow_response(
                                             include_skills=skills_enabled,
                                             include_browser=browser_enabled,
                                             include_client=client_tools_enabled,
+                                            include_office=office_automation_enabled,
                                             include_automation=automation_enabled,
                                             include_xpert_authoring=xpert_authoring_enabled,
                                             include_skill_creator=skill_creator_enabled,
                                             client_tools_config=(
                                                 dict(client_tools_spec.config)
                                                 if client_tools_spec is not None
+                                                else {}
+                                            ),
+                                            office_automation_config=(
+                                                dict(office_automation_spec.config)
+                                                if office_automation_spec is not None
                                                 else {}
                                             ),
                                             pipeline=agent_pipeline,
@@ -7905,6 +8035,8 @@ async def _run_workflow_response(
             }
             if interrupt.wait_kind == "client_tool":
                 client_request = client_tool_store.require_request(interrupt.wait_id)
+                client_host = client_tool_store.require_host(client_request.host_id)
+                is_office_request = client_request.tool_name.startswith("office_")
                 pending_event = {
                     "event": "client_tool_waiting",
                     "task_id": task_id,
@@ -7914,8 +8046,32 @@ async def _run_workflow_response(
                     "host_id": client_request.host_id,
                     "node_id": client_request.node_id,
                     "tool_name": client_request.tool_name,
-                    "message": "Waiting for the paired Chrome host.",
+                    "host_type": client_host.host_type,
+                    "office_app": client_host.office_app or None,
+                    "document_title": (
+                        client_host.document_binding.get("title")
+                        if client_host.host_type == "office"
+                        else None
+                    ),
+                    "message": (
+                        "Waiting for the paired Office document host."
+                        if is_office_request
+                        else "Waiting for the paired Chrome host."
+                    ),
                 }
+                if is_office_request:
+                    workflow_execution_store.append_event(
+                        task_id,
+                        {
+                            "event": "office_operation_started",
+                            "task_id": task_id,
+                            "run_id": workflow_run.run_id,
+                            "request_id": client_request.request_id,
+                            "host_id": client_request.host_id,
+                            "office_app": client_host.office_app,
+                            "tool_name": client_request.tool_name,
+                        },
+                    )
                 workflow_execution_store.suspend(
                     task_id,
                     wait_kind="client_tool",
@@ -8419,6 +8575,24 @@ async def resume_runtime_client_tool_execution(
     execution: WorkflowExecution,
     client_request: ClientToolRequest,
 ) -> None:
+    if client_request.tool_name.startswith("office_"):
+        workflow_execution_store.append_event(
+            execution.task_id,
+            {
+                "event": (
+                    "office_operation_uncertain"
+                    if client_request.status == "uncertain"
+                    else "office_operation_finished"
+                ),
+                "task_id": execution.task_id,
+                "run_id": execution.run_id,
+                "request_id": client_request.request_id,
+                "host_id": client_request.host_id,
+                "tool_name": client_request.tool_name,
+                "status": client_request.status,
+                "result_length": len(client_request.result),
+            },
+        )
     workflow = WorkflowPayload.model_validate(execution.workflow)
     payload = WorkflowRunRequest(
         workflow=workflow,
@@ -8686,6 +8860,7 @@ def get_client_tool_coordinator() -> ClientToolCoordinator:
             client_tool_store,
             client_tool_connections,
             client_tool_coordinator,
+            sandbox_workspace_store,
         )
     return client_tool_coordinator
 

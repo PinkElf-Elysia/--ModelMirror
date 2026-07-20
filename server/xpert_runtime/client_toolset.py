@@ -112,13 +112,27 @@ def client_tool_schema_hash(tool: RuntimeTool) -> str:
 
 
 class ClientToolsetProvider:
-    """Dispatches runtime tools to a paired Chrome host through durable waits."""
+    """Dispatches runtime tools to a paired client host through durable waits."""
 
-    def __init__(self, store: ClientToolStore) -> None:
+    def __init__(
+        self,
+        store: ClientToolStore,
+        *,
+        tools: list[RuntimeTool] | None = None,
+        capability_name: str = "client_tools",
+        config_key: str = "client_tools_config",
+        host_type: str = "chrome",
+    ) -> None:
         self.store = store
+        self.tools = list(tools or CLIENT_TOOLS)
+        self.tool_by_name = {tool.name: tool for tool in self.tools}
+        self.tool_names = set(self.tool_by_name)
+        self.capability_name = capability_name
+        self.config_key = config_key
+        self.host_type = host_type
 
     async def list_tools(self) -> list[RuntimeTool]:
-        return list(CLIENT_TOOLS)
+        return list(self.tools)
 
     async def list_tools_for_host(
         self,
@@ -133,17 +147,20 @@ class ClientToolsetProvider:
             return []
         if host.revoked:
             return []
-        if require_bound_tab and not host.bound_tab.get("bound"):
+        if host.host_type != self.host_type:
+            return []
+        binding = host.document_binding if self.host_type == "office" else host.bound_tab
+        if require_bound_tab and not binding.get("bound"):
             return []
         supported = {
             str(item.get("name") or "")
             for item in host.capabilities
             if isinstance(item, dict)
         }
-        names = configured_names or CLIENT_TOOL_NAMES
+        names = configured_names or self.tool_names
         result: list[RuntimeTool] = []
         for name in sorted(names):
-            tool = CLIENT_TOOL_BY_NAME.get(name)
+            tool = self.tool_by_name.get(name)
             if tool is None or name not in supported:
                 continue
             expected = client_tool_schema_hash(tool)
@@ -153,7 +170,7 @@ class ClientToolsetProvider:
         return result
 
     async def find_tool(self, tool_name: str) -> RuntimeTool | None:
-        return CLIENT_TOOL_BY_NAME.get(tool_name)
+        return self.tool_by_name.get(tool_name)
 
     async def prepare_dispatch(self, call: RuntimeToolCall) -> None:
         request = self._request_for_call(call)
@@ -214,7 +231,7 @@ class ClientToolsetProvider:
         )
 
     def _request_for_call(self, call: RuntimeToolCall) -> ClientToolRequest:
-        if call.tool_name not in CLIENT_TOOL_NAMES:
+        if call.tool_name not in self.tool_names:
             raise RuntimeToolError(
                 call.tool_name,
                 "Unsupported client tool.",
@@ -222,8 +239,8 @@ class ClientToolsetProvider:
             )
         metadata = dict(call.metadata or {})
         config = (
-            dict(metadata.get("client_tools_config") or {})
-            if isinstance(metadata.get("client_tools_config"), dict)
+            dict(metadata.get(self.config_key) or {})
+            if isinstance(metadata.get(self.config_key), dict)
             else {}
         )
         host_id = str(config.get("clientHostId") or "").strip()
@@ -236,7 +253,7 @@ class ClientToolsetProvider:
                 "Client tool requires a configured host and durable runtime IDs.",
                 code="client_tool_context_missing",
             )
-        tool = CLIENT_TOOL_BY_NAME[call.tool_name]
+        tool = self.tool_by_name[call.tool_name]
         schema_hash = client_tool_schema_hash(tool)
         try:
             host = self.store.require_host(host_id)
@@ -246,22 +263,38 @@ class ClientToolsetProvider:
                 "Configured client host is unavailable.",
                 code="client_host_unavailable",
             ) from exc
+        if host.host_type != self.host_type:
+            raise RuntimeToolError(
+                call.tool_name,
+                f"Configured host is not a {self.host_type} client host.",
+                code="client_host_type_mismatch",
+            )
         if host.schema_hashes.get(call.tool_name) != schema_hash:
             raise RuntimeToolError(
                 call.tool_name,
                 "Client host schema version does not match the server.",
                 code="client_tool_schema_mismatch",
             )
-        if bool(config.get("requireBoundTab", True)) and not host.bound_tab.get("bound"):
+        require_binding = bool(
+            config.get(
+                "requireBoundDocument" if self.host_type == "office" else "requireBoundTab",
+                True,
+            )
+        )
+        binding = host.document_binding if self.host_type == "office" else host.bound_tab
+        if require_binding and not binding.get("bound"):
             raise RuntimeToolError(
                 call.tool_name,
-                "The client host has no user-authorized bound tab.",
-                code="client_tab_not_bound",
+                "The client host has no user-authorized bound document or tab.",
+                code="client_binding_missing",
             )
         scope_type, scope_id = self._scope(metadata, node_id)
         operation_id = self._operation_id(call, task_id, node_id)
         timeout = self._bounded_timeout(
-            config.get("clientToolTimeoutSeconds", 1800)
+            config.get(
+                "timeoutSeconds" if self.host_type == "office" else "clientToolTimeoutSeconds",
+                1800,
+            )
         )
         return self.store.create_request(
             operation_id=operation_id,

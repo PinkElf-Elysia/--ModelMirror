@@ -1,5 +1,7 @@
 # Xpert Client Tools
 
+> 2026-07-19：Client Tool V1 现在同时承载 Chrome 当前标签页和 Office 当前文档宿主。两者使用同一配对、WebSocket、持久请求与恢复协议，但通过 `host_type`、能力 schema hash 和绑定状态严格隔离。Office 契约见 `docs/XPERT_OFFICE_AUTOMATION.md`。
+
 最后更新日期：2026-07-18
 
 ## 目标

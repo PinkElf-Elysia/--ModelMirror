@@ -1,5 +1,11 @@
 # Xpert Runtime Contract
 
+## Office Client Runtime
+
+Office Host 作为 `host_type=office` 复用 Client Tool V1 WebSocket、持久 request、operation ID 和 `wait_kind=client_tool`。宿主额外固定 `office_app`、随机 `document_binding_id`、Requirement Sets 与工具 schema hash；旧 Host 兼容迁移为 `host_type=chrome`。
+
+`office_automation` 只在私有入口注册 `office_tools` capability。修改调用顺序固定为 Tool Policy、HITL、Client dispatch、Office.js 和 Audit；读取断线可回到 pending，运行中的修改断线进入 `uncertain`。Runtime 只记录宿主类型、工具、状态、耗时和结果长度，不保存文档正文、单元格值、图片 Base64、Host token 或密钥。详细契约见 `docs/XPERT_OFFICE_AUTOMATION.md`。
+
 ## Typed File Memory Runtime
 
 `XpertFileMemoryStore` 在 Xpert Context storage 中维护派生 `MEMORY.md` 索引、四类 Markdown 正文、manifest 和安全使用信号。正式记忆写入使用原子替换和 revision；旧 Xpert 级 Memory 首次访问时懒迁移，会话级 Memory 不迁移。

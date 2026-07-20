@@ -273,6 +273,12 @@ def validate_workflow_graph(workflow: NativeWorkflowDefinition) -> ValidateWorkf
         issues,
         kinds_by_id=kinds_by_id,
     )
+    validate_office_middleware_bindings(
+        workflow.nodes,
+        valid_edges,
+        issues,
+        kinds_by_id=kinds_by_id,
+    )
     validate_automation_middleware_bindings(
         workflow.nodes,
         valid_edges,
@@ -2628,6 +2634,126 @@ def validate_client_tool_middleware_bindings(
                             "coverage for every configured mutation."
                         ),
                         node_id=client_node.id,
+                    )
+                )
+
+
+def validate_office_middleware_bindings(
+    nodes: list[NativeWorkflowNode],
+    edges: list[NativeWorkflowEdge],
+    issues: list[ValidationIssue],
+    *,
+    kinds_by_id: dict[str, str],
+) -> None:
+    """Require a bound Office host, Runtime tool mode, and HITL for mutations."""
+
+    nodes_by_id = {node.id: node for node in nodes}
+    bound_by_agent: dict[str, list[NativeWorkflowNode]] = defaultdict(list)
+    for edge in edges:
+        if not is_middleware_binding_edge(edge):
+            continue
+        source = nodes_by_id.get(edge.source)
+        if source is not None and kinds_by_id.get(source.id) == "runtime_middleware":
+            bound_by_agent[edge.target].append(source)
+
+    mutating = {
+        "office_powerpoint_add_slide",
+        "office_powerpoint_delete_slide",
+        "office_powerpoint_add_text_box",
+        "office_powerpoint_add_shape",
+        "office_powerpoint_update_shape",
+        "office_powerpoint_delete_shape",
+        "office_powerpoint_insert_image",
+        "office_word_insert_text",
+        "office_word_replace_selection",
+        "office_word_insert_heading",
+        "office_word_insert_table",
+        "office_excel_set_range_values",
+        "office_excel_add_worksheet",
+        "office_excel_delete_worksheet",
+        "office_excel_autofit_range",
+        "office_excel_add_table",
+    }
+    for agent_id, middleware_nodes in bound_by_agent.items():
+        agent = nodes_by_id.get(agent_id)
+        office_nodes = [
+            node
+            for node in middleware_nodes
+            if str(node.data.get("runtimeMiddlewareId") or "")
+            == "office_automation"
+        ]
+        if not office_nodes:
+            continue
+        hitl_tools: set[str] = set()
+        for node in middleware_nodes:
+            if str(node.data.get("runtimeMiddlewareId") or "") != "human_in_the_loop":
+                continue
+            config = node.data.get("runtimeMiddlewareConfig") or {}
+            hitl_tools.update(
+                item.strip()
+                for item in re.split(
+                    r"[,\n]", str(config.get("interrupt_on_tools") or "")
+                )
+                if item.strip()
+            )
+        for office_node in office_nodes:
+            config = office_node.data.get("runtimeMiddlewareConfig") or {}
+            if str((agent.data if agent else {}).get("toolMode") or "none") != "mcp_tools":
+                issues.append(
+                    ValidationIssue(
+                        code="office_automation_requires_runtime_tool_mode",
+                        message="office_automation requires workflow_agent toolMode=mcp_tools.",
+                        node_id=office_node.id,
+                    )
+                )
+            if not str(config.get("clientHostId") or "").strip():
+                issues.append(
+                    ValidationIssue(
+                        code="office_automation_host_required",
+                        message="office_automation requires clientHostId.",
+                        node_id=office_node.id,
+                    )
+                )
+            host_scope = str(config.get("host") or "all").strip().lower()
+            if host_scope not in {"all", "word", "excel", "powerpoint"}:
+                issues.append(
+                    ValidationIssue(
+                        code="office_automation_host_invalid",
+                        message="office_automation host must be word, excel, powerpoint, or all.",
+                        node_id=office_node.id,
+                    )
+                )
+                host_scope = "all"
+            try:
+                timeout = int(config.get("timeoutSeconds", 1800))
+            except (TypeError, ValueError):
+                timeout = 0
+            if not 30 <= timeout <= 86400:
+                issues.append(
+                    ValidationIssue(
+                        code="office_automation_timeout_invalid",
+                        message="office_automation timeoutSeconds must be between 30 and 86400.",
+                        node_id=office_node.id,
+                    )
+                )
+            required = {
+                name
+                for name in mutating
+                if host_scope == "all" or name.startswith(f"office_{host_scope}_")
+            }
+            if not config_truthy(config.get("allowDeletes")):
+                required = {name for name in required if "_delete_" not in name}
+            if not config_truthy(config.get("allowImageInsert")):
+                required.discard("office_powerpoint_insert_image")
+            if "*" not in hitl_tools and not required.issubset(hitl_tools):
+                issues.append(
+                    ValidationIssue(
+                        code="office_automation_requires_hitl",
+                        message=(
+                            "Every enabled mutating Office tool requires "
+                            "human_in_the_loop coverage."
+                        ),
+                        node_id=office_node.id,
                     )
                 )
 

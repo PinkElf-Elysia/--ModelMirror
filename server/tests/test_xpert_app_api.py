@@ -680,6 +680,74 @@ def test_deploy_preflight_rejects_client_tools_runtime(stores) -> None:
     )
 
 
+def test_deploy_preflight_rejects_office_automation_runtime(stores) -> None:
+    xpert_store, _ = stores
+    created = xpert_store.create_xpert(name="Office Helper", slug="office-helper")
+    draft = created.draft.model_copy(deep=True)
+    agent = next(
+        node for node in draft.workflow.nodes if node.data.get("kind") == "workflow_agent"
+    )
+    agent.data["toolMode"] = "mcp_tools"
+    for raw in [
+        {
+            "id": "office-tools",
+            "type": "runtime_middleware",
+            "data": {
+                "kind": "runtime_middleware",
+                "runtimeMiddlewareId": "office_automation",
+                "runtimeMiddlewareKind": "runtime_middleware.office_automation",
+                "runtimeMiddlewareConfig": {
+                    "clientHostId": "host_office",
+                    "host": "word",
+                    "allowDeletes": False,
+                    "allowImageInsert": False,
+                    "timeoutSeconds": 1800,
+                    "requireBoundDocument": True,
+                },
+            },
+        },
+        {
+            "id": "office-hitl",
+            "type": "runtime_middleware",
+            "data": {
+                "kind": "runtime_middleware",
+                "runtimeMiddlewareId": "human_in_the_loop",
+                "runtimeMiddlewareKind": "runtime_middleware.human_in_the_loop",
+                "runtimeMiddlewareConfig": {
+                    "interrupt_on_tools": "*",
+                    "timeout_seconds": 3600,
+                },
+            },
+        },
+    ]:
+        draft.workflow.nodes.append(type(agent).model_validate(raw))
+        draft.workflow.edges.append(
+            type(draft.workflow.edges[0]).model_validate(
+                {
+                    "id": f"bind-{raw['id']}",
+                    "source": raw["id"],
+                    "target": agent.id,
+                    "sourceHandle": "middleware-binding",
+                    "targetHandle": "middleware",
+                }
+            )
+        )
+    updated = xpert_store.update_xpert(
+        created.id, {"draft": draft.model_dump(mode="json")}
+    )
+    version = xpert_store.publish_xpert(
+        created.id, expected_revision=updated.draft_revision
+    )
+
+    result = _deployment_preflight(version, XpertAppPolicy(allow_tools=True))
+
+    assert result["valid"] is False
+    assert any(
+        issue["code"] == "app_office_automation_forbidden"
+        for issue in result["issues"]
+    )
+
+
 @pytest.mark.parametrize("middleware_id", ["xpert_authoring", "skill_creator"])
 def test_deploy_preflight_rejects_authoring_middleware(
     stores, middleware_id: str

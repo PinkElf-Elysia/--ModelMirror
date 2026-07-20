@@ -81,6 +81,14 @@ interface ClientHostPayload {
   status: string;
   version: string;
   capabilities: Array<{ name: string }>;
+  host_type?: "chrome" | "office";
+  office_app?: "word" | "excel" | "powerpoint" | "";
+  document_binding?: {
+    bound?: boolean;
+    binding_id?: string;
+    title?: string;
+  };
+  requirement_sets?: string[];
   bound_tab: {
     bound?: boolean;
     origin?: string;
@@ -95,6 +103,7 @@ interface ClientPairingPayload {
   pairing_code: string;
   expires_at: number;
   single_use: boolean;
+  host_type?: "chrome" | "office";
 }
 
 type RuntimeFilter = "all" | "workflow" | "workflow_agent" | "agent_task" | "agent_handoff" | "chat" | "goal";
@@ -336,6 +345,7 @@ export default function RuntimeOpsPage() {
   );
   const [clientPairing, setClientPairing] = useState<ClientPairingPayload | null>(null);
   const [clientHostBusy, setClientHostBusy] = useState("");
+  const [clientHostType, setClientHostType] = useState<"all" | "chrome" | "office">("all");
   const [runType, setRunType] = useState<RuntimeFilter>("all");
   const [status, setStatus] = useState<StatusFilter>("all");
   const [mcpStatusFilter, setMcpStatusFilter] = useState<McpStatusFilter>("all");
@@ -449,13 +459,16 @@ export default function RuntimeOpsPage() {
     void loadClientHosts();
   }, [loadClientHosts, loadEnvironment, loadMcp, loadRuns, loadSkills, loadTools]);
 
-  async function createClientPairing() {
-    setClientHostBusy("pairing");
+  async function createClientPairing(hostType: "chrome" | "office") {
+    setClientHostBusy(`pairing-${hostType}`);
     try {
       const response = await fetch("/api/runtime/client-hosts/pairings", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: "Chrome Host" }),
+        body: JSON.stringify({
+          name: hostType === "office" ? "Office Host" : "Chrome Host",
+          host_type: hostType,
+        }),
       });
       if (!response.ok) throw new Error("生成配对码失败");
       setClientPairing((await response.json()) as ClientPairingPayload);
@@ -463,6 +476,25 @@ export default function RuntimeOpsPage() {
       setClientHosts((current) => ({
         ...current,
         error: error instanceof Error ? error.message : "生成配对码失败",
+      }));
+    } finally {
+      setClientHostBusy("");
+    }
+  }
+
+  async function unbindClientHost(hostId: string) {
+    setClientHostBusy(hostId);
+    try {
+      const response = await fetch(
+        `/api/runtime/client-hosts/${encodeURIComponent(hostId)}/unbind`,
+        { method: "POST" },
+      );
+      if (!response.ok) throw new Error("解除文档绑定失败");
+      await loadClientHosts();
+    } catch (error) {
+      setClientHosts((current) => ({
+        ...current,
+        error: error instanceof Error ? error.message : "解除文档绑定失败",
       }));
     } finally {
       setClientHostBusy("");
@@ -758,23 +790,39 @@ export default function RuntimeOpsPage() {
             >
               下载 Chrome 扩展
             </a>
+            <a
+              className="rounded-full border border-white/10 bg-white/[0.055] px-3 py-1.5 text-xs font-semibold text-slate-200 transition hover:border-emerald-300/30 hover:text-emerald-100"
+              href="/api/runtime/office-host/manifest.xml"
+            >
+              下载 Office Manifest
+            </a>
             <button
               className="rounded-full bg-cyan-300 px-3 py-1.5 text-xs font-semibold text-slate-950 disabled:opacity-50"
-              disabled={clientHostBusy === "pairing"}
-              onClick={() => void createClientPairing()}
+              disabled={clientHostBusy.startsWith("pairing-")}
+              onClick={() => void createClientPairing("chrome")}
               type="button"
             >
-              生成配对码
+              配对 Chrome
+            </button>
+            <button
+              className="rounded-full bg-emerald-300 px-3 py-1.5 text-xs font-semibold text-slate-950 disabled:opacity-50"
+              disabled={clientHostBusy.startsWith("pairing-")}
+              onClick={() => void createClientPairing("office")}
+              type="button"
+            >
+              配对 Office
             </button>
           </div>
         }
-        description="将私有 Xpert 请求派发到用户主动绑定的当前 Chrome 标签页；Token 只保存在扩展本地。"
+        description="Chrome 绑定当前标签页；Office 加载项绑定当前 Word、Excel 或 PowerPoint 文档。Token 只保存在各宿主本地。Office 需要先运行证书脚本并启动 office profile。"
         error={clientHosts.error}
         title="客户端宿主"
       >
         {clientPairing ? (
           <div className="border-b border-white/10 bg-cyan-300/[0.07] px-4 py-3">
-            <p className="text-xs text-cyan-100">在扩展 Popup 中输入以下一次性配对码，5 分钟内有效：</p>
+            <p className="text-xs text-cyan-100">
+              在 {clientPairing.host_type === "office" ? "Office Task Pane" : "扩展 Popup"} 中输入以下一次性配对码，5 分钟内有效：
+            </p>
             <div className="mt-2 flex flex-wrap items-center gap-3">
               <code className="rounded-md border border-cyan-300/20 bg-black/25 px-4 py-2 text-xl font-semibold text-white">
                 {clientPairing.pairing_code}
@@ -789,12 +837,28 @@ export default function RuntimeOpsPage() {
         ) : clientHosts.data.length === 0 ? (
           <div className="p-8 text-center">
             <p className="text-base font-semibold text-white">尚未配对客户端宿主</p>
-            <p className="mt-2 text-sm text-slate-400">下载扩展并使用一次性配对码连接。配对后仍需在扩展中主动绑定当前标签页。</p>
+            <p className="mt-2 text-sm text-slate-400">下载对应宿主并使用一次性配对码连接。配对后仍需主动绑定当前标签页或 Office 文档。</p>
             <a className="mt-3 inline-flex text-xs font-semibold text-cyan-200 hover:text-cyan-100" href="/api/runtime/client-tools/fixture" target="_blank" rel="noreferrer">打开无敏感数据测试页</a>
           </div>
         ) : (
-          <div className="grid gap-3 p-4 lg:grid-cols-2">
-            {clientHosts.data.map((host) => (
+          <>
+            <div className="flex flex-wrap gap-2 border-b border-white/10 px-4 py-3">
+              {(["all", "chrome", "office"] as const).map((type) => (
+                <button
+                  className={`rounded-full border px-3 py-1 text-xs font-semibold ${clientHostType === type ? "border-cyan-300/40 bg-cyan-300/15 text-cyan-100" : "border-white/10 text-slate-300"}`}
+                  key={type}
+                  onClick={() => setClientHostType(type)}
+                  type="button"
+                >
+                  {type === "all" ? "全部" : type === "chrome" ? "Chrome" : "Office"}
+                </button>
+              ))}
+              <a className="ml-auto text-xs text-emerald-200 hover:text-emerald-100" href="https://localhost:8443" target="_blank" rel="noreferrer">检查 Office HTTPS</a>
+            </div>
+            <div className="grid gap-3 p-4 lg:grid-cols-2">
+            {clientHosts.data
+              .filter((host) => clientHostType === "all" || (host.host_type ?? "chrome") === clientHostType)
+              .map((host) => (
               <article className="rounded-lg border border-white/10 bg-white/[0.045] p-3" key={host.host_id}>
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
@@ -804,20 +868,34 @@ export default function RuntimeOpsPage() {
                   <span className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold ${statusClass(host.status)}`}>{host.status}</span>
                 </div>
                 <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-slate-400">
-                  <p>扩展 v{host.version || "-"}</p>
+                  <p>{(host.host_type ?? "chrome") === "office" ? `Office ${host.office_app || "未识别"}` : "Chrome 扩展"} v{host.version || "-"}</p>
                   <p>{host.capabilities.length} 个工具</p>
-                  <p className="col-span-2 truncate">{host.bound_tab?.bound ? `已绑定 · ${host.bound_tab.title || host.bound_tab.origin}` : "标签页未绑定"}</p>
+                  <p className="col-span-2 truncate">
+                    {(host.host_type ?? "chrome") === "office"
+                      ? host.document_binding?.bound
+                        ? `已绑定文档 · ${host.document_binding.title || host.document_binding.binding_id}`
+                        : "Office 文档未绑定"
+                      : host.bound_tab?.bound
+                        ? `已绑定标签页 · ${host.bound_tab.title || host.bound_tab.origin}`
+                        : "标签页未绑定"}
+                  </p>
+                  {(host.host_type ?? "chrome") === "office" ? <p className="col-span-2 truncate">{host.requirement_sets?.join(" · ") || "Requirement Set 待检测"}</p> : null}
                   <p className="col-span-2">最近心跳 {formatTime(host.last_heartbeat_at)}</p>
                 </div>
                 <div className="mt-3 flex items-center justify-between border-t border-white/10 pt-2">
-                  <a className="text-[11px] text-cyan-200 hover:text-cyan-100" href="/api/runtime/client-tools/fixture" target="_blank" rel="noreferrer">测试标签页</a>
+                  {(host.host_type ?? "chrome") === "office" ? (
+                    <button className="text-[11px] text-amber-200 hover:text-amber-100 disabled:opacity-50" disabled={clientHostBusy === host.host_id || !host.document_binding?.bound} onClick={() => void unbindClientHost(host.host_id)} type="button">解除文档绑定</button>
+                  ) : (
+                    <a className="text-[11px] text-cyan-200 hover:text-cyan-100" href="/api/runtime/client-tools/fixture" target="_blank" rel="noreferrer">测试标签页</a>
+                  )}
                   {!host.revoked ? (
                     <button className="text-[11px] text-rose-200 hover:text-rose-100 disabled:opacity-50" disabled={clientHostBusy === host.host_id} onClick={() => void revokeClientHost(host.host_id)} type="button">撤销 Token</button>
                   ) : null}
                 </div>
               </article>
             ))}
-          </div>
+            </div>
+          </>
         )}
       </SectionShell>
 

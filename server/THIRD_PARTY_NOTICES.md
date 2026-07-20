@@ -49,3 +49,16 @@ The sidecar includes its runtime notice at
 `/usr/share/doc/modelmirror-browser/THIRD_PARTY_NOTICES.md`. ModelMirror's
 Browser implementation is independently written; no Xpert AGPL source code is
 copied into this component.
+
+## Office.js and NGINX
+
+The optional Office Task Pane loads Office.js from Microsoft's official CDN.
+The OfficeDev/office-js project is distributed under the MIT License; its
+source is not copied or bundled into this repository.
+
+Project: https://github.com/OfficeDev/office-js
+
+The optional `office-host` profile uses the official NGINX image to serve the
+Task Pane and proxy the local HTTPS/WSS endpoints. NGINX is distributed under
+the 2-clause BSD License. The Office automation implementation is independently
+written; Xpert AGPL code is used only as a behavioral reference.

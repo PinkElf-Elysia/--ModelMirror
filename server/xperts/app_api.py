@@ -127,6 +127,7 @@ def _deployment_preflight(version: XpertVersion, policy: XpertAppPolicy) -> dict
     has_sandbox_runtime = False
     has_browser_runtime = False
     has_client_runtime = False
+    has_office_runtime = False
     has_private_automation_runtime = False
     has_knowledge_writer = False
     has_file_memory = False
@@ -139,6 +140,7 @@ def _deployment_preflight(version: XpertVersion, policy: XpertAppPolicy) -> dict
         "skills_runtime",
         "browser_automation",
         "client_tools",
+        "office_automation",
         "scheduler",
         "ralph_loop",
         "plugin_hooks",
@@ -196,6 +198,11 @@ def _deployment_preflight(version: XpertVersion, policy: XpertAppPolicy) -> dict
             and data.get("runtimeMiddlewareId") == "client_tools"
         ):
             has_client_runtime = True
+        if (
+            kind == "runtime_middleware"
+            and data.get("runtimeMiddlewareId") == "office_automation"
+        ):
+            has_office_runtime = True
         if kind == "runtime_middleware" and data.get("runtimeMiddlewareId") in {
             "scheduler",
             "ralph_loop",
@@ -284,6 +291,13 @@ def _deployment_preflight(version: XpertVersion, policy: XpertAppPolicy) -> dict
             {
                 "code": "app_client_tools_forbidden",
                 "message": "Public Xpert Apps cannot use client_tools middleware.",
+            }
+        )
+    if has_office_runtime:
+        issues.append(
+            {
+                "code": "app_office_automation_forbidden",
+                "message": "Public Xpert Apps cannot use Office automation middleware.",
             }
         )
     if has_private_automation_runtime:

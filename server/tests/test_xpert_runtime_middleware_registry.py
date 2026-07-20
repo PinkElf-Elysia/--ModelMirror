@@ -35,6 +35,7 @@ def test_registry_list_returns_builtin_nodes() -> None:
         "skills_runtime",
         "browser_automation",
         "client_tools",
+        "office_automation",
         "scheduler",
         "ralph_loop",
         "knowledge_writer",

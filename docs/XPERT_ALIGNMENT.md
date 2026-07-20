@@ -1,5 +1,11 @@
 # Xpert 对齐总纲
 
+## 2026-07-19 增量：XPERT-MIDDLEWARE-OFFICE-09
+
+私有 Workflow、Xpert Chat、Goal、Handoff 与 Automation 已具备 Office 当前文档实时自动化闭环。Word、Excel 和 PowerPoint 共 22 个工具复用 Client Tool 的配对、持久等待、HITL、Audit 与断点恢复；读取可安全重派，修改断线进入 `uncertain` 并禁止自动重放。可选 `office-host` Compose profile 提供受信任 localhost HTTPS Task Pane 和 add-in-only XML manifest。
+
+该能力要求用户主动绑定当前文档，Host 类型、Requirement Set 与 schema hash 必须匹配；所有修改工具均需 HITL，删除另有配置和 `confirm=true` 双门禁。公开 Xpert App/API fail-closed。完整边界见 `docs/XPERT_OFFICE_AUTOMATION.md`；下一轮主线进入 `XPERT-DATAX-INDICATORS-10`。
+
 ## 2026-07-19 增量：XPERT-MIDDLEWARE-FILE-MEMORY-08
 
 Xpert 级长期 Memory 已升级为类型化 Markdown 文件记忆：`MEMORY.md` 摘要索引与 `user / feedback / project / reference` 四类正文通过原子 Store 持久化，旧 Xpert Memory 在首次访问时兼容懒迁移并保留 ID；会话级 Memory 继续保持原隔离存储。
@@ -10,7 +16,7 @@ Xpert 级长期 Memory 已升级为类型化 Markdown 文件记忆：`MEMORY.md`
 
 私有 Workflow、Xpert Chat、Goal、Handoff 与 Automation 已具备受审批的平台自编写闭环。`xpert_authoring` 和 `skill_creator` 通过 Runtime Toolset 分析允许范围内的资源，只能创建版本化提案；管理端审核通过后分别写入 Xpert 草稿或 Workspace Skill 草稿，不能直接发布 Xpert、安装 Skill 或修改不可变发布版本。
 
-提案与 Skill 草稿采用文件型 Store、原子写入、revision 和 `base_revision` 冲突保护。Skill 包限制在 `SKILL.md`、`scripts/`、`references/`、`assets/` 与 `agents/openai.yaml`，安装仍是 `/skills` 的显式二次操作，脚本继续只在隔离 Sandbox 中执行。公开 App/API 通过统一中间件契约禁止两类自编写能力。该轮延后的显式文件记忆现已由 `XPERT-MIDDLEWARE-FILE-MEMORY-08` 完成；Office 与 Data X 仍待后续闭环。详细契约见 `docs/XPERT_AUTHORING.md`。
+提案与 Skill 草稿采用文件型 Store、原子写入、revision 和 `base_revision` 冲突保护。Skill 包限制在 `SKILL.md`、`scripts/`、`references/`、`assets/` 与 `agents/openai.yaml`，安装仍是 `/skills` 的显式二次操作，脚本继续只在隔离 Sandbox 中执行。公开 App/API 通过统一中间件契约禁止两类自编写能力。该轮延后的显式文件记忆与 Office 实时自动化现已分别由 `XPERT-MIDDLEWARE-FILE-MEMORY-08`、`XPERT-MIDDLEWARE-OFFICE-09` 完成；Data X 指标闭环仍待后续交付。详细契约见 `docs/XPERT_AUTHORING.md`。
 
 ## 2026-07-18 增量：XPERT-MIDDLEWARE-AUTOMATION-06
 
@@ -216,7 +222,7 @@ EvoAgentX 只保留为历史参考：此前元智能体曾借鉴其 `goal -> sub
 | --- | --- | --- | --- | --- |
 | 工作空间资源 | 部分实现 | `/studio` 已作为 Xpert 式资源 Hub，聚合智能体、工作流、知识库、MCP、API 工具、数据库、Skill、提示词、环境、运行记录，并支持快速入口、标签过滤和运行摘要 | 当前是前端只读聚合视图，不做 workspace 权限、持久化资源表或资源创建编排；API 工具与数据库仍为待接入卡片 | `XPERT-WORKFLOW-REGISTRY-API-01` |
 | Xpert Studio / 发布 | 部分实现 | classic `/workflow`、智能体配置侧栏、Xpert 草稿、不可变版本、聊天运行、Goal、自动 Handoff、文件/记忆与固定版本 App/API | 使用文件型 Store 和 classic runner；不做组织权限、多人协作或数据库迁移 | 基于真实使用反馈审计 |
-| Runtime Middleware | 部分实现 | Agent 绑定、上下文压缩、结构化输出、Todo、工具选择、HITL、Sandbox/Skill、Browser、Client Tools、Scheduler、Ralph Loop、Knowledge Writer、Plugin Hooks、Xpert/Skill 自编写提案、类型化文件记忆 | 文件型单进程协调器；公开 App 禁止交互式、客户端、自动化与自编写中间件，文件记忆仅显式策略下只读 | Office 实时自动化与 Data X 指标闭环 |
+| Runtime Middleware | 部分实现 | Agent 绑定、上下文压缩、结构化输出、Todo、工具选择、HITL、Sandbox/Skill、Browser、Client Tools、Scheduler、Ralph Loop、Knowledge Writer、Plugin Hooks、Xpert/Skill 自编写提案、类型化文件记忆、Office 实时自动化 | 文件型单进程协调器；公开 App 禁止交互式、客户端、Office、自动化与自编写中间件，文件记忆仅显式策略下只读 | Data X 指标闭环 |
 | Agent Task | 部分实现 | AgentTask API、MetaAgent 任务工作台、workflow `agent_task` 节点、可选文件持久化、Goal 步骤派发 | 单进程文件 Store，不是分布式任务队列 | 为文件与记忆任务补安全上下文 |
 | Handoff | 部分实现 | Handoff API、workflow `agent_handoff`、`handoff_router`、人工 Inbox、目标 Xpert 自动执行、同步结果回传、重试、死信与 Goal 协作 | 仅显式 `xpert:` 目标自动执行；单进程 lease，不做分布式调度 | 扩展文件与记忆上下文传递 |
 | RunRegistry / Trace | 部分实现 | workflow/xpert/chat/goal/agent_task/agent_handoff run、checkpoint、workflow/chat/Xpert/Goal 观测与 `/runtime` 运维总览 | 内存态，可观测索引，不是调度器；Goal 重启恢复会创建 recovery run | 为文件、记忆与知识执行提供护栏 |

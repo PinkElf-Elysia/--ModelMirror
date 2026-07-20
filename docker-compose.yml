@@ -162,6 +162,32 @@ services:
       - "5173:80"
     restart: unless-stopped
 
+  office-host:
+    profiles:
+      - office
+    build:
+      context: ./server
+      dockerfile: office_host/Dockerfile
+    container_name: modelmirror-office-host
+    depends_on:
+      server:
+        condition: service_healthy
+    ports:
+      - "8443:8443"
+    volumes:
+      - ./server/office_host/certs:/certs:ro
+    user: "101:101"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /var/cache/nginx:rw,nosuid,size=16m,uid=101,gid=101,mode=0700
+      - /var/run:rw,nosuid,size=4m,uid=101,gid=101,mode=0700
+      - /tmp:rw,nosuid,size=8m
+    restart: unless-stopped
+
 volumes:
   sandbox_socket:
   sandbox_workspaces:

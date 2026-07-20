@@ -907,6 +907,76 @@ def register_builtin_middleware_nodes(
 
     registry.register(
         RuntimeMiddlewareNode(
+            id="office_automation",
+            kind="runtime_middleware.office_automation",
+            title="Office 实时自动化",
+            description="通过用户绑定的 Word、Excel 或 PowerPoint 当前文档执行 22 个受控 Office.js 工具。",
+            category="tool",
+            icon="PanelsTopLeft",
+            fields=[
+                RuntimeMiddlewareField(
+                    name="clientHostId",
+                    label="Office 宿主 ID",
+                    type="text",
+                    required=True,
+                    placeholder="host_...",
+                    description="在 Runtime Ops 配对 Office 加载项并绑定当前文档后选择。",
+                ),
+                RuntimeMiddlewareField(
+                    name="host",
+                    label="Office 宿主范围",
+                    type="select",
+                    default="all",
+                    options=["all", "word", "excel", "powerpoint"],
+                ),
+                RuntimeMiddlewareField(
+                    name="allowDeletes",
+                    label="允许删除操作",
+                    type="boolean",
+                    default=False,
+                    description="删除仍要求 HITL 覆盖且参数 confirm=true。",
+                ),
+                RuntimeMiddlewareField(
+                    name="allowImageInsert",
+                    label="允许 PowerPoint 插入图片产物",
+                    type="boolean",
+                    default=False,
+                    description="仅允许读取同一运行作用域的 Sandbox 图片产物。",
+                ),
+                RuntimeMiddlewareField(
+                    name="timeoutSeconds",
+                    label="Office 等待超时（秒）",
+                    type="number",
+                    default=1800,
+                    min_value=30,
+                    max_value=86400,
+                ),
+                RuntimeMiddlewareField(
+                    name="requireBoundDocument",
+                    label="要求用户主动绑定当前文档",
+                    type="boolean",
+                    default=True,
+                ),
+            ],
+            tags=["agent", "office", "word", "excel", "powerpoint", "hitl"],
+            metadata={
+                "middleware_name": "office_automation",
+                "runtime_hook": "agent_tools",
+                "capability_name": "office_tools",
+                "durable": True,
+                "real_execution": True,
+                "app_forbidden": True,
+            },
+            config_version=1,
+            execution_status="real",
+            requires_tool_mode="mcp_tools",
+            app_policy="forbidden",
+            security_category="client_side_effect",
+        )
+    )
+
+    registry.register(
+        RuntimeMiddlewareNode(
             id="scheduler",
             kind="runtime_middleware.scheduler",
             title="定时任务调度",

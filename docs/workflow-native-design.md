@@ -1,5 +1,7 @@
 # workflow-native 自研工作流设计
 
+> 2026-07-19 Office Automation：`office_automation` 可通过 middleware binding 绑定到 `workflow_agent`，复用 `wait_kind=client_tool` 的持久暂停和恢复语义。22 个 Word/Excel/PowerPoint 工具由用户主动绑定的 Office.js Task Pane 执行；绑定边不参与控制流，修改工具必须有 HITL 覆盖，公开 App/API 禁止该中间件。完整契约见 `docs/XPERT_OFFICE_AUTOMATION.md`。
+
 > 2026-07-19 File Memory Middleware：`xpert_file_memory` 可通过 middleware binding 绑定到 `workflow_agent`，提供索引、摘要 digest、正文选择和候选写回。绑定边不参与控制流；显式配置优先于旧 `memoryReadEnabled/memoryWriteEnabled` 字段。普通 Workflow 无 Xpert 上下文时安全跳过，公开 App 只允许显式开启的只读访问。完整契约见 `docs/XPERT_FILE_MEMORY.md`。
 
 > 2026-07-18 Authoring Middleware：`xpert_authoring` 与 `skill_creator` 可绑定到 `workflow_agent`，通过 Runtime 工具模式创建版本化提案。审批后只写入 Xpert 或 Workspace Skill 草稿，发布与安装仍需用户显式操作；公开 App/API 禁止两类中间件，完整边界见 `docs/XPERT_AUTHORING.md`。

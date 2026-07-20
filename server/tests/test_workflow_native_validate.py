@@ -2455,3 +2455,66 @@ async def test_client_tools_validate_timeout_and_runtime_tool_mode(
 
     assert "client_tools_timeout_invalid" in codes
     assert "client_tools_requires_runtime_tool_mode" in codes
+
+
+def office_automation_middleware_workflow(hitl_tools: str) -> dict:
+    workflow = browser_middleware_workflow(hitl_tools)
+    browser = next(node for node in workflow["nodes"] if node["id"] == "browser")
+    browser["id"] = "office"
+    browser["data"] = {
+        "kind": "runtime_middleware",
+        "runtimeMiddlewareId": "office_automation",
+        "runtimeMiddlewareKind": "runtime_middleware.office_automation",
+        "runtimeMiddlewareConfig": {
+            "clientHostId": "office_host",
+            "host": "word",
+            "allowDeletes": False,
+            "allowImageInsert": False,
+            "timeoutSeconds": 1800,
+            "requireBoundDocument": True,
+        },
+    }
+    binding = next(edge for edge in workflow["edges"] if edge["id"] == "bind-browser")
+    binding["source"] = "office"
+    return workflow
+
+
+@pytest.mark.asyncio
+async def test_office_automation_requires_runtime_host_and_hitl(
+    client: httpx.AsyncClient,
+) -> None:
+    invalid = await validate(
+        client,
+        office_automation_middleware_workflow("office_word_insert_text"),
+    )
+    assert "office_automation_requires_hitl" in issue_codes(invalid)
+
+    valid = await validate(client, office_automation_middleware_workflow("*"))
+    assert valid["valid"] is True, valid["issues"]
+    assert "office_automation_requires_hitl" not in issue_codes(valid)
+
+    missing_host = office_automation_middleware_workflow("*")
+    office = next(node for node in missing_host["nodes"] if node["id"] == "office")
+    office["data"]["runtimeMiddlewareConfig"]["clientHostId"] = ""
+    data = await validate(client, missing_host)
+    assert "office_automation_host_required" in issue_codes(data)
+
+
+@pytest.mark.asyncio
+async def test_office_automation_validates_scope_timeout_and_tool_mode(
+    client: httpx.AsyncClient,
+) -> None:
+    workflow = office_automation_middleware_workflow("*")
+    office = next(node for node in workflow["nodes"] if node["id"] == "office")
+    office["data"]["runtimeMiddlewareConfig"].update(
+        {"host": "outlook", "timeoutSeconds": 2}
+    )
+    agent = next(node for node in workflow["nodes"] if node["id"] == "agent")
+    agent["data"]["toolMode"] = "none"
+
+    data = await validate(client, workflow)
+    codes = issue_codes(data)
+
+    assert "office_automation_host_invalid" in codes
+    assert "office_automation_timeout_invalid" in codes
+    assert "office_automation_requires_runtime_tool_mode" in codes

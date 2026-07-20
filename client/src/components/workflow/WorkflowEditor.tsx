@@ -1351,7 +1351,10 @@ function NodeConfig({
     host_id: string;
     name: string;
     status: string;
+    host_type?: "chrome" | "office";
+    office_app?: "word" | "excel" | "powerpoint" | "";
     bound_tab?: { bound?: boolean; title?: string; origin?: string };
+    document_binding?: { bound?: boolean; title?: string; binding_id?: string };
     revoked?: boolean;
   }>>([]);
 
@@ -2399,10 +2402,29 @@ function NodeConfig({
                         field,
                       )}
                     >
-                      <option className="bg-slate-950" value="">选择已配对 Chrome 宿主</option>
-                      {clientHosts.filter((host) => !host.revoked).map((host) => (
+                      <option className="bg-slate-950" value="">
+                        {data.runtimeMiddlewareId === "office_automation"
+                          ? "选择已配对 Office 宿主"
+                          : "选择已配对 Chrome 宿主"}
+                      </option>
+                      {clientHosts
+                        .filter(
+                          (host) =>
+                            !host.revoked &&
+                            (data.runtimeMiddlewareId === "office_automation"
+                              ? host.host_type === "office"
+                              : (host.host_type ?? "chrome") === "chrome"),
+                        )
+                        .map((host) => (
                         <option className="bg-slate-950" key={host.host_id} value={host.host_id}>
-                          {host.name} · {host.status}{host.bound_tab?.bound ? " · 已绑定标签页" : " · 未绑定标签页"}
+                          {host.name} · {host.status}
+                          {host.host_type === "office"
+                            ? host.document_binding?.bound
+                              ? ` · ${host.office_app ?? "office"} 已绑定`
+                              : " · 文档未绑定"
+                            : host.bound_tab?.bound
+                              ? " · 已绑定标签页"
+                              : " · 未绑定标签页"}
                         </option>
                       ))}
                     </select>
