@@ -1166,6 +1166,41 @@ async def test_bound_middleware_does_not_participate_in_control_topology(
 
 
 @pytest.mark.asyncio
+async def test_xpert_file_memory_validates_recall_mode_and_budgets(
+    client: httpx.AsyncClient,
+) -> None:
+    workflow = middleware_binding_workflow()
+    middleware = workflow["nodes"][-1]
+    middleware["id"] = "file-memory"
+    middleware["data"].update(
+        {
+            "runtimeMiddlewareId": "xpert_file_memory",
+            "runtimeMiddlewareKind": "runtime_middleware.xpert_file_memory",
+            "runtimeMiddlewareConfig": {
+                "recall_mode": "unknown",
+                "max_detail_chars_per_turn": 20_000,
+                "max_detail_chars_per_session": 10_000,
+            },
+        }
+    )
+    workflow["edges"][-1]["source"] = "file-memory"
+
+    invalid = await validate(client, workflow)
+    codes = issue_codes(invalid)
+    assert "invalid_xpert_file_memory_recall_mode" in codes
+    assert "invalid_xpert_file_memory_budget" in codes
+
+    middleware["data"]["runtimeMiddlewareConfig"].update(
+        {
+            "recall_mode": "hybrid",
+            "max_detail_chars_per_session": 60_000,
+        }
+    )
+    valid = await validate(client, workflow)
+    assert valid["valid"] is True, valid["issues"]
+
+
+@pytest.mark.asyncio
 async def test_scheduler_requires_runtime_tool_mode(
     client: httpx.AsyncClient,
 ) -> None:

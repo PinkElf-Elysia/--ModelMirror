@@ -25,6 +25,7 @@ def test_registry_list_returns_builtin_nodes() -> None:
         "tool_audit",
         "mcp_tools",
         "context_compression",
+        "xpert_file_memory",
         "structured_output",
         "todo_planner",
         "llm_tool_selector",

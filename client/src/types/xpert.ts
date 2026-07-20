@@ -133,6 +133,19 @@ export interface XpertFileAsset {
   archived_at: number | null;
 }
 
+export type XpertFileMemoryType = "user" | "feedback" | "project" | "reference";
+
+export interface XpertMemoryUsage {
+  recall_count: number;
+  detail_read_count: number;
+  explicit_write_count: number;
+  candidate_count: number;
+  correction_count: number;
+  usefulness_score: number;
+  last_recalled_at: number | null;
+  last_detail_read_at: number | null;
+}
+
 export interface XpertMemoryRecord {
   memory_id: string;
   xpert_id: string;
@@ -145,6 +158,15 @@ export interface XpertMemoryRecord {
   status: "active" | "archived";
   created_at: number;
   updated_at: number;
+  type?: XpertFileMemoryType;
+  memory_type?: XpertFileMemoryType;
+  title?: string;
+  summary?: string;
+  revision?: number;
+  canonical_ref?: string;
+  source_refs?: string[];
+  confidence?: number | null;
+  usage?: XpertMemoryUsage;
 }
 
 export interface XpertMemoryCandidate {
@@ -155,10 +177,44 @@ export interface XpertMemoryCandidate {
   content: string;
   tags: string[];
   source_run_id: string | null;
-  status: "pending" | "approved" | "rejected";
+  status: "pending" | "approved" | "rejected" | "conflict";
   created_at: number;
   decided_at: number | null;
   memory_id: string | null;
+  revision?: number;
+  action?: "create" | "update";
+  type?: XpertFileMemoryType;
+  memory_type?: XpertFileMemoryType;
+  title?: string;
+  summary?: string;
+  target_memory_id?: string | null;
+  base_revision?: number | null;
+  source_refs?: string[];
+  confidence?: number | null;
+  error?: string | null;
+}
+
+export interface XpertFileMemoryIndex {
+  version: string;
+  active_count: number;
+  archived_count: number;
+  type_counts: Record<XpertFileMemoryType, number>;
+  signal_count: number;
+  index_revision: number;
+  updated_at: number | null;
+  content: string;
+}
+
+export interface XpertFileMemorySignal {
+  signal_id: string;
+  xpert_id: string;
+  memory_id: string | null;
+  signal_type: string;
+  conversation_id: string | null;
+  query_hash: string | null;
+  source_ref: string | null;
+  metadata: Record<string, unknown>;
+  created_at: number;
 }
 
 export interface XpertAppPolicy {

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import re
+from collections.abc import Awaitable, Callable
+from typing import Literal
 
 from fastapi import APIRouter, File, HTTPException, Query, UploadFile
 from pydantic import BaseModel, Field
@@ -10,6 +12,7 @@ from .context import (
     MAX_FILE_BYTES,
     CandidateStatus,
     MemoryScope,
+    XpertContextConflictError,
     XpertContextError,
     XpertContextNotFoundError,
     XpertContextStore,
@@ -44,6 +47,7 @@ except ModuleNotFoundError:
 router = APIRouter(prefix="/api/xperts", tags=["xperts"])
 _xpert_store: XpertStore | None = None
 _xpert_context_store: XpertContextStore | None = None
+_memory_writeback_runner: Callable[..., Awaitable[list[dict]]] | None = None
 
 
 def _validate_installed_skills(
@@ -115,12 +119,59 @@ class XpertConversationCreateRequest(BaseModel):
 
 
 class XpertMemoryCreateRequest(BaseModel):
-    content: str = Field(min_length=1, max_length=4000)
+    content: str = Field(min_length=1, max_length=20000)
     scope: MemoryScope = "xpert"
     conversation_id: str | None = Field(default=None, max_length=200)
     tags: list[str] = Field(default_factory=list, max_length=10)
     source_type: str = Field(default="user", max_length=80)
     source_id: str | None = Field(default=None, max_length=200)
+    type: Literal["user", "feedback", "project", "reference"] = "project"
+    title: str = Field(default="", max_length=120)
+    summary: str = Field(default="", max_length=500)
+    source_refs: list[str] = Field(default_factory=list, max_length=20)
+    confidence: float | None = Field(default=None, ge=0, le=1)
+
+
+class XpertMemoryUpdateRequest(BaseModel):
+    revision: int = Field(ge=1)
+    content: str | None = Field(default=None, min_length=1, max_length=20000)
+    type: Literal["user", "feedback", "project", "reference"] | None = None
+    title: str | None = Field(default=None, max_length=120)
+    summary: str | None = Field(default=None, max_length=500)
+    tags: list[str] | None = Field(default=None, max_length=20)
+    source_refs: list[str] | None = Field(default=None, max_length=20)
+    confidence: float | None = Field(default=None, ge=0, le=1)
+
+
+class XpertMemoryCandidateUpdateRequest(BaseModel):
+    revision: int = Field(ge=1)
+    content: str | None = Field(default=None, min_length=1, max_length=20000)
+    type: Literal["user", "feedback", "project", "reference"] | None = None
+    title: str | None = Field(default=None, max_length=120)
+    summary: str | None = Field(default=None, max_length=500)
+    tags: list[str] | None = Field(default=None, max_length=20)
+    action: Literal["create", "update"] | None = None
+    target_memory_id: str | None = Field(default=None, max_length=200)
+    base_revision: int | None = Field(default=None, ge=1)
+    source_refs: list[str] | None = Field(default=None, max_length=20)
+    confidence: float | None = Field(default=None, ge=0, le=1)
+
+
+class XpertMemoryDecisionRequest(BaseModel):
+    revision: int | None = Field(default=None, ge=1)
+
+
+class XpertMemoryWritebackRequest(BaseModel):
+    conversation_id: str | None = Field(default=None, max_length=200)
+    model_id: str | None = Field(default=None, max_length=300)
+    scope: MemoryScope = "xpert"
+
+
+def configure_memory_writeback_runner(
+    runner: Callable[..., Awaitable[list[dict]]] | None,
+) -> None:
+    global _memory_writeback_runner
+    _memory_writeback_runner = runner
 
 
 def get_xpert_store() -> XpertStore:
@@ -160,6 +211,8 @@ def _raise_store_error(exc: Exception) -> None:
 def _raise_context_error(exc: Exception) -> None:
     if isinstance(exc, XpertContextNotFoundError):
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if isinstance(exc, XpertContextConflictError):
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if isinstance(exc, XpertContextValidationError):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -394,6 +447,11 @@ async def list_xpert_memories(
     scope: str = Query(default="both", pattern="^(conversation|xpert|both)$"),
     conversation_id: str | None = None,
     search: str = Query(default="", max_length=500),
+    type: str | None = Query(
+        default=None,
+        pattern="^(user|feedback|project|reference)$",
+    ),
+    status: str = Query(default="active", pattern="^(active|archived|conflict)$"),
     limit: int = Query(default=50, ge=1, le=200),
 ) -> dict:
     await _ensure_xpert_exists(xpert_id)
@@ -405,6 +463,8 @@ async def list_xpert_memories(
             scope=scope,
             conversation_id=conversation_id,
             search=search,
+            memory_type=type,
+            status=status,
             limit=limit,
         )
         return {"items": [store.memory_payload(item) for item in items], "total": len(items)}
@@ -426,6 +486,11 @@ async def create_xpert_memory(xpert_id: str, payload: XpertMemoryCreateRequest) 
             tags=payload.tags,
             source_type=payload.source_type,
             source_id=payload.source_id,
+            memory_type=payload.type,
+            title=payload.title,
+            summary=payload.summary,
+            source_refs=payload.source_refs,
+            confidence=payload.confidence,
         )
         return store.memory_payload(item)
     except XpertContextError as exc:
@@ -433,11 +498,20 @@ async def create_xpert_memory(xpert_id: str, payload: XpertMemoryCreateRequest) 
 
 
 @router.delete("/{xpert_id}/memories/{memory_id}")
-async def archive_xpert_memory(xpert_id: str, memory_id: str) -> dict:
+async def archive_xpert_memory(
+    xpert_id: str,
+    memory_id: str,
+    revision: int | None = Query(default=None, ge=1),
+) -> dict:
     await _ensure_xpert_exists(xpert_id)
     try:
         store = get_xpert_context_store()
-        item = await asyncio.to_thread(store.archive_memory, xpert_id, memory_id)
+        item = await asyncio.to_thread(
+            store.archive_memory,
+            xpert_id,
+            memory_id,
+            revision=revision,
+        )
         return store.memory_payload(item)
     except XpertContextError as exc:
         _raise_context_error(exc)
@@ -466,7 +540,11 @@ async def list_xpert_memory_candidates(
 
 
 @router.post("/{xpert_id}/memory-candidates/{candidate_id}/approve")
-async def approve_xpert_memory_candidate(xpert_id: str, candidate_id: str) -> dict:
+async def approve_xpert_memory_candidate(
+    xpert_id: str,
+    candidate_id: str,
+    payload: XpertMemoryDecisionRequest | None = None,
+) -> dict:
     await _ensure_xpert_exists(xpert_id)
     try:
         store = get_xpert_context_store()
@@ -475,6 +553,7 @@ async def approve_xpert_memory_candidate(xpert_id: str, candidate_id: str) -> di
             xpert_id,
             candidate_id,
             approve=True,
+            revision=payload.revision if payload else None,
         )
         return store.candidate_payload(item)
     except XpertContextError as exc:
@@ -482,7 +561,11 @@ async def approve_xpert_memory_candidate(xpert_id: str, candidate_id: str) -> di
 
 
 @router.post("/{xpert_id}/memory-candidates/{candidate_id}/reject")
-async def reject_xpert_memory_candidate(xpert_id: str, candidate_id: str) -> dict:
+async def reject_xpert_memory_candidate(
+    xpert_id: str,
+    candidate_id: str,
+    payload: XpertMemoryDecisionRequest | None = None,
+) -> dict:
     await _ensure_xpert_exists(xpert_id)
     try:
         store = get_xpert_context_store()
@@ -491,7 +574,156 @@ async def reject_xpert_memory_candidate(xpert_id: str, candidate_id: str) -> dic
             xpert_id,
             candidate_id,
             approve=False,
+            revision=payload.revision if payload else None,
         )
         return store.candidate_payload(item)
+    except XpertContextError as exc:
+        _raise_context_error(exc)
+
+
+@router.patch("/{xpert_id}/memory-candidates/{candidate_id}")
+async def update_xpert_memory_candidate(
+    xpert_id: str,
+    candidate_id: str,
+    payload: XpertMemoryCandidateUpdateRequest,
+) -> dict:
+    await _ensure_xpert_exists(xpert_id)
+    try:
+        store = get_xpert_context_store()
+        item = await asyncio.to_thread(
+            store.update_candidate,
+            xpert_id,
+            candidate_id,
+            revision=payload.revision,
+            content=payload.content,
+            memory_type=payload.type,
+            title=payload.title,
+            summary=payload.summary,
+            tags=payload.tags,
+            action=payload.action,
+            target_memory_id=payload.target_memory_id,
+            base_revision=payload.base_revision,
+            source_refs=payload.source_refs,
+            confidence=payload.confidence,
+        )
+        return store.candidate_payload(item)
+    except XpertContextError as exc:
+        _raise_context_error(exc)
+
+
+@router.get("/{xpert_id}/file-memory/index")
+async def get_xpert_file_memory_index(xpert_id: str) -> dict:
+    await _ensure_xpert_exists(xpert_id)
+    try:
+        return await asyncio.to_thread(
+            get_xpert_context_store().file_memory_index,
+            xpert_id,
+        )
+    except XpertContextError as exc:
+        _raise_context_error(exc)
+
+
+@router.get("/{xpert_id}/file-memory/signals")
+async def list_xpert_file_memory_signals(
+    xpert_id: str,
+    memory_id: str | None = None,
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict:
+    await _ensure_xpert_exists(xpert_id)
+    try:
+        items = await asyncio.to_thread(
+            get_xpert_context_store().file_memory_signals,
+            xpert_id,
+            memory_id=memory_id,
+            limit=limit,
+        )
+        return {"items": items, "total": len(items)}
+    except XpertContextError as exc:
+        _raise_context_error(exc)
+
+
+@router.get("/{xpert_id}/file-memory/{memory_id}")
+async def get_xpert_file_memory(xpert_id: str, memory_id: str) -> dict:
+    await _ensure_xpert_exists(xpert_id)
+    try:
+        store = get_xpert_context_store()
+        item = await asyncio.to_thread(
+            store.get_memory,
+            xpert_id,
+            memory_id,
+            record_detail_read=True,
+        )
+        if item.scope != "xpert":
+            raise XpertContextNotFoundError("Xpert file memory not found.")
+        return store.memory_payload(item)
+    except XpertContextError as exc:
+        _raise_context_error(exc)
+
+
+@router.patch("/{xpert_id}/file-memory/{memory_id}")
+async def update_xpert_file_memory(
+    xpert_id: str,
+    memory_id: str,
+    payload: XpertMemoryUpdateRequest,
+) -> dict:
+    await _ensure_xpert_exists(xpert_id)
+    try:
+        store = get_xpert_context_store()
+        item = await asyncio.to_thread(
+            store.update_memory,
+            xpert_id,
+            memory_id,
+            revision=payload.revision,
+            content=payload.content,
+            memory_type=payload.type,
+            title=payload.title,
+            summary=payload.summary,
+            tags=payload.tags,
+            source_refs=payload.source_refs,
+            confidence=payload.confidence,
+        )
+        if item.scope != "xpert":
+            raise XpertContextNotFoundError("Xpert file memory not found.")
+        return store.memory_payload(item)
+    except XpertContextError as exc:
+        _raise_context_error(exc)
+
+
+@router.delete("/{xpert_id}/file-memory/{memory_id}")
+async def archive_xpert_file_memory(
+    xpert_id: str,
+    memory_id: str,
+    revision: int = Query(ge=1),
+) -> dict:
+    await _ensure_xpert_exists(xpert_id)
+    try:
+        store = get_xpert_context_store()
+        item = await asyncio.to_thread(
+            store.archive_memory,
+            xpert_id,
+            memory_id,
+            revision=revision,
+        )
+        return store.memory_payload(item)
+    except XpertContextError as exc:
+        _raise_context_error(exc)
+
+
+@router.post("/{xpert_id}/file-memory/writeback")
+async def run_xpert_file_memory_writeback(
+    xpert_id: str,
+    payload: XpertMemoryWritebackRequest,
+) -> dict:
+    await _ensure_xpert_exists(xpert_id)
+    if _memory_writeback_runner is None:
+        raise HTTPException(status_code=503, detail="Memory writeback runner is unavailable.")
+    try:
+        items = await _memory_writeback_runner(
+            xpert_id=xpert_id,
+            conversation_id=payload.conversation_id,
+            model_id=payload.model_id,
+            scope=payload.scope,
+        )
+        return {"items": items, "total": len(items)}
     except XpertContextError as exc:
         _raise_context_error(exc)

@@ -16,9 +16,17 @@ try:
 except ModuleNotFoundError:
     from rag.document_parser import DocumentParseError, parse_document, supported_extensions
 
+from .file_memory import (
+    FileMemoryConflictError,
+    FileMemoryError,
+    FileMemoryNotFoundError,
+    FileMemoryRecord,
+    XpertFileMemoryStore,
+)
+
 
 MemoryScope = Literal["conversation", "xpert"]
-CandidateStatus = Literal["pending", "approved", "rejected"]
+CandidateStatus = Literal["pending", "approved", "rejected", "conflict"]
 MAX_FILE_BYTES = 10 * 1024 * 1024
 MAX_FILES_PER_CONVERSATION = 20
 MAX_SELECTED_FILES = 5
@@ -36,6 +44,10 @@ class XpertContextNotFoundError(XpertContextError):
 
 class XpertContextValidationError(XpertContextError):
     """Raised when an Xpert context request is invalid."""
+
+
+class XpertContextConflictError(XpertContextError):
+    """Raised when a context resource revision has changed."""
 
 
 @dataclass(slots=True)
@@ -59,6 +71,7 @@ class XpertConversation:
     summary_revision: int = 0
     summary_model_id: str | None = None
     summary_updated_at: float | None = None
+    memory_detail_chars_used: int = 0
     archived: bool = False
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
@@ -93,7 +106,15 @@ class XpertMemoryRecord:
     tags: list[str] = field(default_factory=list)
     source_type: str = "user"
     source_id: str | None = None
-    status: Literal["active", "archived"] = "active"
+    status: Literal["active", "archived", "conflict"] = "active"
+    memory_type: Literal["user", "feedback", "project", "reference"] = "project"
+    title: str = ""
+    summary: str = ""
+    revision: int = 1
+    canonical_ref: str = ""
+    source_refs: list[str] = field(default_factory=list)
+    confidence: float | None = None
+    usage: dict[str, Any] = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
 
@@ -111,6 +132,16 @@ class MemoryWriteCandidate:
     created_at: float = field(default_factory=time.time)
     decided_at: float | None = None
     memory_id: str | None = None
+    revision: int = 1
+    action: Literal["create", "update"] = "create"
+    memory_type: Literal["user", "feedback", "project", "reference"] = "project"
+    title: str = ""
+    summary: str = ""
+    target_memory_id: str | None = None
+    base_revision: int | None = None
+    source_refs: list[str] = field(default_factory=list)
+    confidence: float | None = None
+    error: str | None = None
 
 
 class XpertContextStore:
@@ -128,6 +159,7 @@ class XpertContextStore:
         self.context_dir = self.storage_dir / "xpert_context"
         self.files_dir = self.context_dir / "files"
         self.snapshot_path = self.context_dir / "context.json"
+        self.file_memory_store = XpertFileMemoryStore(self.context_dir / "file_memory")
         self._lock = threading.RLock()
         self._conversations: dict[str, XpertConversation] = {}
         self._assets: dict[str, XpertFileAsset] = {}
@@ -218,6 +250,28 @@ class XpertContextStore:
             conversation.updated_at = time.time()
             self._persist_unlocked()
             return conversation
+
+    def claim_memory_detail_budget(
+        self,
+        xpert_id: str,
+        conversation_id: str,
+        *,
+        requested_chars: int,
+        session_limit: int,
+    ) -> int:
+        """Atomically reserve durable-memory detail characters for a conversation."""
+
+        requested = max(0, int(requested_chars))
+        limit = max(0, int(session_limit))
+        with self._lock:
+            conversation = self._require_conversation_unlocked(xpert_id, conversation_id)
+            remaining = max(0, limit - int(conversation.memory_detail_chars_used or 0))
+            granted = min(requested, remaining)
+            if granted:
+                conversation.memory_detail_chars_used += granted
+                conversation.updated_at = time.time()
+                self._persist_unlocked()
+            return granted
 
     def add_file(
         self,
@@ -400,9 +454,37 @@ class XpertContextStore:
         tags: list[str] | None = None,
         source_type: str = "user",
         source_id: str | None = None,
+        memory_type: str = "project",
+        title: str = "",
+        summary: str = "",
+        source_refs: list[str] | None = None,
+        confidence: float | None = None,
     ) -> XpertMemoryRecord:
-        clean_content = self._required_text(content, "content", 4_000)
+        clean_content = self._required_text(content, "content", 20_000)
         self._validate_memory_scope(xpert_id, scope, conversation_id)
+        if scope == "xpert":
+            try:
+                item = self.file_memory_store.create_memory(
+                    xpert_id,
+                    content=clean_content,
+                    memory_type=memory_type,
+                    title=title,
+                    summary=summary,
+                    tags=tags,
+                    source_type=source_type,
+                    source_id=source_id,
+                    source_refs=source_refs,
+                    confidence=confidence,
+                )
+                self.file_memory_store.record_signal(
+                    xpert_id,
+                    "explicit_write",
+                    memory_id=item.memory_id,
+                    source_ref=source_id,
+                )
+                return self._file_memory_record(item)
+            except FileMemoryError as exc:
+                raise XpertContextValidationError(str(exc)) from exc
         record = XpertMemoryRecord(
             memory_id=str(uuid.uuid4()),
             xpert_id=xpert_id,
@@ -412,18 +494,44 @@ class XpertContextStore:
             tags=self._clean_tags(tags),
             source_type=source_type[:80] or "user",
             source_id=source_id,
+            memory_type=self._memory_type(memory_type),
+            title=(title.strip()[:120] or self._memory_title(clean_content)),
+            summary=(summary.strip()[:500] or self._memory_summary(clean_content)),
         )
         with self._lock:
             self._memories[record.memory_id] = record
             self._persist_unlocked()
         return record
 
-    def get_memory(self, xpert_id: str, memory_id: str) -> XpertMemoryRecord:
+    def get_memory(
+        self,
+        xpert_id: str,
+        memory_id: str,
+        *,
+        record_detail_read: bool = False,
+        conversation_id: str | None = None,
+    ) -> XpertMemoryRecord:
         with self._lock:
             record = self._memories.get(memory_id)
-            if record is None or record.xpert_id != xpert_id:
-                raise XpertContextNotFoundError("Xpert memory not found.")
-            return record
+            if record is not None:
+                if record.xpert_id != xpert_id:
+                    raise XpertContextNotFoundError("Xpert memory not found.")
+                if record.scope == "conversation":
+                    return record
+            self._migrate_xpert_memories_unlocked(xpert_id)
+        try:
+            return self._file_memory_record(
+                self.file_memory_store.get_memory(
+                    xpert_id,
+                    memory_id,
+                    record_detail_read=record_detail_read,
+                    conversation_id=conversation_id,
+                )
+            )
+        except FileMemoryNotFoundError as exc:
+            raise XpertContextNotFoundError(str(exc)) from exc
+        except FileMemoryError as exc:
+            raise XpertContextError(str(exc)) from exc
 
     def list_memories(
         self,
@@ -432,29 +540,47 @@ class XpertContextStore:
         scope: Literal["conversation", "xpert", "both"] = "both",
         conversation_id: str | None = None,
         search: str = "",
+        memory_type: str | None = None,
+        status: str = "active",
         limit: int = 50,
     ) -> list[XpertMemoryRecord]:
         query = search.strip().lower()
         with self._lock:
-            items = [
+            if scope in {"xpert", "both"}:
+                self._migrate_xpert_memories_unlocked(xpert_id)
+            conversation_items = [
                 item
                 for item in self._memories.values()
                 if item.xpert_id == xpert_id
-                and item.status == "active"
-                and (scope == "both" or item.scope == scope)
-                and (
-                    item.scope == "xpert"
-                    or (
-                        conversation_id is not None
-                        and item.conversation_id == conversation_id
-                    )
-                )
+                and item.scope == "conversation"
+                and (scope in {"conversation", "both"})
+                and item.status == status
+                and conversation_id is not None
+                and item.conversation_id == conversation_id
                 and (
                     not query
+                    or query in item.title.lower()
+                    or query in item.summary.lower()
                     or query in item.content.lower()
                     or any(query in tag.lower() for tag in item.tags)
                 )
             ]
+        file_items: list[XpertMemoryRecord] = []
+        if scope in {"xpert", "both"}:
+            try:
+                file_items = [
+                    self._file_memory_record(item)
+                    for item in self.file_memory_store.list_memories(
+                        xpert_id,
+                        search=search,
+                        memory_type=memory_type,
+                        status=status,
+                        limit=max(limit, 200),
+                    )
+                ]
+            except FileMemoryError as exc:
+                raise XpertContextError(str(exc)) from exc
+        items = [*conversation_items, *file_items]
         items.sort(key=lambda item: item.updated_at, reverse=True)
         return items[: max(1, min(limit, 200))]
 
@@ -466,16 +592,37 @@ class XpertContextStore:
         scope: Literal["conversation", "xpert", "both"] = "both",
         conversation_id: str | None = None,
         limit: int = 10,
+        record_recall: bool = True,
     ) -> list[XpertMemoryRecord]:
+        selected: list[XpertMemoryRecord] = []
+        if scope in {"xpert", "both"}:
+            with self._lock:
+                self._migrate_xpert_memories_unlocked(xpert_id)
+            try:
+                selected.extend(
+                    self._file_memory_record(item)
+                    for item in self.file_memory_store.search_memories(
+                        xpert_id,
+                        query,
+                        limit=limit,
+                        conversation_id=conversation_id,
+                        record_recall=record_recall,
+                    )
+                )
+            except FileMemoryError as exc:
+                raise XpertContextError(str(exc)) from exc
         candidates = self.list_memories(
             xpert_id,
-            scope=scope,
+            scope="conversation" if scope in {"conversation", "both"} else "conversation",
             conversation_id=conversation_id,
             limit=200,
-        )
+        ) if scope in {"conversation", "both"} and conversation_id else []
         clean_query = query.strip().lower()
         if not clean_query:
-            return candidates[:limit]
+            conversation_selected = candidates[:limit]
+            combined = [*selected, *conversation_selected]
+            combined.sort(key=lambda item: item.updated_at, reverse=True)
+            return combined[:limit]
         query_terms = self._search_terms(clean_query)
         now = time.time()
 
@@ -488,16 +635,109 @@ class XpertContextStore:
 
         ranked = [(score(item), item) for item in candidates]
         ranked.sort(key=lambda pair: (pair[0], pair[1].updated_at), reverse=True)
-        matched = [item for value, item in ranked if value > 0]
-        return matched[: max(1, min(limit, 20))]
+        selected.extend(item for value, item in ranked if value > 0)
+        unique = {item.memory_id: item for item in selected}
+        combined = list(unique.values())
+        combined.sort(
+            key=lambda item: (
+                float(item.usage.get("usefulness_score") or 0),
+                item.updated_at,
+            ),
+            reverse=True,
+        )
+        return combined[: max(1, min(limit, 20))]
 
-    def archive_memory(self, xpert_id: str, memory_id: str) -> XpertMemoryRecord:
+    def update_memory(
+        self,
+        xpert_id: str,
+        memory_id: str,
+        *,
+        revision: int,
+        content: str | None = None,
+        memory_type: str | None = None,
+        title: str | None = None,
+        summary: str | None = None,
+        tags: list[str] | None = None,
+        source_refs: list[str] | None = None,
+        confidence: float | None = None,
+    ) -> XpertMemoryRecord:
         with self._lock:
-            record = self.get_memory(xpert_id, memory_id)
-            record.status = "archived"
-            record.updated_at = time.time()
-            self._persist_unlocked()
-            return record
+            record = self._memories.get(memory_id)
+            if record is not None and record.xpert_id == xpert_id and record.scope == "conversation":
+                if record.revision != int(revision):
+                    raise XpertContextConflictError("Xpert memory revision conflict.")
+                if content is not None:
+                    record.content = self._required_text(content, "content", 20_000)
+                if memory_type is not None:
+                    record.memory_type = self._memory_type(memory_type)
+                if title is not None:
+                    record.title = title.strip()[:120] or self._memory_title(record.content)
+                if summary is not None:
+                    record.summary = summary.strip()[:500] or self._memory_summary(record.content)
+                if tags is not None:
+                    record.tags = self._clean_tags(tags)
+                if source_refs is not None:
+                    record.source_refs = self._clean_values(source_refs, limit=20, max_length=300)
+                if confidence is not None:
+                    record.confidence = max(0.0, min(float(confidence), 1.0))
+                record.revision += 1
+                record.updated_at = time.time()
+                self._persist_unlocked()
+                return record
+            self._migrate_xpert_memories_unlocked(xpert_id)
+        try:
+            return self._file_memory_record(
+                self.file_memory_store.update_memory(
+                    xpert_id,
+                    memory_id,
+                    revision=revision,
+                    content=content,
+                    memory_type=memory_type,
+                    title=title,
+                    summary=summary,
+                    tags=tags,
+                    source_refs=source_refs,
+                    confidence=confidence,
+                    source_type="manual",
+                )
+            )
+        except FileMemoryConflictError as exc:
+            raise XpertContextConflictError(str(exc)) from exc
+        except FileMemoryNotFoundError as exc:
+            raise XpertContextNotFoundError(str(exc)) from exc
+        except FileMemoryError as exc:
+            raise XpertContextValidationError(str(exc)) from exc
+
+    def archive_memory(
+        self,
+        xpert_id: str,
+        memory_id: str,
+        *,
+        revision: int | None = None,
+    ) -> XpertMemoryRecord:
+        with self._lock:
+            record = self._memories.get(memory_id)
+            if record is not None and record.xpert_id == xpert_id and record.scope == "conversation":
+                if revision is not None and record.revision != int(revision):
+                    raise XpertContextConflictError("Xpert memory revision conflict.")
+                record.status = "archived"
+                record.revision += 1
+                record.updated_at = time.time()
+                self._persist_unlocked()
+                return record
+            self._migrate_xpert_memories_unlocked(xpert_id)
+        try:
+            return self._file_memory_record(
+                self.file_memory_store.archive_memory(
+                    xpert_id,
+                    memory_id,
+                    revision=revision,
+                )
+            )
+        except FileMemoryConflictError as exc:
+            raise XpertContextConflictError(str(exc)) from exc
+        except FileMemoryNotFoundError as exc:
+            raise XpertContextNotFoundError(str(exc)) from exc
 
     def create_candidate(
         self,
@@ -508,9 +748,23 @@ class XpertContextStore:
         conversation_id: str | None = None,
         tags: list[str] | None = None,
         source_run_id: str | None = None,
+        action: str = "create",
+        memory_type: str = "project",
+        title: str = "",
+        summary: str = "",
+        target_memory_id: str | None = None,
+        base_revision: int | None = None,
+        source_refs: list[str] | None = None,
+        confidence: float | None = None,
     ) -> MemoryWriteCandidate:
-        clean_content = self._required_text(content, "content", 1_000)
+        clean_content = self._required_text(content, "content", 20_000)
         self._validate_memory_scope(xpert_id, scope, conversation_id)
+        clean_action = str(action or "create").strip()
+        if clean_action not in {"create", "update"}:
+            raise XpertContextValidationError("Memory candidate action must be create or update.")
+        clean_type = self._memory_type(memory_type)
+        if clean_action == "update" and not target_memory_id:
+            raise XpertContextValidationError("target_memory_id is required for update candidates.")
         with self._lock:
             for existing in self._candidates.values():
                 if (
@@ -519,6 +773,7 @@ class XpertContextStore:
                     and existing.content.casefold() == clean_content.casefold()
                     and existing.scope == scope
                     and existing.conversation_id == conversation_id
+                    and existing.source_run_id == source_run_id
                 ):
                     return existing
             candidate = MemoryWriteCandidate(
@@ -529,8 +784,81 @@ class XpertContextStore:
                 content=clean_content,
                 tags=self._clean_tags(tags),
                 source_run_id=source_run_id,
+                action=clean_action,  # type: ignore[arg-type]
+                memory_type=clean_type,
+                title=(title.strip()[:120] or self._memory_title(clean_content)),
+                summary=(summary.strip()[:500] or self._memory_summary(clean_content)),
+                target_memory_id=target_memory_id,
+                base_revision=base_revision,
+                source_refs=self._clean_values(source_refs, limit=20, max_length=300),
+                confidence=(
+                    max(0.0, min(float(confidence), 1.0))
+                    if confidence is not None
+                    else None
+                ),
             )
             self._candidates[candidate.candidate_id] = candidate
+            self._persist_unlocked()
+        if scope == "xpert":
+            self.file_memory_store.record_signal(
+                xpert_id,
+                "candidate_created",
+                memory_id=target_memory_id,
+                source_ref=source_run_id,
+                metadata={"action": clean_action, "candidate_id": candidate.candidate_id},
+            )
+        return candidate
+
+    def update_candidate(
+        self,
+        xpert_id: str,
+        candidate_id: str,
+        *,
+        revision: int,
+        content: str | None = None,
+        memory_type: str | None = None,
+        title: str | None = None,
+        summary: str | None = None,
+        tags: list[str] | None = None,
+        action: str | None = None,
+        target_memory_id: str | None = None,
+        base_revision: int | None = None,
+        source_refs: list[str] | None = None,
+        confidence: float | None = None,
+    ) -> MemoryWriteCandidate:
+        with self._lock:
+            candidate = self._candidates.get(candidate_id)
+            if candidate is None or candidate.xpert_id != xpert_id:
+                raise XpertContextNotFoundError("Memory candidate not found.")
+            if candidate.status != "pending":
+                raise XpertContextValidationError("Only pending memory candidates can be edited.")
+            if candidate.revision != int(revision):
+                raise XpertContextConflictError("Memory candidate revision conflict.")
+            if content is not None:
+                candidate.content = self._required_text(content, "content", 20_000)
+            if memory_type is not None:
+                candidate.memory_type = self._memory_type(memory_type)
+            if title is not None:
+                candidate.title = title.strip()[:120] or self._memory_title(candidate.content)
+            if summary is not None:
+                candidate.summary = summary.strip()[:500] or self._memory_summary(candidate.content)
+            if tags is not None:
+                candidate.tags = self._clean_tags(tags)
+            if action is not None:
+                if action not in {"create", "update"}:
+                    raise XpertContextValidationError("Memory candidate action must be create or update.")
+                candidate.action = action  # type: ignore[assignment]
+            if target_memory_id is not None:
+                candidate.target_memory_id = target_memory_id or None
+            if base_revision is not None:
+                candidate.base_revision = int(base_revision)
+            if source_refs is not None:
+                candidate.source_refs = self._clean_values(source_refs, limit=20, max_length=300)
+            if confidence is not None:
+                candidate.confidence = max(0.0, min(float(confidence), 1.0))
+            if candidate.action == "update" and not candidate.target_memory_id:
+                raise XpertContextValidationError("target_memory_id is required for update candidates.")
+            candidate.revision += 1
             self._persist_unlocked()
             return candidate
 
@@ -559,6 +887,7 @@ class XpertContextStore:
         candidate_id: str,
         *,
         approve: bool,
+        revision: int | None = None,
     ) -> MemoryWriteCandidate:
         with self._lock:
             candidate = self._candidates.get(candidate_id)
@@ -566,21 +895,54 @@ class XpertContextStore:
                 raise XpertContextNotFoundError("Memory candidate not found.")
             if candidate.status != "pending":
                 raise XpertContextValidationError("Memory candidate was already decided.")
+            if revision is not None and candidate.revision != int(revision):
+                raise XpertContextConflictError("Memory candidate revision conflict.")
             if approve:
-                memory = self.create_memory(
-                    xpert_id,
-                    content=candidate.content,
-                    scope=candidate.scope,
-                    conversation_id=candidate.conversation_id,
-                    tags=candidate.tags,
-                    source_type="candidate",
-                    source_id=candidate.candidate_id,
-                )
-                candidate.status = "approved"
-                candidate.memory_id = memory.memory_id
+                try:
+                    if candidate.action == "update":
+                        if not candidate.target_memory_id or candidate.base_revision is None:
+                            raise XpertContextValidationError(
+                                "Update candidate needs target_memory_id and base_revision."
+                            )
+                        memory = self.update_memory(
+                            xpert_id,
+                            candidate.target_memory_id,
+                            revision=candidate.base_revision,
+                            content=candidate.content,
+                            memory_type=candidate.memory_type,
+                            title=candidate.title,
+                            summary=candidate.summary,
+                            tags=candidate.tags,
+                            source_refs=candidate.source_refs,
+                            confidence=candidate.confidence,
+                        )
+                    else:
+                        memory = self.create_memory(
+                            xpert_id,
+                            content=candidate.content,
+                            scope=candidate.scope,
+                            conversation_id=candidate.conversation_id,
+                            tags=candidate.tags,
+                            source_type="candidate",
+                            source_id=candidate.candidate_id,
+                            memory_type=candidate.memory_type,
+                            title=candidate.title,
+                            summary=candidate.summary,
+                            source_refs=candidate.source_refs,
+                            confidence=candidate.confidence,
+                        )
+                    candidate.status = "approved"
+                    candidate.memory_id = memory.memory_id
+                    candidate.error = None
+                except XpertContextConflictError as exc:
+                    if "revision conflict" not in str(exc).lower():
+                        raise
+                    candidate.status = "conflict"
+                    candidate.error = str(exc)[:300]
             else:
                 candidate.status = "rejected"
             candidate.decided_at = time.time()
+            candidate.revision += 1
             self._persist_unlocked()
             return candidate
 
@@ -601,11 +963,64 @@ class XpertContextStore:
 
     @staticmethod
     def memory_payload(item: XpertMemoryRecord) -> dict[str, Any]:
-        return asdict(item)
+        payload = asdict(item)
+        payload["type"] = payload.get("memory_type", "project")
+        return payload
 
     @staticmethod
     def candidate_payload(item: MemoryWriteCandidate) -> dict[str, Any]:
-        return asdict(item)
+        payload = asdict(item)
+        payload["type"] = payload.get("memory_type", "project")
+        return payload
+
+    def file_memory_index(self, xpert_id: str) -> dict[str, Any]:
+        with self._lock:
+            self._migrate_xpert_memories_unlocked(xpert_id)
+        try:
+            return {
+                **self.file_memory_store.status(xpert_id),
+                "content": self.file_memory_store.read_index(xpert_id),
+            }
+        except FileMemoryError as exc:
+            raise XpertContextError(str(exc)) from exc
+
+    def file_memory_signals(
+        self,
+        xpert_id: str,
+        *,
+        memory_id: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        with self._lock:
+            self._migrate_xpert_memories_unlocked(xpert_id)
+        try:
+            return [
+                asdict(item)
+                for item in self.file_memory_store.list_signals(
+                    xpert_id,
+                    memory_id=memory_id,
+                    limit=limit,
+                )
+            ]
+        except FileMemoryError as exc:
+            raise XpertContextError(str(exc)) from exc
+
+    def record_file_memory_signal(
+        self,
+        xpert_id: str,
+        signal_type: str,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        try:
+            return asdict(
+                self.file_memory_store.record_signal(
+                    xpert_id,
+                    signal_type,  # type: ignore[arg-type]
+                    **kwargs,
+                )
+            )
+        except FileMemoryError as exc:
+            raise XpertContextError(str(exc)) from exc
 
     def _validate_memory_scope(
         self,
@@ -633,6 +1048,72 @@ class XpertContextStore:
         if conversation.archived:
             raise XpertContextValidationError("Xpert conversation is archived.")
         return conversation
+
+    def _migrate_xpert_memories_unlocked(self, xpert_id: str) -> None:
+        legacy = [
+            item
+            for item in self._memories.values()
+            if item.xpert_id == xpert_id and item.scope == "xpert"
+        ]
+        if not legacy:
+            return
+        migrated_ids: list[str] = []
+        try:
+            for item in legacy:
+                tags = list(item.tags)
+                if "legacy-import" not in tags:
+                    tags.append("legacy-import")
+                self.file_memory_store.create_memory(
+                    xpert_id,
+                    memory_id=item.memory_id,
+                    content=item.content,
+                    memory_type=item.memory_type or "project",
+                    title=item.title or self._memory_title(item.content),
+                    summary=item.summary or self._memory_summary(item.content),
+                    tags=tags,
+                    source_type="legacy-import",
+                    source_id=item.source_id,
+                    source_refs=item.source_refs,
+                    confidence=item.confidence,
+                    created_at=item.created_at,
+                    updated_at=item.updated_at,
+                )
+                if item.status == "archived":
+                    restored = self.file_memory_store.get_memory(xpert_id, item.memory_id)
+                    self.file_memory_store.archive_memory(
+                        xpert_id,
+                        item.memory_id,
+                        revision=restored.revision,
+                    )
+                migrated_ids.append(item.memory_id)
+        except FileMemoryError as exc:
+            raise XpertContextError(f"Failed to migrate Xpert file memory: {exc}") from exc
+        for memory_id in migrated_ids:
+            self._memories.pop(memory_id, None)
+        self._persist_unlocked()
+
+    @staticmethod
+    def _file_memory_record(item: FileMemoryRecord) -> XpertMemoryRecord:
+        return XpertMemoryRecord(
+            memory_id=item.memory_id,
+            xpert_id=item.xpert_id,
+            scope="xpert",
+            content=item.content,
+            tags=list(item.tags),
+            source_type=item.source_type,
+            source_id=item.source_id,
+            status=item.status,
+            memory_type=item.memory_type,
+            title=item.title,
+            summary=item.summary,
+            revision=item.revision,
+            canonical_ref=item.canonical_ref,
+            source_refs=list(item.source_refs),
+            confidence=item.confidence,
+            usage=asdict(item.usage),
+            created_at=item.created_at,
+            updated_at=item.updated_at,
+        )
 
     def _load(self) -> None:
         if not self.snapshot_path.exists():
@@ -699,6 +1180,42 @@ class XpertContextStore:
             if len(result) >= 10:
                 break
         return result
+
+    @staticmethod
+    def _clean_values(
+        values: list[str] | None,
+        *,
+        limit: int,
+        max_length: int,
+    ) -> list[str]:
+        result: list[str] = []
+        for value in values or []:
+            clean = str(value).strip()[:max_length]
+            if clean and clean not in result:
+                result.append(clean)
+            if len(result) >= limit:
+                break
+        return result
+
+    @staticmethod
+    def _memory_type(value: str) -> Literal["user", "feedback", "project", "reference"]:
+        clean = str(value or "project").strip().lower()
+        if clean not in {"user", "feedback", "project", "reference"}:
+            raise XpertContextValidationError(
+                "Memory type must be user, feedback, project, or reference."
+            )
+        return clean  # type: ignore[return-value]
+
+    @staticmethod
+    def _memory_title(content: str) -> str:
+        return next(
+            (line.strip().lstrip("#").strip()[:120] for line in content.splitlines() if line.strip()),
+            "Memory",
+        )
+
+    @staticmethod
+    def _memory_summary(content: str) -> str:
+        return re.sub(r"\s+", " ", content).strip()[:500]
 
     @staticmethod
     def _search_terms(value: str) -> set[str]:

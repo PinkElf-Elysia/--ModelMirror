@@ -129,6 +129,8 @@ def _deployment_preflight(version: XpertVersion, policy: XpertAppPolicy) -> dict
     has_client_runtime = False
     has_private_automation_runtime = False
     has_knowledge_writer = False
+    has_file_memory = False
+    has_file_memory_writeback = False
     contract_forbidden_middleware: set[str] = set()
     hardcoded_forbidden = {
         "human_in_the_loop",
@@ -205,6 +207,16 @@ def _deployment_preflight(version: XpertVersion, policy: XpertAppPolicy) -> dict
             and data.get("runtimeMiddlewareId") == "knowledge_writer"
         ):
             has_knowledge_writer = True
+        if (
+            kind == "runtime_middleware"
+            and data.get("runtimeMiddlewareId") == "xpert_file_memory"
+        ):
+            has_file_memory = True
+            config = data.get("runtimeMiddlewareConfig")
+            config = config if isinstance(config, dict) else {}
+            has_file_memory_writeback = has_file_memory_writeback or _truthy(
+                config.get("writeback_enabled")
+            )
         if kind in {"agent_handoff", "handoff_router"}:
             has_handoff = True
         if kind in {"knowledge_retrieval", "knowledge_citation"}:
@@ -288,6 +300,20 @@ def _deployment_preflight(version: XpertVersion, policy: XpertAppPolicy) -> dict
             {
                 "code": "app_knowledge_writer_forbidden",
                 "message": "Public Xpert Apps cannot create knowledge write proposals.",
+            }
+        )
+    if has_file_memory and not policy.allow_xpert_memory:
+        issues.append(
+            {
+                "code": "app_xpert_file_memory_not_allowed",
+                "message": "This Xpert uses file memory, but App memory access is disabled.",
+            }
+        )
+    if has_file_memory_writeback:
+        issues.append(
+            {
+                "code": "app_xpert_file_memory_write_forbidden",
+                "message": "Public Xpert Apps can only use Xpert file memory in read-only mode.",
             }
         )
     if contract_forbidden_middleware:

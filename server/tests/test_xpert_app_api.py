@@ -545,6 +545,75 @@ def test_deploy_preflight_rejects_browser_runtime(stores) -> None:
     assert any(issue["code"] == "app_browser_forbidden" for issue in result["issues"])
 
 
+def test_deploy_preflight_allows_read_only_file_memory_only_when_enabled(stores) -> None:
+    xpert_store, _ = stores
+    created = xpert_store.create_xpert(name="Memory Helper", slug="memory-helper")
+    draft = created.draft.model_copy(deep=True)
+    agent = next(
+        node for node in draft.workflow.nodes if node.data.get("kind") == "workflow_agent"
+    )
+    middleware = type(agent).model_validate(
+        {
+            "id": "file-memory",
+            "type": "runtime_middleware",
+            "data": {
+                "kind": "runtime_middleware",
+                "runtimeMiddlewareId": "xpert_file_memory",
+                "runtimeMiddlewareKind": "runtime_middleware.xpert_file_memory",
+                "runtimeMiddlewareConfig": {
+                    "recall_mode": "deterministic",
+                    "writeback_enabled": False,
+                },
+            },
+        }
+    )
+    draft.workflow.nodes.append(middleware)
+    draft.workflow.edges.append(
+        type(draft.workflow.edges[0]).model_validate(
+            {
+                "id": "bind-file-memory",
+                "source": middleware.id,
+                "target": agent.id,
+                "sourceHandle": "middleware-binding",
+                "targetHandle": "middleware",
+            }
+        )
+    )
+    updated = xpert_store.update_xpert(
+        created.id, {"draft": draft.model_dump(mode="json")}
+    )
+    read_only_version = xpert_store.publish_xpert(
+        created.id, expected_revision=updated.draft_revision
+    )
+
+    denied = _deployment_preflight(read_only_version, XpertAppPolicy())
+    assert any(
+        issue["code"] == "app_xpert_file_memory_not_allowed"
+        for issue in denied["issues"]
+    )
+    allowed = _deployment_preflight(
+        read_only_version,
+        XpertAppPolicy(allow_xpert_memory=True),
+    )
+    assert allowed["valid"] is True, allowed["issues"]
+
+    middleware.data["runtimeMiddlewareConfig"]["writeback_enabled"] = True
+    updated = xpert_store.update_xpert(
+        created.id, {"draft": draft.model_dump(mode="json")}
+    )
+    writeback_version = xpert_store.publish_xpert(
+        created.id, expected_revision=updated.draft_revision
+    )
+    writeback_denied = _deployment_preflight(
+        writeback_version,
+        XpertAppPolicy(allow_xpert_memory=True),
+    )
+    assert any(
+        issue["code"] == "app_xpert_file_memory_write_forbidden"
+        for issue in writeback_denied["issues"]
+    )
+
+
 def test_deploy_preflight_rejects_client_tools_runtime(stores) -> None:
     xpert_store, _ = stores
     created = xpert_store.create_xpert(name="Client Helper", slug="client-helper")

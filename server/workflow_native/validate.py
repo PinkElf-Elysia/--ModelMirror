@@ -1555,6 +1555,46 @@ def validate_node_configuration(
                 0.95,
                 integer=False,
             )
+        if middleware_id == "xpert_file_memory":
+            recall_mode = str(config.get("recall_mode") or "hybrid").strip()
+            if recall_mode not in {"deterministic", "model", "hybrid"}:
+                issues.append(
+                    ValidationIssue(
+                        code="invalid_xpert_file_memory_recall_mode",
+                        message="xpert_file_memory recall_mode must be deterministic, model, or hybrid.",
+                        node_id=node.id,
+                    )
+                )
+            for name, minimum, maximum in (
+                ("selector_timeout_seconds", 1, 60),
+                ("max_selected", 1, 10),
+                ("digest_limit", 1, 30),
+                ("max_detail_chars_per_turn", 1000, 40000),
+                ("max_detail_chars_per_session", 1000, 200000),
+                ("max_candidates", 1, 3),
+            ):
+                _validate_middleware_number(
+                    issues,
+                    node.id,
+                    config,
+                    name,
+                    minimum,
+                    maximum,
+                    integer=True,
+                )
+            try:
+                per_turn = int(config.get("max_detail_chars_per_turn") or 20000)
+                per_session = int(config.get("max_detail_chars_per_session") or 60000)
+                if per_session < per_turn:
+                    raise ValueError
+            except (TypeError, ValueError):
+                issues.append(
+                    ValidationIssue(
+                        code="invalid_xpert_file_memory_budget",
+                        message="xpert_file_memory session budget must be at least the per-turn budget.",
+                        node_id=node.id,
+                    )
+                )
         if middleware_id == "structured_output":
             raw_schema = config.get("schema_json")
             try:
