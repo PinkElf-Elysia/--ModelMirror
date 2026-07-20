@@ -3,6 +3,7 @@ import { Link, useParams } from "react-router-dom";
 import PageContainer from "../components/PageContainer";
 import WorkflowEditor from "../components/workflow/WorkflowEditor";
 import XpertAppDeploymentPanel from "../components/xpert/XpertAppDeploymentPanel";
+import AuthoringProposalPanel from "../components/authoring/AuthoringProposalPanel";
 import {
   type XpertDefinition,
   type XpertValidationResult,
@@ -273,6 +274,15 @@ export default function XpertStudioPage() {
           )}
         </aside>
       </section>
+
+      <AuthoringProposalPanel
+        kindPrefix="xpert"
+        onApplied={() => {
+          void getXpert(xpert.id).then(setXpert);
+        }}
+        targetId={xpert.id}
+        title="关联 Xpert 提案"
+      />
 
       <XpertAppDeploymentPanel xpert={xpert} />
 

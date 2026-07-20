@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import PageContainer from "../components/PageContainer";
+import AuthoringProposalPanel from "../components/authoring/AuthoringProposalPanel";
 import { type XpertStatus, type XpertSummary } from "../types/xpert";
 import { listXperts } from "../utils/xpertApi";
 
@@ -212,6 +213,14 @@ export default function XpertStudioIndexPage() {
           ))}
         </div>
       </section>
+
+      <AuthoringProposalPanel
+        kindPrefix="xpert"
+        onApplied={() => {
+          void listXperts({ limit: 200 }).then((result) => setItems(result.items));
+        }}
+        title="Xpert 自编写提案"
+      />
 
       {loading ? (
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">

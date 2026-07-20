@@ -611,6 +611,57 @@ def test_deploy_preflight_rejects_client_tools_runtime(stores) -> None:
     )
 
 
+@pytest.mark.parametrize("middleware_id", ["xpert_authoring", "skill_creator"])
+def test_deploy_preflight_rejects_authoring_middleware(
+    stores, middleware_id: str
+) -> None:
+    xpert_store, _ = stores
+    created = xpert_store.create_xpert(
+        name=f"Authoring {middleware_id}",
+        slug=f"authoring-{middleware_id.replace('_', '-')}",
+    )
+    draft = created.draft.model_copy(deep=True)
+    agent = next(
+        node for node in draft.workflow.nodes
+        if node.data.get("kind") == "workflow_agent"
+    )
+    agent.data["toolMode"] = "mcp_tools"
+    raw = {
+        "id": f"middleware-{middleware_id}",
+        "type": "runtime_middleware",
+        "data": {
+            "kind": "runtime_middleware",
+            "runtimeMiddlewareId": middleware_id,
+            "runtimeMiddlewareKind": f"runtime_middleware.{middleware_id}",
+            "runtimeMiddlewareConfig": {},
+        },
+    }
+    draft.workflow.nodes.append(type(agent).model_validate(raw))
+    draft.workflow.edges.append(
+        type(draft.workflow.edges[0]).model_validate(
+            {
+                "id": f"bind-{middleware_id}",
+                "source": raw["id"],
+                "target": agent.id,
+                "sourceHandle": "middleware-binding",
+                "targetHandle": "middleware",
+            }
+        )
+    )
+    updated = xpert_store.update_xpert(
+        created.id, {"draft": draft.model_dump(mode="json")}
+    )
+    version = xpert_store.publish_xpert(
+        created.id, expected_revision=updated.draft_revision
+    )
+
+    result = _deployment_preflight(version, XpertAppPolicy(allow_tools=True))
+    codes = {issue["code"] for issue in result["issues"]}
+
+    assert "app_middleware_contract_forbidden" in codes
+    assert result["valid"] is False
+
+
 def test_deploy_preflight_rejects_private_automation_and_writer(stores) -> None:
     xpert_store, _ = stores
     created = xpert_store.create_xpert(name="Automation Helper", slug="automation-helper")

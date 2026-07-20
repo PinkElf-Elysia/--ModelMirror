@@ -1,5 +1,7 @@
 # workflow-native 自研工作流设计
 
+> 2026-07-18 Authoring Middleware：`xpert_authoring` 与 `skill_creator` 可绑定到 `workflow_agent`，通过 Runtime 工具模式创建版本化提案。审批后只写入 Xpert 或 Workspace Skill 草稿，发布与安装仍需用户显式操作；公开 App/API 禁止两类中间件，完整边界见 `docs/XPERT_AUTHORING.md`。
+
 > 2026-07-18 Client Tools：`client_tools` 可通过 middleware binding 绑定到 `workflow_agent`。工具请求使用持久 `wait_kind=client_tool` 暂停并由配对 Chrome 当前标签页执行；绑定边、classic workflow definition 和既有 SSE 仍兼容。修改页面的工具必须有 HITL 覆盖，公开 Xpert App/API 禁止该中间件，完整边界见 `docs/XPERT_CLIENT_TOOLS.md`。
 
 > 2026-07-16 Browser Runtime：`browser_automation` 可通过 middleware binding 绑定到 `workflow_agent`，仅增加受控 Browser Runtime 工具，不参与控制流。首次域名访问使用持久 `browser_domain` 审批，mutating 工具要求 HITL 覆盖；网络访问由独立 sidecar 双重阻断私网和本机。公开 Xpert App/API 禁止该中间件，完整边界见 `docs/XPERT_BROWSER.md`。
@@ -714,3 +716,9 @@ The Xpert Studio fields `enableFileUnderstanding`, `memoryReadEnabled`, `memoryR
 绑定到 `workflow_agent` 的 `scheduler` 提供作用域受限的 Automation Runtime 工具；它不改变控制流拓扑。自动化定义固定已发布 XpertVersion，支持单次、间隔和带时区五字段 Cron，并通过 occurrence ID、lease、重叠/误触发策略、预算、重试和死信持久执行。HITL 或 Client Tool 只会暂停当前 execution，解决后继续原执行。
 
 `ralph_loop` 在节点最终输出提交前运行有界改进/验证循环，失败仍进入节点原有 retry、fallback 与 `exceptionHandling`。`knowledge_writer` 只创建 Knowledge Inbox pending proposal，不能直接写活动索引。`plugin_hooks` 只在无网 Sandbox 运行已安装 Skill 的显式 Hook manifest。四类中间件均不改变 SSE wire format；公开 Xpert App 部署会被预检阻断。完整边界见 `docs/XPERT_AUTOMATION.md`。
+
+## 2026-07-18 Xpert / Skill Authoring Middleware
+
+`xpert_authoring` 与 `skill_creator` 使用 Agent middleware binding，不参与控制流拓扑。两者要求 `toolMode=mcp_tools`，并从节点配置编译允许创建/更新的动作与目标 ID 范围。工具只创建或校验 proposal，不能调用 Xpert publish 或 Skill install；管理端批准后也只写草稿层。
+
+中间件 registry 的 `config_version / execution_status / requires_tool_mode / app_policy / security_category` 是校验与部署预检共享的安全契约。公开 App 对 `app_policy=forbidden` 的中间件 fail-closed。详细状态机、revision、Skill 包白名单与 API 见 `docs/XPERT_AUTHORING.md`。

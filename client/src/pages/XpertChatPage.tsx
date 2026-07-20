@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import PageContainer from "../components/PageContainer";
+import AuthoringProposalNotice from "../components/authoring/AuthoringProposalNotice";
 import RuntimeApprovalPanel from "../components/runtime/RuntimeApprovalPanel";
 import BrowserSessionPanel from "../components/runtime/BrowserSessionPanel";
 import ClientToolPanel from "../components/runtime/ClientToolPanel";
@@ -834,6 +835,12 @@ export default function XpertChatPage() {
           </div>
 
           <footer className="border-t border-white/10 p-4">
+            <div className="mb-3">
+              <AuthoringProposalNotice
+                sourceId={conversationId}
+                sourceXpertId={xpert.id}
+              />
+            </div>
             {taskId ? (
               <div className="mb-3">
                 <RuntimeApprovalPanel

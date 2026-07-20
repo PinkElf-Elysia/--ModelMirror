@@ -106,6 +106,13 @@ interface AgentHandoffSummary {
   updated_at: number;
 }
 
+interface AuthoringProposalSummary {
+  proposal_id: string;
+  kind: string;
+  source_id: string;
+  status: string;
+}
+
 const nodeTypes = {
   workflowNode: WorkflowNodeCard,
 };
@@ -327,6 +334,9 @@ export default function MetaAgentPage() {
     AgentHandoffSummary[]
   >([]);
   const [handoffInbox, setHandoffInbox] = useState<AgentHandoffSummary[]>([]);
+  const [handoffAuthoringProposals, setHandoffAuthoringProposals] = useState<
+    AuthoringProposalSummary[]
+  >([]);
   const [handoffError, setHandoffError] = useState("");
   const [handoffActionId, setHandoffActionId] = useState<string | null>(null);
   const [handoffStatusFilter, setHandoffStatusFilter] = useState("all");
@@ -398,6 +408,19 @@ export default function MetaAgentPage() {
         throw new Error(errorMessage(payload, "Handoff Inbox failed to load."));
       }
       setHandoffInbox(payload);
+      try {
+        const proposalResponse = await fetch(
+          "/api/runtime/authoring-proposals?status=pending&limit=500",
+        );
+        if (proposalResponse.ok) {
+          const proposalPayload = (await proposalResponse.json()) as {
+            items?: AuthoringProposalSummary[];
+          };
+          setHandoffAuthoringProposals(proposalPayload.items ?? []);
+        }
+      } catch {
+        // Proposal summaries are optional and must not break Handoff Inbox.
+      }
       setHandoffError("");
     } catch (handoffLoadError) {
       setHandoffError(
@@ -1251,6 +1274,23 @@ export default function MetaAgentPage() {
                       {handoff.reason}
                     </p>
                     {renderHandoffMetaSummary(handoff)}
+                    {handoffAuthoringProposals.some(
+                      (proposal) => proposal.source_id === handoff.handoff_id,
+                    ) ? (
+                      <div className="mt-2 flex items-center justify-between gap-2 rounded-md border border-violet-300/20 bg-violet-300/[0.07] px-2 py-1.5 text-[10px] text-violet-100">
+                        <span>
+                          {
+                            handoffAuthoringProposals.filter(
+                              (proposal) => proposal.source_id === handoff.handoff_id,
+                            ).length
+                          } 条自编写提案待审核
+                        </span>
+                        <span className="flex gap-2">
+                          <Link to="/agents/studio">Xpert</Link>
+                          <Link to="/skills?tab=proposals">Skill</Link>
+                        </span>
+                      </div>
+                    ) : null}
                     <p className="mt-1 break-all text-[11px] text-slate-500">
                       task: {handoff.task_id}
                     </p>

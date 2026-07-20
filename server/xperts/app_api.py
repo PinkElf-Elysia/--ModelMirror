@@ -30,6 +30,11 @@ from .app_store import (
 from .models import XpertConversationMessage, XpertRunRequest, XpertVersion
 from .store import XpertNotFoundError, XpertStoreError
 
+try:
+    from server.xpert_runtime.middleware_registry import runtime_middleware_registry
+except ModuleNotFoundError:
+    from xpert_runtime.middleware_registry import runtime_middleware_registry
+
 
 router = APIRouter(tags=["xpert-apps"])
 _app_store: XpertAppStore | None = None
@@ -124,9 +129,30 @@ def _deployment_preflight(version: XpertVersion, policy: XpertAppPolicy) -> dict
     has_client_runtime = False
     has_private_automation_runtime = False
     has_knowledge_writer = False
+    contract_forbidden_middleware: set[str] = set()
+    hardcoded_forbidden = {
+        "human_in_the_loop",
+        "sandbox_files",
+        "sandbox_shell",
+        "skills_runtime",
+        "browser_automation",
+        "client_tools",
+        "scheduler",
+        "ralph_loop",
+        "plugin_hooks",
+        "knowledge_writer",
+    }
+    registry_forbidden = runtime_middleware_registry.app_forbidden_ids()
     for node in version.workflow.nodes:
         data = node.data if isinstance(node.data, dict) else {}
         kind = str(data.get("kind") or node.type)
+        middleware_id = str(data.get("runtimeMiddlewareId") or "")
+        if (
+            kind == "runtime_middleware"
+            and middleware_id in registry_forbidden
+            and middleware_id not in hardcoded_forbidden
+        ):
+            contract_forbidden_middleware.add(middleware_id)
         if kind == "mcp_tool":
             has_tool_call = True
         if kind in {"agent", "workflow_agent"} and data.get("toolMode") == "mcp_tools":
@@ -262,6 +288,17 @@ def _deployment_preflight(version: XpertVersion, policy: XpertAppPolicy) -> dict
             {
                 "code": "app_knowledge_writer_forbidden",
                 "message": "Public Xpert Apps cannot create knowledge write proposals.",
+            }
+        )
+    if contract_forbidden_middleware:
+        issues.append(
+            {
+                "code": "app_middleware_contract_forbidden",
+                "message": (
+                    "Public Xpert Apps cannot deploy these private middleware: "
+                    + ", ".join(sorted(contract_forbidden_middleware))
+                    + "."
+                ),
             }
         )
     if has_knowledge or has_dynamic_knowledge_read:

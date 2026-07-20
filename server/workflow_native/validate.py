@@ -1814,6 +1814,30 @@ def validate_node_configuration(
                         node_id=node.id,
                     )
                 )
+        if middleware_id in {"xpert_authoring", "skill_creator"}:
+            allowed_key = (
+                "allowed_xpert_ids"
+                if middleware_id == "xpert_authoring"
+                else "allowed_draft_ids"
+            )
+            allowed_ids = [
+                value.strip()
+                for value in re.split(
+                    r"[,\n]+", str(config.get(allowed_key) or "")
+                )
+                if value.strip()
+            ]
+            if len(allowed_ids) > 50 or any(len(value) > 200 for value in allowed_ids):
+                issues.append(
+                    ValidationIssue(
+                        code="invalid_authoring_target_scope",
+                        message=(
+                            f"{middleware_id} {allowed_key} supports at most 50 "
+                            "resource IDs of 200 characters each."
+                        ),
+                        node_id=node.id,
+                    )
+                )
 
     return issues
 
@@ -2599,6 +2623,20 @@ def validate_automation_middleware_bindings(
                     ValidationIssue(
                         code="scheduler_requires_runtime_tool_mode",
                         message="scheduler requires workflow_agent toolMode=mcp_tools.",
+                        node_id=middleware_node.id,
+                    )
+                )
+            if (
+                middleware_id in {"xpert_authoring", "skill_creator"}
+                and tool_mode != "mcp_tools"
+            ):
+                issues.append(
+                    ValidationIssue(
+                        code="authoring_requires_runtime_tool_mode",
+                        message=(
+                            f"{middleware_id} requires workflow_agent "
+                            "toolMode=mcp_tools."
+                        ),
                         node_id=middleware_node.id,
                     )
                 )

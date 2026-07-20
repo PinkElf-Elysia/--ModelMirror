@@ -1,5 +1,11 @@
 # Xpert Runtime Contract
 
+## Authoring Runtime
+
+`AuthoringProposalStore` 在 Runtime storage 中原子保存 Xpert/Skill 创建与更新提案。运行工具仅能读取 Agent 配置允许的目标并创建 pending proposal；每个 run 最多 5 条，每个来源最多 20 条 pending。管理端编辑、校验、批准、拒绝与取消均使用 revision，目标更新额外固定 `base_revision`。
+
+`AuthoringService` 是唯一草稿写入边界。批准 Xpert 提案只创建或更新 `XpertDraft`，不调用 publish；批准 Skill 提案只创建或更新 `WorkspaceSkillDraft`，不调用安装。公开 App 通过 middleware registry 的 `app_policy` 统一阻断自编写 capability。执行 audit/checkpoint 不保存提案正文、Skill 文件、prompt 或密钥，完整管理正文只由可信接口返回。详见 `docs/XPERT_AUTHORING.md`。
+
 ## Client Tool Host Runtime
 
 Private Workflow、Xpert Chat、Goal 与 Handoff 可以把 `client_tools` 绑定到 `workflow_agent`。Chrome MV3 扩展只在用户主动授权的当前标签页执行固定工具；服务端通过持久请求、通用 `wait_kind=client_tool` 和 `ClientToolCoordinator` 从原执行断点恢复。
