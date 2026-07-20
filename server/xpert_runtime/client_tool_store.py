@@ -38,6 +38,22 @@ MUTATING_CLIENT_TOOLS = {
     "host_page_select",
     "host_page_press",
     "host_page_navigate",
+    "office_powerpoint_add_slide",
+    "office_powerpoint_delete_slide",
+    "office_powerpoint_add_text_box",
+    "office_powerpoint_add_shape",
+    "office_powerpoint_update_shape",
+    "office_powerpoint_delete_shape",
+    "office_powerpoint_insert_image",
+    "office_word_insert_text",
+    "office_word_replace_selection",
+    "office_word_insert_heading",
+    "office_word_insert_table",
+    "office_excel_set_range_values",
+    "office_excel_add_worksheet",
+    "office_excel_delete_worksheet",
+    "office_excel_autofit_range",
+    "office_excel_add_table",
 }
 
 
@@ -69,6 +85,10 @@ class ClientHost:
     capabilities: list[dict[str, Any]] = field(default_factory=list)
     schema_hashes: dict[str, str] = field(default_factory=dict)
     bound_tab: dict[str, Any] = field(default_factory=dict)
+    host_type: str = "chrome"
+    office_app: str = ""
+    document_binding: dict[str, Any] = field(default_factory=dict)
+    requirement_sets: list[str] = field(default_factory=list)
     revoked: bool = False
     connection_id: str | None = None
     created_at: float = field(default_factory=time.time)
@@ -84,6 +104,7 @@ class ClientHostPairing:
     status: str
     created_at: float
     expires_at: float
+    host_type: str = "chrome"
     consumed_at: float | None = None
     host_id: str | None = None
 
@@ -166,10 +187,12 @@ class ClientToolStore:
         self,
         *,
         name: str = "Chrome Host",
+        host_type: str = "chrome",
         ttl_seconds: int = 300,
     ) -> tuple[ClientHostPairing, str]:
         code = f"{secrets.randbelow(100_000_000):08d}"
         now = time.time()
+        normalized_host_type = self._host_type(host_type)
         pairing = ClientHostPairing(
             pairing_id=f"pair_{uuid.uuid4().hex}",
             code_hash=self._hash_secret(code),
@@ -177,6 +200,7 @@ class ClientToolStore:
             status="pending",
             created_at=now,
             expires_at=now + max(30, min(int(ttl_seconds), 300)),
+            host_type=normalized_host_type,
         )
         with self._lock:
             self._expire_pairings_unlocked(now)
@@ -191,6 +215,10 @@ class ClientToolStore:
         version: str = "",
         capabilities: list[dict[str, Any]] | None = None,
         schema_hashes: dict[str, str] | None = None,
+        host_type: str | None = None,
+        office_app: str = "",
+        document_binding: dict[str, Any] | None = None,
+        requirement_sets: list[str] | None = None,
     ) -> tuple[ClientHost, str]:
         now = time.time()
         code_hash = self._hash_secret(str(code).strip())
@@ -209,6 +237,11 @@ class ClientToolStore:
                 raise ClientToolAuthenticationError(
                     "Pairing code is invalid or expired."
                 )
+            normalized_host_type = self._host_type(host_type or pairing.host_type)
+            if normalized_host_type != pairing.host_type:
+                raise ClientToolAuthenticationError(
+                    "Pairing code belongs to another client host type."
+                )
             token = secrets.token_urlsafe(48)
             host = ClientHost(
                 host_id=f"host_{uuid.uuid4().hex}",
@@ -223,6 +256,12 @@ class ClientToolStore:
                 },
                 status="online",
                 last_heartbeat_at=now,
+                host_type=normalized_host_type,
+                office_app=self._office_app(office_app, normalized_host_type),
+                document_binding=self._safe_document_binding(
+                    document_binding or {}, normalized_host_type
+                ),
+                requirement_sets=self._safe_requirement_sets(requirement_sets or []),
             )
             pairing.status = "consumed"
             pairing.consumed_at = now
@@ -249,6 +288,10 @@ class ClientToolStore:
         capabilities: list[dict[str, Any]],
         schema_hashes: dict[str, str],
         bound_tab: dict[str, Any] | None = None,
+        host_type: str | None = None,
+        office_app: str = "",
+        document_binding: dict[str, Any] | None = None,
+        requirement_sets: list[str] | None = None,
     ) -> ClientHost:
         with self._lock:
             host = self.require_host(host_id)
@@ -260,7 +303,15 @@ class ClientToolStore:
             host.schema_hashes = {
                 str(key): str(value) for key, value in schema_hashes.items()
             }
+            normalized_host_type = self._host_type(host_type or host.host_type)
+            if normalized_host_type != host.host_type:
+                raise ClientToolConflictError("Client host type cannot change after pairing.")
             host.bound_tab = self._safe_bound_tab(bound_tab or {})
+            host.office_app = self._office_app(office_app, normalized_host_type)
+            host.document_binding = self._safe_document_binding(
+                document_binding or {}, normalized_host_type
+            )
+            host.requirement_sets = self._safe_requirement_sets(requirement_sets or [])
             host.last_heartbeat_at = now
             host.updated_at = now
             self._persist_unlocked()
@@ -272,6 +323,9 @@ class ClientToolStore:
         *,
         connection_id: str,
         bound_tab: dict[str, Any] | None = None,
+        document_binding: dict[str, Any] | None = None,
+        office_app: str | None = None,
+        requirement_sets: list[str] | None = None,
     ) -> ClientHost:
         with self._lock:
             host = self.require_host(host_id)
@@ -282,6 +336,26 @@ class ClientToolStore:
             host.updated_at = host.last_heartbeat_at
             if bound_tab is not None:
                 host.bound_tab = self._safe_bound_tab(bound_tab)
+            if document_binding is not None:
+                host.document_binding = self._safe_document_binding(
+                    document_binding, host.host_type
+                )
+            if office_app is not None:
+                host.office_app = self._office_app(office_app, host.host_type)
+            if requirement_sets is not None:
+                host.requirement_sets = self._safe_requirement_sets(requirement_sets)
+            self._persist_unlocked()
+            return host
+
+    def unbind_host(self, host_id: str) -> ClientHost:
+        with self._lock:
+            host = self.require_host(host_id)
+            if host.host_type == "office":
+                host.document_binding = {}
+                host.office_app = ""
+            else:
+                host.bound_tab = self._safe_bound_tab({})
+            host.updated_at = time.time()
             self._persist_unlocked()
             return host
 
@@ -606,6 +680,10 @@ class ClientToolStore:
             "capabilities": list(host.capabilities),
             "schema_hashes": dict(host.schema_hashes),
             "bound_tab": dict(host.bound_tab),
+            "host_type": host.host_type,
+            "office_app": host.office_app,
+            "document_binding": dict(host.document_binding),
+            "requirement_sets": list(host.requirement_sets),
             "revoked": host.revoked,
             "created_at": host.created_at,
             "updated_at": host.updated_at,
@@ -722,6 +800,45 @@ class ClientToolStore:
         }
 
     @staticmethod
+    def _host_type(value: Any) -> str:
+        normalized = str(value or "chrome").strip().lower()
+        if normalized not in {"chrome", "office"}:
+            raise ClientToolConflictError("host_type must be chrome or office.")
+        return normalized
+
+    @staticmethod
+    def _office_app(value: Any, host_type: str) -> str:
+        if host_type != "office":
+            return ""
+        normalized = str(value or "").strip().lower()
+        if normalized and normalized not in {"word", "excel", "powerpoint"}:
+            raise ClientToolConflictError("Unsupported Office host application.")
+        return normalized
+
+    @staticmethod
+    def _safe_document_binding(value: dict[str, Any], host_type: str) -> dict[str, Any]:
+        if host_type != "office" or not bool(value.get("bound")):
+            return {}
+        return {
+            "bound": True,
+            "binding_id": str(
+                value.get("binding_id") or value.get("documentBindingId") or ""
+            )[:120],
+            "title": str(value.get("title") or "")[:300],
+            "revision": max(0, int(value.get("revision") or 0)),
+        }
+
+    @staticmethod
+    def _safe_requirement_sets(values: list[Any]) -> list[str]:
+        return sorted(
+            {
+                str(value).strip()[:80]
+                for value in values[:40]
+                if str(value).strip()
+            }
+        )
+
+    @staticmethod
     def _safe_result_metadata(value: dict[str, Any]) -> dict[str, Any]:
         allowed = {
             "artifact_id",
@@ -731,6 +848,10 @@ class ClientToolStore:
             "origin",
             "title",
             "element_count",
+            "office_app",
+            "document_binding_id",
+            "operation_receipt",
+            "result_length",
         }
         return {key: value[key] for key in allowed if key in value}
 
@@ -768,11 +889,16 @@ class ClientToolStore:
         try:
             payload = json.loads(self.snapshot_path.read_text(encoding="utf-8"))
             for raw in payload.get("hosts", []):
+                raw.setdefault("host_type", "chrome")
+                raw.setdefault("office_app", "")
+                raw.setdefault("document_binding", {})
+                raw.setdefault("requirement_sets", [])
                 item = ClientHost(**raw)
                 item.status = "revoked" if item.revoked else "offline"
                 item.connection_id = None
                 self._hosts[item.host_id] = item
             for raw in payload.get("pairings", []):
+                raw.setdefault("host_type", "chrome")
                 item = ClientHostPairing(**raw)
                 self._pairings[item.pairing_id] = item
             for raw in payload.get("requests", []):

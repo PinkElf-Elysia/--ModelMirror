@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import uuid
 import zipfile
+from html import escape
 from pathlib import Path
 from typing import Any
 
@@ -31,27 +33,33 @@ from .client_tool_store import (
     ClientToolStore,
 )
 from .client_toolset import CLIENT_TOOLS, client_tool_schema_hash
+from .office_toolset import OFFICE_TOOLS, OFFICE_TOOL_REQUIREMENTS
+from .sandbox_store import SandboxWorkspaceStore
 
 
 router = APIRouter(prefix="/api/runtime", tags=["runtime-client-tools"])
 _store: ClientToolStore | None = None
 _connections: ClientToolConnectionManager | None = None
 _coordinator: ClientToolCoordinator | None = None
+_sandbox_store: SandboxWorkspaceStore | None = None
 
 
 class PairingCreateRequest(BaseModel):
     name: str = Field(default="Chrome Host", max_length=100)
+    host_type: str = Field(default="chrome", pattern="^(chrome|office)$")
 
 
 def configure_runtime_client_tools(
     store: ClientToolStore,
     connections: ClientToolConnectionManager,
     coordinator: ClientToolCoordinator | None = None,
+    sandbox_store: SandboxWorkspaceStore | None = None,
 ) -> None:
-    global _store, _connections, _coordinator
+    global _store, _connections, _coordinator, _sandbox_store
     _store = store
     _connections = connections
     _coordinator = coordinator
+    _sandbox_store = sandbox_store
 
 
 def configure_client_tool_coordinator(coordinator: ClientToolCoordinator) -> None:
@@ -69,6 +77,34 @@ def get_connections() -> ClientToolConnectionManager:
     if _connections is None:
         raise RuntimeError("Client tool connections are not configured.")
     return _connections
+
+
+def _serialize_request_with_host(
+    request: Any, *, include_result: bool = False
+) -> dict[str, Any]:
+    payload = get_store().serialize_request(request, include_result=include_result)
+    try:
+        host = get_store().require_host(request.host_id)
+    except Exception:
+        return payload
+    payload.update(
+        {
+            "host_type": host.host_type,
+            "office_app": host.office_app or None,
+            "document_binding": (
+                {
+                    "bound": bool(host.document_binding.get("bound")),
+                    "title": str(host.document_binding.get("title") or "")[:300],
+                    "binding_id": str(
+                        host.document_binding.get("binding_id") or ""
+                    )[:120],
+                }
+                if host.host_type == "office"
+                else None
+            ),
+        }
+    )
+    return payload
 
 
 def _raise_error(exc: Exception) -> None:
@@ -103,6 +139,79 @@ async def client_tool_capabilities() -> dict[str, Any]:
     }
 
 
+@router.get("/office-host/capabilities")
+async def office_host_capabilities() -> dict[str, Any]:
+    return {
+        "version": "modelmirror-office-tools-v1",
+        "protocol": "modelmirror-client-tools-v1",
+        "hosts": ["word", "excel", "powerpoint"],
+        "limits": {
+            "word_characters": 20_000,
+            "excel_rows": 1_000,
+            "excel_columns": 200,
+            "powerpoint_shapes": 200,
+            "input_artifact_bytes": 10 * 1024 * 1024,
+        },
+        "tools": [
+            {
+                "name": tool.name,
+                "description": tool.description,
+                "input_schema": tool.input_schema,
+                "schema_hash": client_tool_schema_hash(tool),
+                "requirements": [
+                    {"set": set_name, "version": version}
+                    for set_name, version in OFFICE_TOOL_REQUIREMENTS.get(
+                        tool.name, []
+                    )
+                ],
+                "mutating": tool.name not in {
+                    "office_powerpoint_snapshot",
+                    "office_powerpoint_select_slide",
+                    "office_word_snapshot",
+                    "office_word_search_text",
+                    "office_excel_snapshot",
+                    "office_excel_get_range",
+                },
+            }
+            for tool in OFFICE_TOOLS
+        ],
+    }
+
+
+@router.get("/office-host/manifest.xml")
+async def office_host_manifest() -> Response:
+    base_url = os.getenv("OFFICE_HOST_BASE_URL", "https://localhost:8443").rstrip("/")
+    source = escape(f"{base_url}/taskpane.html", quote=True)
+    icon = escape(f"{base_url}/assets/icon.svg", quote=True)
+    manifest = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<OfficeApp xmlns="http://schemas.microsoft.com/office/appforoffice/1.1" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:type="TaskPaneApp">
+  <Id>86d31d02-3ba5-4d5a-991b-5d4a620e0f09</Id>
+  <Version>1.0.0.0</Version>
+  <ProviderName>ModelMirror</ProviderName>
+  <DefaultLocale>zh-CN</DefaultLocale>
+  <DisplayName DefaultValue="ModelMirror Xpert Office Host"/>
+  <Description DefaultValue="Bind the current Word, Excel, or PowerPoint document to a private Xpert runtime."/>
+  <IconUrl DefaultValue="{icon}"/>
+  <SupportUrl DefaultValue="{source}"/>
+  <AppDomains><AppDomain>{escape(base_url)}</AppDomain></AppDomains>
+  <Hosts>
+    <Host Name="Document"/>
+    <Host Name="Workbook"/>
+    <Host Name="Presentation"/>
+  </Hosts>
+  <DefaultSettings><SourceLocation DefaultValue="{source}"/></DefaultSettings>
+  <Permissions>ReadWriteDocument</Permissions>
+</OfficeApp>"""
+    return Response(
+        manifest,
+        media_type="application/xml",
+        headers={
+            "Content-Disposition": 'attachment; filename="modelmirror-office-addin.xml"',
+            "Cache-Control": "no-store",
+        },
+    )
+
+
 @router.get("/client-tool-coordinator/status")
 async def client_tool_coordinator_status() -> dict[str, Any]:
     if _coordinator is None:
@@ -114,12 +223,15 @@ async def client_tool_coordinator_status() -> dict[str, Any]:
 async def create_client_host_pairing(
     payload: PairingCreateRequest,
 ) -> dict[str, Any]:
-    pairing, code = get_store().create_pairing(name=payload.name)
+    pairing, code = get_store().create_pairing(
+        name=payload.name, host_type=payload.host_type
+    )
     return {
         "pairing_id": pairing.pairing_id,
         "pairing_code": code,
         "expires_at": pairing.expires_at,
         "single_use": True,
+        "host_type": pairing.host_type,
     }
 
 
@@ -169,6 +281,14 @@ async def revoke_client_host(host_id: str) -> dict[str, Any]:
         _raise_error(exc)
 
 
+@router.post("/client-hosts/{host_id}/unbind")
+async def unbind_client_host(host_id: str) -> dict[str, Any]:
+    try:
+        return get_store().serialize_host(get_store().unbind_host(host_id))
+    except Exception as exc:
+        _raise_error(exc)
+
+
 @router.get("/client-tools/fixture", response_class=HTMLResponse)
 async def client_tool_fixture() -> str:
     return """<!doctype html>
@@ -198,13 +318,13 @@ async def list_client_tool_requests(
         scope_id=scope_id,
         limit=limit,
     )
-    return {"requests": [get_store().serialize_request(item) for item in items]}
+    return {"requests": [_serialize_request_with_host(item) for item in items]}
 
 
 @router.get("/client-tool-requests/{request_id}")
 async def get_client_tool_request(request_id: str) -> dict[str, Any]:
     try:
-        return get_store().serialize_request(
+        return _serialize_request_with_host(
             get_store().require_request(request_id), include_result=True
         )
     except Exception as exc:
@@ -265,6 +385,42 @@ async def upload_client_tool_artifact(
         _raise_error(exc)
 
 
+@router.get(
+    "/client-tool-requests/{request_id}/input-artifacts/{artifact_id}"
+)
+async def download_office_input_artifact(
+    request_id: str,
+    artifact_id: str,
+    x_modelmirror_client_host_id: str = Header(alias="X-ModelMirror-Client-Host-Id"),
+    authorization: str | None = Header(default=None),
+) -> FileResponse:
+    try:
+        token = _bearer_token(authorization)
+        host = get_store().authenticate(x_modelmirror_client_host_id, token)
+        request = get_store().require_request(request_id)
+        if request.host_id != host.host_id or host.host_type != "office":
+            raise ClientToolConflictError("Artifact request belongs to another host.")
+        if request.tool_name != "office_powerpoint_insert_image":
+            raise ClientToolConflictError("Only PowerPoint image insertion accepts artifacts.")
+        if str(request.arguments.get("artifact_id") or "") != artifact_id:
+            raise ClientToolConflictError("Artifact is not assigned to this tool request.")
+        if _sandbox_store is None:
+            raise ClientToolNotFoundError("Sandbox artifact store is unavailable.")
+        artifact = _sandbox_store.get_artifact(artifact_id)
+        workspace = _sandbox_store.get_workspace(artifact.workspace_id)
+        if (
+            workspace.scope_type != request.scope_type
+            or workspace.scope_id != request.scope_id
+        ):
+            raise ClientToolConflictError("Artifact belongs to another runtime scope.")
+        if not artifact.content_type.startswith("image/") or artifact.size_bytes > 10 * 1024 * 1024:
+            raise ClientToolConflictError("Office input artifact must be a bounded image.")
+        path = _sandbox_store.artifact_path(artifact_id)
+        return FileResponse(path, media_type=artifact.content_type, filename=artifact.filename)
+    except Exception as exc:
+        _raise_error(exc)
+
+
 @router.get("/client-tool-artifacts/{artifact_id}")
 async def get_client_tool_artifact(artifact_id: str) -> dict[str, Any]:
     try:
@@ -318,12 +474,28 @@ async def connect_client_tool_host(websocket: WebSocket) -> None:
             else {}
         )
         version = str(first.get("version") or "")
+        host_type = str(first.get("host_type") or "chrome")
+        office_app = str(first.get("office_app") or "")
+        document_binding = (
+            dict(first.get("document_binding") or {})
+            if isinstance(first.get("document_binding"), dict)
+            else {}
+        )
+        requirement_sets = (
+            list(first.get("requirement_sets") or [])
+            if isinstance(first.get("requirement_sets"), list)
+            else []
+        )
         if message_type == "pair":
             host, token = get_store().consume_pairing(
                 str(first.get("pairing_code") or ""),
                 version=version,
                 capabilities=capabilities,
                 schema_hashes=schema_hashes,
+                host_type=host_type,
+                office_app=office_app,
+                document_binding=document_binding,
+                requirement_sets=requirement_sets,
             )
             host_id = host.host_id
             await websocket.send_json(
@@ -335,6 +507,7 @@ async def connect_client_tool_host(websocket: WebSocket) -> None:
                     "token_prefix": host.token_prefix,
                     "paired": True,
                     "heartbeat_seconds": 20,
+                    "host_type": host.host_type,
                 }
             )
         elif message_type == "authenticate":
@@ -350,6 +523,7 @@ async def connect_client_tool_host(websocket: WebSocket) -> None:
                     "token_prefix": host.token_prefix,
                     "paired": False,
                     "heartbeat_seconds": 20,
+                    "host_type": host.host_type,
                 }
             )
         else:
@@ -368,6 +542,10 @@ async def connect_client_tool_host(websocket: WebSocket) -> None:
                 if isinstance(first.get("bound_tab"), dict)
                 else {}
             ),
+            host_type=host_type,
+            office_app=office_app,
+            document_binding=document_binding,
+            requirement_sets=requirement_sets,
         )
         await get_connections().attach(host_id, connection_id, websocket)
         if _coordinator is not None:
@@ -385,6 +563,21 @@ async def connect_client_tool_host(websocket: WebSocket) -> None:
                     bound_tab=(
                         dict(message.get("bound_tab") or {})
                         if isinstance(message.get("bound_tab"), dict)
+                        else None
+                    ),
+                    document_binding=(
+                        dict(message.get("document_binding") or {})
+                        if isinstance(message.get("document_binding"), dict)
+                        else None
+                    ),
+                    office_app=(
+                        str(message.get("office_app"))
+                        if message.get("office_app") is not None
+                        else None
+                    ),
+                    requirement_sets=(
+                        list(message.get("requirement_sets") or [])
+                        if isinstance(message.get("requirement_sets"), list)
                         else None
                     ),
                 )

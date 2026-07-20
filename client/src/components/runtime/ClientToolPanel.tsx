@@ -13,6 +13,13 @@ interface ClientToolRequest {
   error?: string | null;
   result_length: number;
   result_metadata?: { artifact_id?: string };
+  host_type?: "chrome" | "office";
+  office_app?: "word" | "excel" | "powerpoint" | null;
+  document_binding?: {
+    bound: boolean;
+    title?: string;
+    binding_id?: string;
+  } | null;
   updated_at: number;
 }
 
@@ -151,6 +158,11 @@ export default function ClientToolPanel({
                 <div className="min-w-0">
                   <p className="truncate text-xs font-semibold text-slate-200">{request.tool_name}</p>
                   <p className="mt-1 truncate font-mono text-[10px] text-slate-500">{request.host_id}</p>
+                  {request.host_type === "office" ? (
+                    <p className="mt-1 truncate text-[10px] text-emerald-200/80">
+                      Office {request.office_app ?? "host"} · {request.document_binding?.title || "当前文档未绑定"}
+                    </p>
+                  ) : null}
                 </div>
                 <span className={`shrink-0 rounded-full border px-2 py-0.5 text-[10px] ${statusTone(request.status)}`}>
                   {statusLabel(request.status)}
