@@ -38,6 +38,8 @@ def test_registry_list_returns_builtin_nodes() -> None:
         "ralph_loop",
         "knowledge_writer",
         "plugin_hooks",
+        "xpert_authoring",
+        "skill_creator",
     }
     for node in nodes:
         assert node.id
@@ -46,6 +48,18 @@ def test_registry_list_returns_builtin_nodes() -> None:
         assert node.category
         assert isinstance(node.fields, list)
         assert isinstance(node.metadata, dict)
+        assert node.config_version >= 1
+        assert node.execution_status == "real"
+        assert node.app_policy in {"allowed", "forbidden"}
+
+    authoring = registry.get("xpert_authoring")
+    skill_creator = registry.get("skill_creator")
+    assert authoring is not None and skill_creator is not None
+    assert authoring.requires_tool_mode == "mcp_tools"
+    assert skill_creator.requires_tool_mode == "mcp_tools"
+    assert {"xpert_authoring", "skill_creator"}.issubset(
+        registry.app_forbidden_ids()
+    )
 
 
 def test_registry_get_by_id() -> None:

@@ -38,6 +38,11 @@ class RuntimeMiddlewareNode:
     enabled: bool = True
     tags: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
+    config_version: int = 1
+    execution_status: str = "real"
+    requires_tool_mode: str | None = None
+    app_policy: str = "allowed"
+    security_category: str = "general"
 
 
 class RuntimeMiddlewareRegistry:
@@ -63,6 +68,14 @@ class RuntimeMiddlewareRegistry:
         for node in self._nodes.values():
             grouped.setdefault(node.category, []).append(node)
         return grouped
+
+    def app_forbidden_ids(self) -> set[str]:
+        return {
+            node.id
+            for node in self._nodes.values()
+            if node.app_policy == "forbidden"
+            or bool(node.metadata.get("app_forbidden"))
+        }
 
 
 def register_builtin_middleware_nodes(
@@ -100,6 +113,94 @@ def register_builtin_middleware_nodes(
                 "middleware_name": "system_prompt_injector",
                 "runtime_hook": "before_model",
             },
+        )
+    )
+
+    registry.register(
+        RuntimeMiddlewareNode(
+            id="xpert_authoring",
+            kind="runtime_middleware.xpert_authoring",
+            title="Xpert 自编写",
+            description="读取授权草稿并创建版本化 Xpert 提案；批准后只写草稿，不自动发布。",
+            category="agent",
+            icon="Bot",
+            fields=[
+                RuntimeMiddlewareField(
+                    name="allow_create",
+                    label="允许创建提案",
+                    type="boolean",
+                    default=True,
+                ),
+                RuntimeMiddlewareField(
+                    name="allow_update",
+                    label="允许更新提案",
+                    type="boolean",
+                    default=True,
+                ),
+                RuntimeMiddlewareField(
+                    name="allowed_xpert_ids",
+                    label="允许读取/修改的 Xpert ID",
+                    type="textarea",
+                    rows=4,
+                    description="逗号或换行分隔；当前 Xpert 始终可访问自身草稿。",
+                ),
+            ],
+            tags=["agent", "authoring", "xpert", "proposal", "approval"],
+            metadata={
+                "middleware_name": "xpert_authoring",
+                "runtime_hook": "agent_tools",
+                "capability_name": "xpert_authoring_tools",
+                "real_execution": True,
+                "app_forbidden": True,
+                "proposal_only": True,
+            },
+            requires_tool_mode="mcp_tools",
+            app_policy="forbidden",
+            security_category="authoring",
+        )
+    )
+
+    registry.register(
+        RuntimeMiddlewareNode(
+            id="skill_creator",
+            kind="runtime_middleware.skill_creator",
+            title="Skill 创建器",
+            description="创建或修改 Workspace Skill 提案；批准后生成草稿，仍需用户显式安装。",
+            category="tool",
+            icon="WandSparkles",
+            fields=[
+                RuntimeMiddlewareField(
+                    name="allow_create",
+                    label="允许创建提案",
+                    type="boolean",
+                    default=True,
+                ),
+                RuntimeMiddlewareField(
+                    name="allow_update",
+                    label="允许更新提案",
+                    type="boolean",
+                    default=True,
+                ),
+                RuntimeMiddlewareField(
+                    name="allowed_draft_ids",
+                    label="允许读取/修改的 Skill 草稿 ID",
+                    type="textarea",
+                    rows=4,
+                    description="逗号或换行分隔。",
+                ),
+            ],
+            tags=["agent", "skill", "authoring", "proposal", "sandbox"],
+            metadata={
+                "middleware_name": "skill_creator",
+                "runtime_hook": "agent_tools",
+                "capability_name": "skill_creator_tools",
+                "real_execution": True,
+                "app_forbidden": True,
+                "proposal_only": True,
+            },
+            requires_tool_mode="mcp_tools",
+            app_policy="forbidden",
+            security_category="authoring",
         )
     )
 

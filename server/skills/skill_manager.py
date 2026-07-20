@@ -12,6 +12,8 @@ from dataclasses import dataclass, asdict
 from pathlib import Path
 from urllib.parse import urlparse
 
+from .draft_store import SkillDraftValidationError, WorkspaceSkillDraftStore
+
 
 class SkillManagerError(Exception):
     """Base error raised by the Skill manager."""
@@ -123,6 +125,71 @@ class SkillManager:
                 return metadata
             finally:
                 shutil.rmtree(tmp_root, ignore_errors=True)
+
+    def install_workspace_draft(
+        self,
+        *,
+        draft_id: str,
+        slug: str,
+        skill_markdown: str,
+        files: dict[str, str],
+    ) -> InstalledSkill:
+        """Explicitly install a reviewed Workspace Skill draft.
+
+        This path never overwrites an installed Skill. A changed draft must be
+        installed as a new package after another explicit user action.
+        """
+
+        frontmatter = WorkspaceSkillDraftStore._parse_frontmatter(skill_markdown)
+        try:
+            normalized = WorkspaceSkillDraftStore.validate_package(
+                name=frontmatter.get("name", ""),
+                slug=slug,
+                description=frontmatter.get("description", ""),
+                skill_markdown=skill_markdown,
+                files=files,
+            )
+        except SkillDraftValidationError as exc:
+            raise SkillValidationError(str(exc)) from exc
+        clean_slug = normalized["slug"]
+        skill_markdown = normalized["skill_markdown"]
+        files = normalized["files"]
+        suffix = re.sub(r"[^a-z0-9]+", "", draft_id.lower())[-12:]
+        skill_id = self._validate_skill_id(f"workspace-{clean_slug}-{suffix}")
+        with self._lock:
+            self._ensure_dirs()
+            installed = self._read_metadata()
+            if skill_id in installed:
+                raise SkillInstallError(
+                    "This Workspace Skill draft is already installed."
+                )
+            target_dir = self._safe_skill_dir(skill_id)
+            if target_dir.exists():
+                raise SkillInstallError("Workspace Skill target already exists.")
+            temp_dir = Path(
+                tempfile.mkdtemp(prefix=f"{skill_id}-", dir=str(self.tmp_dir))
+            )
+            try:
+                (temp_dir / "SKILL.md").write_text(skill_markdown, encoding="utf-8")
+                for relative_path, content in files.items():
+                    target = temp_dir.joinpath(*relative_path.split("/"))
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text(content, encoding="utf-8")
+                shutil.copytree(temp_dir, target_dir)
+                metadata = self._parse_skill_metadata(
+                    skill_id,
+                    f"workspace://draft/{draft_id}",
+                    "",
+                    target_dir / "SKILL.md",
+                )
+                installed[skill_id] = asdict(metadata)
+                self._write_metadata(installed)
+                return metadata
+            except Exception:
+                shutil.rmtree(target_dir, ignore_errors=True)
+                raise
+            finally:
+                shutil.rmtree(temp_dir, ignore_errors=True)
 
     def uninstall_skill(self, skill_id: str) -> None:
         """Remove an installed Skill by id."""

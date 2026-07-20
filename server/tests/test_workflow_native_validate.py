@@ -1194,6 +1194,41 @@ async def test_scheduler_requires_runtime_tool_mode(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("middleware_id", ["xpert_authoring", "skill_creator"])
+async def test_authoring_middleware_requires_runtime_tool_mode_and_scoped_ids(
+    client: httpx.AsyncClient,
+    middleware_id: str,
+) -> None:
+    workflow = middleware_binding_workflow()
+    middleware = workflow["nodes"][-1]
+    middleware["id"] = middleware_id
+    scope_key = (
+        "allowed_xpert_ids"
+        if middleware_id == "xpert_authoring"
+        else "allowed_draft_ids"
+    )
+    middleware["data"].update(
+        {
+            "runtimeMiddlewareId": middleware_id,
+            "runtimeMiddlewareKind": f"runtime_middleware.{middleware_id}",
+            "runtimeMiddlewareConfig": {
+                "allow_create": True,
+                "allow_update": True,
+                scope_key: "allowed-resource",
+            },
+        }
+    )
+    workflow["edges"][-1]["source"] = middleware_id
+
+    invalid = await validate(client, workflow)
+    assert "authoring_requires_runtime_tool_mode" in issue_codes(invalid)
+
+    workflow["nodes"][1]["data"]["toolMode"] = "mcp_tools"
+    valid = await validate(client, workflow)
+    assert valid["valid"] is True, valid["issues"]
+
+
+@pytest.mark.asyncio
 async def test_automation_middleware_configuration_is_validated(
     client: httpx.AsyncClient,
 ) -> None:

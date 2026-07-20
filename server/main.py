@@ -48,9 +48,13 @@ except ModuleNotFoundError:
     )
 
 try:
-    from server.skills.api import get_skill_manager, router as skills_router
+    from server.skills.api import (
+        get_skill_draft_store,
+        get_skill_manager,
+        router as skills_router,
+    )
 except ModuleNotFoundError:
-    from skills.api import get_skill_manager, router as skills_router
+    from skills.api import get_skill_draft_store, get_skill_manager, router as skills_router
 
 try:
     from server.xperts import (
@@ -156,6 +160,9 @@ try:
         AutomationStore,
         AutomationTargetResult,
         AutomationToolsetProvider,
+        AuthoringProposalStore,
+        AuthoringService,
+        AuthoringToolsetProvider,
         AgentMiddleware,
         ApprovalCoordinator,
         CapabilityRegistry,
@@ -230,6 +237,7 @@ try:
         register_browser_toolset_capability,
         register_client_toolset_capability,
         register_automation_toolset_capability,
+        register_authoring_toolset_capabilities,
         run_tool_with_runtime,
         runtime_middleware_registry,
         runtime_approval_router,
@@ -238,6 +246,8 @@ try:
         runtime_browser_router,
         runtime_client_tool_router,
         runtime_automation_router,
+        runtime_authoring_router,
+        configure_runtime_authoring,
         run_ralph_loop,
         select_runtime_tools,
         todo_planning_instruction,
@@ -255,6 +265,9 @@ except ModuleNotFoundError:
         AutomationStore,
         AutomationTargetResult,
         AutomationToolsetProvider,
+        AuthoringProposalStore,
+        AuthoringService,
+        AuthoringToolsetProvider,
         AgentMiddleware,
         ApprovalCoordinator,
         CapabilityRegistry,
@@ -329,6 +342,7 @@ except ModuleNotFoundError:
         register_browser_toolset_capability,
         register_client_toolset_capability,
         register_automation_toolset_capability,
+        register_authoring_toolset_capabilities,
         run_tool_with_runtime,
         runtime_middleware_registry,
         runtime_approval_router,
@@ -337,6 +351,8 @@ except ModuleNotFoundError:
         runtime_browser_router,
         runtime_client_tool_router,
         runtime_automation_router,
+        runtime_authoring_router,
+        configure_runtime_authoring,
         run_ralph_loop,
         select_runtime_tools,
         todo_planning_instruction,
@@ -509,6 +525,7 @@ app.include_router(runtime_sandbox_router)
 app.include_router(runtime_browser_router)
 app.include_router(runtime_client_tool_router)
 app.include_router(runtime_automation_router)
+app.include_router(runtime_authoring_router)
 
 request_windows: dict[str, deque[float]] = defaultdict(deque)
 mcp_connect_windows: dict[str, deque[float]] = defaultdict(deque)
@@ -577,6 +594,21 @@ client_tool_coordinator: ClientToolCoordinator | None = None
 automation_store = AutomationStore(storage_dir=AGENT_TASK_STORAGE_DIR or None)
 automation_coordinator: AutomationCoordinator | None = None
 workflow_automation_provider: AutomationToolsetProvider | None = None
+authoring_proposal_store = AuthoringProposalStore(
+    storage_dir=AGENT_TASK_STORAGE_DIR or None
+)
+authoring_service = AuthoringService(
+    authoring_proposal_store,
+    get_xpert_store(),
+    get_skill_draft_store(),
+)
+workflow_xpert_authoring_provider = AuthoringToolsetProvider(
+    authoring_service, "xpert"
+)
+workflow_skill_creator_provider = AuthoringToolsetProvider(
+    authoring_service, "skill"
+)
+configure_runtime_authoring(authoring_service)
 runtime_capabilities.register(
     "mcp_tools",
     workflow_mcp_provider,
@@ -598,6 +630,11 @@ runtime_capabilities.register(
     workflow_knowledge_provider,
     description="Active knowledge retrieval and approval-gated write tools.",
 )
+register_authoring_toolset_capabilities(
+    runtime_capabilities,
+    workflow_xpert_authoring_provider,
+    workflow_skill_creator_provider,
+)
 
 
 async def validate_runtime_approval_decision(
@@ -618,6 +655,8 @@ async def validate_runtime_approval_decision(
         workflow_todo_provider,
         workflow_sandbox_provider,
         workflow_browser_provider,
+        workflow_xpert_authoring_provider,
+        workflow_skill_creator_provider,
     ):
         matched_tool = await provider.find_tool(tool_name)
         if matched_tool is not None:
@@ -3093,6 +3132,8 @@ async def _run_workflow_response(
             browser_automation = middleware_spec(specs, "browser_automation")
             client_tools = middleware_spec(specs, "client_tools")
             scheduler = middleware_spec(specs, "scheduler")
+            xpert_authoring = middleware_spec(specs, "xpert_authoring")
+            skill_creator = middleware_spec(specs, "skill_creator")
             if (
                 sandbox_shell is not None
                 and workflow_truthy(
@@ -3216,6 +3257,12 @@ async def _run_workflow_response(
             )
             context_metadata["automation_config"] = (
                 dict(scheduler.config) if scheduler is not None else {}
+            )
+            context_metadata["xpert_authoring_config"] = (
+                dict(xpert_authoring.config) if xpert_authoring is not None else {}
+            )
+            context_metadata["skill_creator_config"] = (
+                dict(skill_creator.config) if skill_creator is not None else {}
             )
             context_metadata["runtime_run_type"] = runtime_run_type
             run_context = task_state.get("runtime_metadata") or {}
@@ -3364,6 +3411,16 @@ async def _run_workflow_response(
             if not matched_tool and workflow_automation_provider is not None:
                 matched_tool = await workflow_automation_provider.find_tool(tool_name)
                 capability_name = "automation_tools"
+            if not matched_tool:
+                matched_tool = await workflow_xpert_authoring_provider.find_tool(
+                    tool_name
+                )
+                capability_name = "xpert_authoring_tools"
+            if not matched_tool:
+                matched_tool = await workflow_skill_creator_provider.find_tool(
+                    tool_name
+                )
+                capability_name = "skill_creator_tools"
             if capability_name == "mcp_tools" and not app_capability_allowed(
                 "allow_tools"
             ):
@@ -3387,6 +3444,11 @@ async def _run_workflow_response(
                 raise PermissionError("Xpert App client tools are disabled.")
             if capability_name == "automation_tools" and runtime_run_type == "xpert_app":
                 raise PermissionError("Xpert App automation tools are disabled.")
+            if capability_name in {
+                "xpert_authoring_tools",
+                "skill_creator_tools",
+            } and runtime_run_type == "xpert_app":
+                raise PermissionError("Xpert App authoring tools are disabled.")
             if not matched_tool:
                 raise ValueError(f"MCP 工具未注册：{tool_name}")
             run_context = task_state.get("runtime_metadata") or {}
@@ -3495,6 +3557,8 @@ async def _run_workflow_response(
             include_browser: bool = False,
             include_client: bool = False,
             include_automation: bool = False,
+            include_xpert_authoring: bool = False,
+            include_skill_creator: bool = False,
             client_tools_config: dict[str, Any] | None = None,
             middleware_specs: list[RuntimeMiddlewareSpec] | None = None,
             apply_policy_filter: bool = False,
@@ -3579,6 +3643,10 @@ async def _run_workflow_response(
                 and workflow_automation_provider is not None
             ):
                 tools.extend(await workflow_automation_provider.list_tools())
+            if include_xpert_authoring and runtime_run_type != "xpert_app":
+                tools.extend(await workflow_xpert_authoring_provider.list_tools())
+            if include_skill_creator and runtime_run_type != "xpert_app":
+                tools.extend(await workflow_skill_creator_provider.list_tools())
             if middleware_specs is not None and apply_policy_filter:
                 allowed_tools: list[Any] = []
                 for tool in tools:
@@ -3591,6 +3659,11 @@ async def _run_workflow_response(
                         "browser": "browser_tools",
                         "client": "client_tools",
                         "automation": "automation_tools",
+                        "authoring": (
+                            "xpert_authoring_tools"
+                            if str(tool.name).startswith("xpert_authoring_")
+                            else "skill_creator_tools"
+                        ),
                     }.get(str(tool.provider or ""), "mcp_tools")
                     if agent_tool_policy(
                         middleware_specs,
@@ -3625,6 +3698,8 @@ async def _run_workflow_response(
             include_browser: bool = False,
             include_client: bool = False,
             include_automation: bool = False,
+            include_xpert_authoring: bool = False,
+            include_skill_creator: bool = False,
             client_tools_config: dict[str, Any] | None = None,
             pipeline: MiddlewarePipeline | None = None,
             middleware_context: MiddlewareContext | None = None,
@@ -3646,6 +3721,8 @@ async def _run_workflow_response(
                 include_browser=include_browser,
                 include_client=include_client,
                 include_automation=include_automation,
+                include_xpert_authoring=include_xpert_authoring,
+                include_skill_creator=include_skill_creator,
                 client_tools_config=client_tools_config,
                 middleware_specs=middleware_specs,
                 apply_policy_filter=selector_spec is not None,
@@ -3675,6 +3752,10 @@ async def _run_workflow_response(
                     )
                 if include_automation:
                     required_tools.update({"automation_list", "automation_get"})
+                if include_xpert_authoring:
+                    required_tools.add("xpert_authoring_catalog")
+                if include_skill_creator:
+                    required_tools.add("skill_authoring_catalog")
                 required_tools.update(
                     item.strip()
                     for item in re.split(
@@ -5376,6 +5457,12 @@ async def _run_workflow_response(
                             agent_specs, "client_tools"
                         )
                         scheduler_spec = middleware_spec(agent_specs, "scheduler")
+                        xpert_authoring_spec = middleware_spec(
+                            agent_specs, "xpert_authoring"
+                        )
+                        skill_creator_spec = middleware_spec(
+                            agent_specs, "skill_creator"
+                        )
                         ralph_spec = middleware_spec(agent_specs, "ralph_loop")
                         knowledge_writer_spec = middleware_spec(
                             agent_specs, "knowledge_writer"
@@ -5388,6 +5475,8 @@ async def _run_workflow_response(
                         browser_enabled = browser_automation_spec is not None
                         client_tools_enabled = client_tools_spec is not None
                         automation_enabled = scheduler_spec is not None
+                        xpert_authoring_enabled = xpert_authoring_spec is not None
+                        skill_creator_enabled = skill_creator_spec is not None
                         selector_spec = middleware_spec(
                             agent_specs,
                             "llm_tool_selector",
@@ -5562,6 +5651,12 @@ async def _run_workflow_response(
                         if automation_enabled and tool_mode != "mcp_tools":
                             raise ValueError(
                                 "scheduler middleware requires workflow_agent Runtime tool mode."
+                            )
+                        if (
+                            xpert_authoring_enabled or skill_creator_enabled
+                        ) and tool_mode != "mcp_tools":
+                            raise ValueError(
+                                "Authoring middleware requires workflow_agent Runtime tool mode."
                             )
                         if knowledge_writer_spec is not None:
                             writer_kb_id = str(
@@ -6121,6 +6216,8 @@ async def _run_workflow_response(
                                         include_browser=browser_enabled,
                                         include_client=client_tools_enabled,
                                         include_automation=automation_enabled,
+                                        include_xpert_authoring=xpert_authoring_enabled,
+                                        include_skill_creator=skill_creator_enabled,
                                         client_tools_config=(
                                             dict(client_tools_spec.config)
                                             if client_tools_spec is not None
@@ -6206,6 +6303,8 @@ async def _run_workflow_response(
                                             include_browser=browser_enabled,
                                             include_client=client_tools_enabled,
                                             include_automation=automation_enabled,
+                                            include_xpert_authoring=xpert_authoring_enabled,
+                                            include_skill_creator=skill_creator_enabled,
                                             client_tools_config=(
                                                 dict(client_tools_spec.config)
                                                 if client_tools_spec is not None

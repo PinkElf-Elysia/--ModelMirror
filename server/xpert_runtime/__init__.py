@@ -231,6 +231,23 @@ from .automation_api import (
 )
 from .ralph_loop import RalphLoopResult, run_ralph_loop
 from .plugin_hooks import build_plugin_hooks_middleware
+from .authoring_store import (
+    AuthoringProposal,
+    AuthoringProposalConflictError,
+    AuthoringProposalError,
+    AuthoringProposalNotFoundError,
+    AuthoringProposalStore,
+    AuthoringProposalValidationError,
+)
+from .authoring_service import AuthoringService
+from .authoring_toolset import (
+    AuthoringToolsetProvider,
+    register_authoring_toolset_capabilities,
+)
+from .authoring_api import (
+    configure_runtime_authoring,
+    router as runtime_authoring_router,
+)
 
 __all__ = [
     "AgentMiddleware",
@@ -415,4 +432,15 @@ __all__ = [
     "RalphLoopResult",
     "run_ralph_loop",
     "build_plugin_hooks_middleware",
+    "AuthoringProposal",
+    "AuthoringProposalConflictError",
+    "AuthoringProposalError",
+    "AuthoringProposalNotFoundError",
+    "AuthoringProposalStore",
+    "AuthoringProposalValidationError",
+    "AuthoringService",
+    "AuthoringToolsetProvider",
+    "register_authoring_toolset_capabilities",
+    "configure_runtime_authoring",
+    "runtime_authoring_router",
 ]

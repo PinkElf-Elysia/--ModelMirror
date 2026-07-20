@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import PageContainer from "../components/PageContainer";
+import AuthoringProposalNotice from "../components/authoring/AuthoringProposalNotice";
 import RuntimeApprovalPanel from "../components/runtime/RuntimeApprovalPanel";
 import BrowserSessionPanel from "../components/runtime/BrowserSessionPanel";
 import ClientToolPanel from "../components/runtime/ClientToolPanel";
@@ -337,6 +338,9 @@ export default function ConversationGoalsPage() {
               </section>
 
               <div className="px-4 pt-4 sm:px-5">
+                <div className="mb-3">
+                  <AuthoringProposalNotice sourceId={goal.goal_id} />
+                </div>
                 <RuntimeApprovalPanel
                   onResolved={async () => {
                     await Promise.all([loadDetail(goal.goal_id), loadList()]);
