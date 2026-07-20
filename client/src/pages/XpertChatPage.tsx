@@ -6,6 +6,7 @@ import RuntimeApprovalPanel from "../components/runtime/RuntimeApprovalPanel";
 import BrowserSessionPanel from "../components/runtime/BrowserSessionPanel";
 import ClientToolPanel from "../components/runtime/ClientToolPanel";
 import SandboxWorkspacePanel from "../components/runtime/SandboxWorkspacePanel";
+import FileMemoryPanel from "../components/xpert/FileMemoryPanel";
 import {
   type XpertConversationMessage,
   type XpertConversation,
@@ -18,10 +19,8 @@ import {
 import { createGoal } from "../utils/goalApi";
 import {
   archiveXpertFile,
-  archiveXpertMemory,
   createXpertConversation,
   createXpertMemory,
-  decideXpertMemoryCandidate,
   getXpert,
   getXpertConversation,
   listXpertConversations,
@@ -391,12 +390,6 @@ export default function XpertChatPage() {
     await refreshContext();
     setShowContext(true);
     setShowTrace(false);
-  }
-
-  async function decideCandidate(candidateId: string, action: "approve" | "reject") {
-    if (!xpert) return;
-    await decideXpertMemoryCandidate(xpert.id, candidateId, action);
-    await refreshContext();
   }
 
   async function createTodo() {
@@ -1124,32 +1117,16 @@ export default function XpertChatPage() {
                 </div>
               </section>
 
-              <section>
-                <div className="flex items-center justify-between"><h3 className="text-xs font-semibold text-white">{"\u5f85\u786e\u8ba4\u8bb0\u5fc6"}</h3><span className="text-[10px] text-slate-500">{memoryCandidates.length}</span></div>
-                <div className="mt-2 space-y-2">
-                  {memoryCandidates.map((candidate) => (
-                    <div className="rounded-lg border border-amber-300/20 bg-amber-300/[0.06] p-2.5" key={candidate.candidate_id}>
-                      <p className="line-clamp-4 text-[11px] leading-5 text-slate-200">{candidate.content}</p>
-                      <div className="mt-2 flex justify-end gap-2">
-                        <button className="text-[10px] text-slate-400" onClick={() => void decideCandidate(candidate.candidate_id, "reject")} type="button">{"\u62d2\u7edd"}</button>
-                        <button className="text-[10px] font-semibold text-emerald-200" onClick={() => void decideCandidate(candidate.candidate_id, "approve")} type="button">{"\u6279\u51c6"}</button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </section>
-
-              <section>
-                <div className="flex items-center justify-between"><h3 className="text-xs font-semibold text-white">{"\u5df2\u751f\u6548\u8bb0\u5fc6"}</h3><span className="text-[10px] text-slate-500">{memories.length}</span></div>
-                <div className="mt-2 space-y-2">
-                  {memories.map((memory) => (
-                    <div className="rounded-lg border border-white/10 bg-white/[0.035] p-2.5" key={memory.memory_id}>
-                      <div className="flex items-center justify-between gap-2"><span className="text-[10px] font-semibold text-cyan-100">{memory.scope}</span><button className="text-[10px] text-rose-200" onClick={() => xpert && void archiveXpertMemory(xpert.id, memory.memory_id).then(refreshContext)} type="button">{"\u5f52\u6863"}</button></div>
-                      <p className="mt-1 line-clamp-4 text-[11px] leading-5 text-slate-300">{memory.content}</p>
-                    </div>
-                  ))}
-                </div>
-              </section>
+              {xpert ? (
+                <FileMemoryPanel
+                  candidates={memoryCandidates}
+                  conversationId={conversationId}
+                  memories={memories}
+                  onError={setError}
+                  onRefresh={refreshContext}
+                  xpertId={xpert.id}
+                />
+              ) : null}
             </div>
           ) : null}
 

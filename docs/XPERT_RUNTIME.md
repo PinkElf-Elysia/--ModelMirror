@@ -1,5 +1,11 @@
 # Xpert Runtime Contract
 
+## Typed File Memory Runtime
+
+`XpertFileMemoryStore` 在 Xpert Context storage 中维护派生 `MEMORY.md` 索引、四类 Markdown 正文、manifest 和安全使用信号。正式记忆写入使用原子替换和 revision；旧 Xpert 级 Memory 首次访问时懒迁移，会话级 Memory 不迁移。
+
+`xpert_file_memory` 在 `workflow_agent` 模型调用前执行三层召回，并受单轮和单会话正文预算约束。选择模型失败时确定性降级，不能阻断主回答。模型写回只产生候选，审批冲突不允许覆盖较新 revision。Goal/Handoff 读取目标 Xpert 记忆；公开 App 仅支持显式开启的只读访问。运行观测只保存数量、长度、耗时和策略，完整边界见 `docs/XPERT_FILE_MEMORY.md`。
+
 ## Authoring Runtime
 
 `AuthoringProposalStore` 在 Runtime storage 中原子保存 Xpert/Skill 创建与更新提案。运行工具仅能读取 Agent 配置允许的目标并创建 pending proposal；每个 run 最多 5 条，每个来源最多 20 条 pending。管理端编辑、校验、批准、拒绝与取消均使用 revision，目标更新额外固定 `base_revision`。

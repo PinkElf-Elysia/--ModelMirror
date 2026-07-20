@@ -212,6 +212,91 @@ async def test_context_api_upload_memory_and_candidate_flow(client, stores) -> N
 
 
 @pytest.mark.asyncio
+async def test_file_memory_api_supports_typed_edit_candidates_and_revision_conflicts(
+    client,
+    stores,
+) -> None:
+    xperts, context = stores
+    xpert = xperts.create_xpert(name="Typed Memory API")
+    conversation = context.create_conversation(xpert.id)
+
+    created = await client.post(
+        f"/api/xperts/{xpert.id}/memories",
+        json={
+            "scope": "xpert",
+            "conversation_id": conversation.conversation_id,
+            "type": "feedback",
+            "title": "Response style",
+            "summary": "Prefer direct answers.",
+            "content": "The user prefers direct answers with short verification notes.",
+            "tags": ["style"],
+        },
+    )
+    assert created.status_code == 200, created.text
+    memory = created.json()
+    assert memory["type"] == "feedback"
+    assert memory["canonical_ref"].startswith("memory://xpert/")
+
+    index = await client.get(f"/api/xperts/{xpert.id}/file-memory/index")
+    assert index.status_code == 200, index.text
+    assert index.json()["type_counts"]["feedback"] == 1
+    assert "body_key" not in index.text
+
+    detail = await client.get(
+        f"/api/xperts/{xpert.id}/file-memory/{memory['memory_id']}"
+    )
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["usage"]["detail_read_count"] == 1
+
+    updated = await client.patch(
+        f"/api/xperts/{xpert.id}/file-memory/{memory['memory_id']}",
+        json={
+            "revision": memory["revision"],
+            "summary": "Prefer concise and direct answers.",
+        },
+    )
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["revision"] == memory["revision"] + 1
+
+    stale = await client.patch(
+        f"/api/xperts/{xpert.id}/file-memory/{memory['memory_id']}",
+        json={"revision": memory["revision"], "summary": "Stale overwrite"},
+    )
+    assert stale.status_code == 409, stale.text
+
+    candidate = context.create_candidate(
+        xpert.id,
+        scope="xpert",
+        content="Use a compact verification section.",
+        memory_type="feedback",
+        title="Verification format",
+        summary="Keep verification concise.",
+        source_run_id="run-typed-memory",
+    )
+    edited = await client.patch(
+        f"/api/xperts/{xpert.id}/memory-candidates/{candidate.candidate_id}",
+        json={
+            "revision": candidate.revision,
+            "title": "Verification note format",
+            "tags": ["style", "verification"],
+        },
+    )
+    assert edited.status_code == 200, edited.text
+    edited_candidate = edited.json()
+    approved = await client.post(
+        f"/api/xperts/{xpert.id}/memory-candidates/{candidate.candidate_id}/approve",
+        json={"revision": edited_candidate["revision"]},
+    )
+    assert approved.status_code == 200, approved.text
+    assert approved.json()["status"] == "approved"
+
+    signals = await client.get(f"/api/xperts/{xpert.id}/file-memory/signals")
+    assert signals.status_code == 200, signals.text
+    assert signals.json()["total"] >= 2
+    assert "storage_key" not in signals.text
+
+
+@pytest.mark.asyncio
 async def test_published_xpert_injects_selected_files_and_memory(
     client,
     stores,

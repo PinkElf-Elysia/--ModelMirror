@@ -85,6 +85,7 @@ from .middleware_registry import (
     runtime_middleware_registry,
 )
 from .memory_toolset import MemoryToolsetProvider, register_memory_toolset_capability
+from .file_memory_middleware import build_xpert_file_memory_middleware
 from .todo_api import configure_runtime_todo_store, router as runtime_todo_router
 from .todo_store import (
     RuntimeTodoConflictError,
@@ -283,6 +284,7 @@ __all__ = [
     "MCPToolsetProvider",
     "KnowledgeToolsetProvider",
     "MemoryToolsetProvider",
+    "build_xpert_file_memory_middleware",
     "TodoToolsetProvider",
     "MiddlewareContext",
     "MiddlewarePipeline",

@@ -54,6 +54,20 @@ class MemoryToolsetProvider:
                             "enum": ["conversation", "xpert"],
                         },
                         "tags": {"type": "array", "items": {"type": "string"}},
+                        "type": {
+                            "type": "string",
+                            "enum": ["user", "feedback", "project", "reference"],
+                        },
+                        "title": {"type": "string"},
+                        "summary": {"type": "string"},
+                        "action": {"type": "string", "enum": ["create", "update"]},
+                        "target_memory_id": {"type": "string"},
+                        "base_revision": {"type": "integer", "minimum": 1},
+                        "source_refs": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                        },
+                        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
                     },
                     "required": ["content", "scope"],
                 },
@@ -90,8 +104,14 @@ class MemoryToolsetProvider:
                         {
                             "memory_id": item.memory_id,
                             "scope": item.scope,
-                            "content": item.content,
+                            "type": item.memory_type,
+                            "title": item.title,
+                            "summary": item.summary,
+                            "content": item.content[:2_000],
                             "tags": item.tags,
+                            "canonical_ref": item.canonical_ref,
+                            "revision": item.revision,
+                            "truncated": len(item.content) > 2_000,
                         }
                         for item in records
                     ],
@@ -103,7 +123,12 @@ class MemoryToolsetProvider:
                 )
             if call.tool_name == "memory_get":
                 memory_id = str(call.arguments.get("memory_id") or "").strip()
-                record = self.context_store.get_memory(xpert_id, memory_id)
+                record = self.context_store.get_memory(
+                    xpert_id,
+                    memory_id,
+                    record_detail_read=True,
+                    conversation_id=conversation_id,
+                )
                 if record.status != "active":
                     raise ValueError("Memory is archived.")
                 return RuntimeToolResult(
@@ -111,8 +136,14 @@ class MemoryToolsetProvider:
                         {
                             "memory_id": record.memory_id,
                             "scope": record.scope,
-                            "content": record.content,
+                            "type": record.memory_type,
+                            "title": record.title,
+                            "summary": record.summary,
+                            "content": record.content[:8_000],
                             "tags": record.tags,
+                            "canonical_ref": record.canonical_ref,
+                            "revision": record.revision,
+                            "truncated": len(record.content) > 8_000,
                         },
                         ensure_ascii=False,
                     ),
@@ -123,6 +154,12 @@ class MemoryToolsetProvider:
                 scope = str(call.arguments.get("scope") or "xpert").strip()
                 tags_raw = call.arguments.get("tags")
                 tags = [str(item) for item in tags_raw] if isinstance(tags_raw, list) else []
+                source_refs_raw = call.arguments.get("source_refs")
+                source_refs = (
+                    [str(item) for item in source_refs_raw]
+                    if isinstance(source_refs_raw, list)
+                    else []
+                )
                 candidate = self.context_store.create_candidate(
                     xpert_id,
                     content=content,
@@ -130,12 +167,34 @@ class MemoryToolsetProvider:
                     conversation_id=conversation_id,
                     tags=tags,
                     source_run_id=str(call.metadata.get("run_id") or "") or None,
+                    action=str(call.arguments.get("action") or "create"),
+                    memory_type=str(call.arguments.get("type") or "project"),
+                    title=str(call.arguments.get("title") or ""),
+                    summary=str(call.arguments.get("summary") or ""),
+                    target_memory_id=(
+                        str(call.arguments.get("target_memory_id"))
+                        if call.arguments.get("target_memory_id")
+                        else None
+                    ),
+                    base_revision=(
+                        int(call.arguments.get("base_revision"))
+                        if call.arguments.get("base_revision") is not None
+                        else None
+                    ),
+                    source_refs=source_refs,
+                    confidence=(
+                        float(call.arguments.get("confidence"))
+                        if call.arguments.get("confidence") is not None
+                        else None
+                    ),
                 )
                 return RuntimeToolResult(
                     output=json.dumps(
                         {
                             "candidate_id": candidate.candidate_id,
                             "status": candidate.status,
+                            "type": candidate.memory_type,
+                            "action": candidate.action,
                         },
                         ensure_ascii=False,
                     ),

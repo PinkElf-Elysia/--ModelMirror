@@ -383,6 +383,101 @@ def register_builtin_middleware_nodes(
 
     registry.register(
         RuntimeMiddlewareNode(
+            id="xpert_file_memory",
+            kind="runtime_middleware.xpert_file_memory",
+            title="Xpert 文件记忆",
+            description="按索引、摘要与正文三层召回长期记忆，并将写回限制为待审批候选。",
+            category="memory",
+            icon="FolderHeart",
+            fields=[
+                RuntimeMiddlewareField(
+                    name="recall_mode",
+                    label="召回模式",
+                    type="select",
+                    default="hybrid",
+                    options=["deterministic", "model", "hybrid"],
+                ),
+                RuntimeMiddlewareField(
+                    name="selector_model_id",
+                    label="记忆选择模型（可选）",
+                    type="text",
+                ),
+                RuntimeMiddlewareField(
+                    name="selector_timeout_seconds",
+                    label="选择超时（秒）",
+                    type="number",
+                    default=15,
+                    min_value=1,
+                    max_value=60,
+                ),
+                RuntimeMiddlewareField(
+                    name="max_selected",
+                    label="单轮正文记忆数",
+                    type="number",
+                    default=4,
+                    min_value=1,
+                    max_value=10,
+                ),
+                RuntimeMiddlewareField(
+                    name="digest_limit",
+                    label="摘要数量",
+                    type="number",
+                    default=10,
+                    min_value=1,
+                    max_value=30,
+                ),
+                RuntimeMiddlewareField(
+                    name="max_detail_chars_per_turn",
+                    label="单轮正文预算",
+                    type="number",
+                    default=20000,
+                    min_value=1000,
+                    max_value=40000,
+                ),
+                RuntimeMiddlewareField(
+                    name="max_detail_chars_per_session",
+                    label="单会话正文预算",
+                    type="number",
+                    default=60000,
+                    min_value=1000,
+                    max_value=200000,
+                ),
+                RuntimeMiddlewareField(
+                    name="writeback_enabled",
+                    label="生成写回候选",
+                    type="boolean",
+                    default=False,
+                ),
+                RuntimeMiddlewareField(
+                    name="writeback_model_id",
+                    label="写回模型（可选）",
+                    type="text",
+                ),
+                RuntimeMiddlewareField(
+                    name="max_candidates",
+                    label="单次候选上限",
+                    type="number",
+                    default=3,
+                    min_value=1,
+                    max_value=3,
+                ),
+            ],
+            tags=["agent", "memory", "file", "before_model", "after_agent"],
+            metadata={
+                "middleware_name": "xpert_file_memory",
+                "runtime_hook": "before_model,after_agent",
+                "real_execution": True,
+            },
+            config_version=1,
+            execution_status="real",
+            requires_tool_mode=None,
+            app_policy="allowed",
+            security_category="private_context",
+        )
+    )
+
+    registry.register(
+        RuntimeMiddlewareNode(
             id="structured_output",
             kind="runtime_middleware.structured_output",
             title="结构化输出",

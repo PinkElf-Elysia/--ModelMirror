@@ -1,6 +1,7 @@
 """Published Xpert definitions and versioned workflow snapshots."""
 
 from .api import (
+    configure_memory_writeback_runner,
     get_xpert_context_store,
     get_xpert_store,
     router,
@@ -17,6 +18,7 @@ from .app_models import XpertAppAccessGrant, XpertAppDefinition
 from .app_store import XpertAppStore
 from .context import (
     MemoryWriteCandidate,
+    XpertContextConflictError,
     XpertContextError,
     XpertContextNotFoundError,
     XpertContextStore,
@@ -46,6 +48,7 @@ __all__ = [
     "XpertDraft",
     "XpertConflictError",
     "XpertContextError",
+    "XpertContextConflictError",
     "XpertContextNotFoundError",
     "XpertContextStore",
     "XpertContextValidationError",
@@ -64,6 +67,7 @@ __all__ = [
     "XpertAppDefinition",
     "XpertAppStore",
     "configure_xpert_app_runtime",
+    "configure_memory_writeback_runner",
     "get_xpert_context_store",
     "get_xpert_app_store",
     "get_xpert_store",

@@ -7,6 +7,9 @@ import {
   type XpertDraft,
   type XpertConversation,
   type XpertFileAsset,
+  type XpertFileMemoryIndex,
+  type XpertFileMemorySignal,
+  type XpertFileMemoryType,
   type XpertListResponse,
   type XpertMemoryCandidate,
   type XpertMemoryRecord,
@@ -244,9 +247,17 @@ export function archiveXpertFile(
 export function listXpertMemories(
   xpertId: string,
   conversationId?: string,
+  options?: {
+    search?: string;
+    type?: XpertFileMemoryType | "all";
+    status?: "active" | "archived";
+  },
 ) {
   const query = new URLSearchParams({ scope: "both", limit: "100" });
   if (conversationId) query.set("conversation_id", conversationId);
+  if (options?.search) query.set("search", options.search);
+  if (options?.type && options.type !== "all") query.set("type", options.type);
+  if (options?.status) query.set("status", options.status);
   return requestJson<{ items: XpertMemoryRecord[]; total: number }>(
     `/api/xperts/${xpertId}/memories?${query.toString()}`,
   );
@@ -260,6 +271,10 @@ export function createXpertMemory(
     conversation_id?: string;
     source_type?: string;
     source_id?: string;
+    type?: XpertFileMemoryType;
+    title?: string;
+    summary?: string;
+    tags?: string[];
   },
 ) {
   return requestJson<XpertMemoryRecord>(
@@ -268,9 +283,10 @@ export function createXpertMemory(
   );
 }
 
-export function archiveXpertMemory(xpertId: string, memoryId: string) {
+export function archiveXpertMemory(xpertId: string, memoryId: string, revision?: number) {
+  const query = revision ? `?revision=${revision}` : "";
   return requestJson<XpertMemoryRecord>(
-    `/api/xperts/${xpertId}/memories/${memoryId}`,
+    `/api/xperts/${xpertId}/memories/${memoryId}${query}`,
     { method: "DELETE" },
   );
 }
@@ -279,7 +295,7 @@ export function listXpertMemoryCandidates(
   xpertId: string,
   conversationId?: string,
 ) {
-  const query = new URLSearchParams({ status: "pending", limit: "100" });
+  const query = new URLSearchParams({ limit: "100" });
   if (conversationId) query.set("conversation_id", conversationId);
   return requestJson<{ items: XpertMemoryCandidate[]; total: number }>(
     `/api/xperts/${xpertId}/memory-candidates?${query.toString()}`,
@@ -290,10 +306,78 @@ export function decideXpertMemoryCandidate(
   xpertId: string,
   candidateId: string,
   action: "approve" | "reject",
+  revision?: number,
 ) {
   return requestJson<XpertMemoryCandidate>(
     `/api/xperts/${xpertId}/memory-candidates/${candidateId}/${action}`,
-    jsonRequest("POST", {}),
+    jsonRequest("POST", revision ? { revision } : {}),
+  );
+}
+
+export function getXpertFileMemoryIndex(xpertId: string) {
+  return requestJson<XpertFileMemoryIndex>(`/api/xperts/${xpertId}/file-memory/index`);
+}
+
+export function getXpertFileMemory(xpertId: string, memoryId: string) {
+  return requestJson<XpertMemoryRecord>(
+    `/api/xperts/${xpertId}/file-memory/${memoryId}`,
+  );
+}
+
+export function listXpertFileMemorySignals(xpertId: string, memoryId?: string) {
+  const query = new URLSearchParams({ limit: "100" });
+  if (memoryId) query.set("memory_id", memoryId);
+  return requestJson<{ items: XpertFileMemorySignal[]; total: number }>(
+    `/api/xperts/${xpertId}/file-memory/signals?${query.toString()}`,
+  );
+}
+
+export function updateXpertFileMemory(
+  xpertId: string,
+  memoryId: string,
+  payload: {
+    revision: number;
+    type?: XpertFileMemoryType;
+    title?: string;
+    summary?: string;
+    content?: string;
+    tags?: string[];
+  },
+) {
+  return requestJson<XpertMemoryRecord>(
+    `/api/xperts/${xpertId}/file-memory/${memoryId}`,
+    jsonRequest("PATCH", payload),
+  );
+}
+
+export function updateXpertMemoryCandidate(
+  xpertId: string,
+  candidateId: string,
+  payload: {
+    revision: number;
+    type?: XpertFileMemoryType;
+    title?: string;
+    summary?: string;
+    content?: string;
+    tags?: string[];
+    action?: "create" | "update";
+    target_memory_id?: string | null;
+    base_revision?: number | null;
+  },
+) {
+  return requestJson<XpertMemoryCandidate>(
+    `/api/xperts/${xpertId}/memory-candidates/${candidateId}`,
+    jsonRequest("PATCH", payload),
+  );
+}
+
+export function runXpertFileMemoryWriteback(
+  xpertId: string,
+  conversationId: string,
+) {
+  return requestJson<{ items: XpertMemoryCandidate[]; total: number }>(
+    `/api/xperts/${xpertId}/file-memory/writeback`,
+    jsonRequest("POST", { conversation_id: conversationId, scope: "xpert" }),
   );
 }
 

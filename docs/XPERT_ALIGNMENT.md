@@ -1,10 +1,16 @@
 # Xpert 对齐总纲
 
+## 2026-07-19 增量：XPERT-MIDDLEWARE-FILE-MEMORY-08
+
+Xpert 级长期 Memory 已升级为类型化 Markdown 文件记忆：`MEMORY.md` 摘要索引与 `user / feedback / project / reference` 四类正文通过原子 Store 持久化，旧 Xpert Memory 在首次访问时兼容懒迁移并保留 ID；会话级 Memory 继续保持原隔离存储。
+
+`xpert_file_memory` 现可绑定到 `workflow_agent`，按索引、摘要 digest 和少量正文三层召回，并使用模型选择器或确定性 fallback。自动整理仅创建带 revision 的 create/update 候选，人工批准后才写入；冲突不得覆盖人工修改。Goal 与 Handoff 只读取目标 Xpert 自身记忆，公开 App 仅在显式策略允许时只读且永不写回。完整契约见 `docs/XPERT_FILE_MEMORY.md`。
+
 ## 2026-07-18 增量：XPERT-MIDDLEWARE-CONSOLIDATION-07
 
 私有 Workflow、Xpert Chat、Goal、Handoff 与 Automation 已具备受审批的平台自编写闭环。`xpert_authoring` 和 `skill_creator` 通过 Runtime Toolset 分析允许范围内的资源，只能创建版本化提案；管理端审核通过后分别写入 Xpert 草稿或 Workspace Skill 草稿，不能直接发布 Xpert、安装 Skill 或修改不可变发布版本。
 
-提案与 Skill 草稿采用文件型 Store、原子写入、revision 和 `base_revision` 冲突保护。Skill 包限制在 `SKILL.md`、`scripts/`、`references/`、`assets/` 与 `agents/openai.yaml`，安装仍是 `/skills` 的显式二次操作，脚本继续只在隔离 Sandbox 中执行。公开 App/API 通过统一中间件契约禁止两类自编写能力。Office、Data X、客户端副作用和显式文件记忆中间件按用户要求延后；本轮不宣称数量完全对齐。详细契约见 `docs/XPERT_AUTHORING.md`。
+提案与 Skill 草稿采用文件型 Store、原子写入、revision 和 `base_revision` 冲突保护。Skill 包限制在 `SKILL.md`、`scripts/`、`references/`、`assets/` 与 `agents/openai.yaml`，安装仍是 `/skills` 的显式二次操作，脚本继续只在隔离 Sandbox 中执行。公开 App/API 通过统一中间件契约禁止两类自编写能力。该轮延后的显式文件记忆现已由 `XPERT-MIDDLEWARE-FILE-MEMORY-08` 完成；Office 与 Data X 仍待后续闭环。详细契约见 `docs/XPERT_AUTHORING.md`。
 
 ## 2026-07-18 增量：XPERT-MIDDLEWARE-AUTOMATION-06
 
@@ -210,18 +216,18 @@ EvoAgentX 只保留为历史参考：此前元智能体曾借鉴其 `goal -> sub
 | --- | --- | --- | --- | --- |
 | 工作空间资源 | 部分实现 | `/studio` 已作为 Xpert 式资源 Hub，聚合智能体、工作流、知识库、MCP、API 工具、数据库、Skill、提示词、环境、运行记录，并支持快速入口、标签过滤和运行摘要 | 当前是前端只读聚合视图，不做 workspace 权限、持久化资源表或资源创建编排；API 工具与数据库仍为待接入卡片 | `XPERT-WORKFLOW-REGISTRY-API-01` |
 | Xpert Studio / 发布 | 部分实现 | classic `/workflow`、智能体配置侧栏、Xpert 草稿、不可变版本、聊天运行、Goal、自动 Handoff、文件/记忆与固定版本 App/API | 使用文件型 Store 和 classic runner；不做组织权限、多人协作或数据库迁移 | 基于真实使用反馈审计 |
-| Runtime Middleware | 部分实现 | Agent 绑定、上下文压缩、结构化输出、Todo、工具选择、HITL、Sandbox/Skill、Browser、Client Tools、Scheduler、Ralph Loop、Knowledge Writer、Plugin Hooks、Xpert/Skill 自编写提案 | 文件型单进程协调器；公开 App 禁止交互式、客户端、自动化与自编写中间件；Office、Data X、客户端副作用与显式文件记忆延后 | 真实使用反馈与下一轮缺口排序 |
+| Runtime Middleware | 部分实现 | Agent 绑定、上下文压缩、结构化输出、Todo、工具选择、HITL、Sandbox/Skill、Browser、Client Tools、Scheduler、Ralph Loop、Knowledge Writer、Plugin Hooks、Xpert/Skill 自编写提案、类型化文件记忆 | 文件型单进程协调器；公开 App 禁止交互式、客户端、自动化与自编写中间件，文件记忆仅显式策略下只读 | Office 实时自动化与 Data X 指标闭环 |
 | Agent Task | 部分实现 | AgentTask API、MetaAgent 任务工作台、workflow `agent_task` 节点、可选文件持久化、Goal 步骤派发 | 单进程文件 Store，不是分布式任务队列 | 为文件与记忆任务补安全上下文 |
 | Handoff | 部分实现 | Handoff API、workflow `agent_handoff`、`handoff_router`、人工 Inbox、目标 Xpert 自动执行、同步结果回传、重试、死信与 Goal 协作 | 仅显式 `xpert:` 目标自动执行；单进程 lease，不做分布式调度 | 扩展文件与记忆上下文传递 |
 | RunRegistry / Trace | 部分实现 | workflow/xpert/chat/goal/agent_task/agent_handoff run、checkpoint、workflow/chat/Xpert/Goal 观测与 `/runtime` 运维总览 | 内存态，可观测索引，不是调度器；Goal 重启恢复会创建 recovery run | 为文件、记忆与知识执行提供护栏 |
-| Workflow Agent | 部分实现 | `workflow_agent` 节点，模型执行，Runtime Toolset 工具模式，Xpert 式配置侧栏分区，失败重试、备用模型、异常转空输出、禁用输出 | 轻量 JSON 决策，不是 function calling；文件理解、并行工具调用、记忆写入和结构化输出仍未接入执行 | 后续逐项接入真实运行语义 |
+| Workflow Agent | 部分实现 | `workflow_agent` 节点、模型执行、Runtime Toolset、文件理解、结构化输出、类型化记忆召回/候选写回、失败重试、备用模型与异常策略 | 轻量 JSON 决策，不是 function calling；并行工具调用仍未接入 | 基于真实任务反馈收敛 Agent 执行契约 |
 | Chat Toolset | 部分实现 | `/api/chat` 可选 MCP 工具模式，chat run 与 checkpoint | 默认关闭，不改变普通聊天；无自动 handoff | 补工具偏好、安全提示和观测 UI |
 | Toolset / MCP | 部分实现 | `MCPToolsetProvider`、`run_tool_with_runtime`、tool policy/audit、MCP 管理基础、`/runtime` MCP Runtime 状态细分与只读运维，`/studio` 已提供 MCP 与 Runtime 入口 | 缺 Xpert 式 Toolset 资源模型；Runtime Ops 不执行 MCP start/stop | 后续抽象 Toolset 资源模型 |
 | Plugin / Skill | 部分实现 | `/skills`、安装运行时、Workspace Skill 草稿、审批后显式安装、Sandbox staging 与显式 Skill Plugin Hooks | Agent 只能提案；草稿安装不会覆盖既有 Skill；Hook 仅支持离线 manifest，不提供组织权限 | 基于真实 Skill 草稿与 Hook 使用反馈收敛协议 |
 | Knowledge Pipeline | 已实现 | FileAsset/Artifact/Chunk/CitationAnchor、结构感知 Processor、General/QA/Summary、可执行 Graph、逐文档/逐视觉页恢复、图片与扫描 PDF 的 OCR/VLM、版本化 ingestion job、递归与父子分块、向量/FTS5 双索引、混合检索、Rerank、离线评估、Promotion Gate、Knowledge Toolset、审批写入、预览、激活/回滚 | 成熟 RAG 基础闭环完成；仍为本地单进程 worker，旧上传保留 legacy index；评估标签需人工维护；图片向量、版面坐标与 GraphRAG 暂缓 | 真实使用反馈与技术债审计 |
 | Prompt / Slash Command | 下一步 | 仅有提示词资源页雏形和聊天 prompt 使用 | 尚无 Xpert 式工作区提示词/命令配置 | 放在工作空间资源后推进 |
 | Environment / Sandbox | 部分实现 | `/runtime` 已提供脱敏环境与依赖摘要，展示模型网关、OpenRouter、git/node/npm/npx/python 是否就绪 | 不展示密钥值，不编辑环境变量，不提供沙箱实例或文件工作区语义 | 评估 Xpert 式环境变量管理和沙箱资源模型 |
-| Memory / Logs / Monitor | 部分实现 | 会话/Xpert 记忆、候选审批、RunRegistry events/checkpoints/audit 摘要 | 本地确定性召回，尚无向量记忆和组织级审计 | 基于真实使用反馈审计 |
+| Memory / Logs / Monitor | 部分实现 | 会话记忆、四类 Xpert 文件记忆、三层召回、候选审批、revision 冲突、使用信号、RunRegistry events/checkpoints/audit 摘要 | 文件型单机 Store；不做向量记忆、跨 Xpert 私有共享或组织级审计 | 以召回质量和冲突率评估是否需要向量化 |
 
 ## 已实现基线
 
