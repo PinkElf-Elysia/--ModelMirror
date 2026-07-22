@@ -245,3 +245,11 @@ The Todo capability exposes scope-bound `todo_list`, `todo_create`, and `todo_up
 `AutomationCoordinator` invokes the fixed Xpert through the same classic workflow runner and creates an `automation` RunRegistry parent. Approval and Client Tool continuations update and resume the same execution. Scheduler Runtime tools are scoped to the current private published Xpert and cannot manage another Xpert's definitions.
 
 Ralph Loop performs bounded continuation and strict verification before the Agent output is committed. Knowledge Writer creates pending proposals only and retains the existing Inbox, pipeline, evaluation, and promotion gates. Plugin Hooks stage an installed Skill's explicit manifest into the offline Sandbox and execute argv only. Public Xpert Apps reject all private automation middleware. See `docs/XPERT_AUTOMATION.md`.
+
+## Data X Runtime
+
+`DataXStore` atomically persists project, source snapshot, import job, semantic model, indicator, immutable version, proposal, and result-artifact metadata. Each project owns a separate DuckDB file. Imported source bytes are fixed by SHA-256 and never exposed through API paths.
+
+Queries do not accept SQL. `DataXService` compiles a bounded DSL of published indicators, dimensions, parameterized filters, time ranges, ordering, and limits. Draft edits do not affect the immutable published snapshot used by runtime queries. Derived expressions are evaluated from published metric results with a restricted arithmetic AST.
+
+The `datax_indicators` Agent middleware compiles explicit project/model scopes into `datax_tools`. Workflow, Xpert Chat, Goal, Handoff, and Automation share this provider. Agent writes are proposal-only; approval creates a draft and explicit publication remains a separate operation. Public Apps require `allow_datax_read`, an active tool policy, and valid project/model scope, and never receive proposal tools. See `docs/XPERT_DATAX.md`.

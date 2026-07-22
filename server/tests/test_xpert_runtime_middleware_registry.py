@@ -42,6 +42,7 @@ def test_registry_list_returns_builtin_nodes() -> None:
         "plugin_hooks",
         "xpert_authoring",
         "skill_creator",
+        "datax_indicators",
     }
     for node in nodes:
         assert node.id
@@ -52,7 +53,7 @@ def test_registry_list_returns_builtin_nodes() -> None:
         assert isinstance(node.metadata, dict)
         assert node.config_version >= 1
         assert node.execution_status == "real"
-        assert node.app_policy in {"allowed", "forbidden"}
+        assert node.app_policy in {"allowed", "conditional", "forbidden"}
 
     authoring = registry.get("xpert_authoring")
     skill_creator = registry.get("skill_creator")

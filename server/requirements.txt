@@ -14,3 +14,5 @@ PyPDF2==3.0.1
 pypdfium2==4.30.0
 Pillow==11.3.0
 jsonschema==4.25.1
+duckdb==1.4.1
+openpyxl==3.1.5

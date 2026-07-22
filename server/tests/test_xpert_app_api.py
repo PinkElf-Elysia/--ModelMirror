@@ -331,6 +331,156 @@ async def test_deploy_preflight_always_rejects_dynamic_knowledge_write(
 
 
 @pytest.mark.asyncio
+async def test_deploy_preflight_requires_read_only_datax_policy(
+    client: httpx.AsyncClient,
+    stores,
+    tmp_path: Path,
+    request: pytest.FixtureRequest,
+) -> None:
+    from server.datax.api import configure_datax
+    from server.datax.service import DataXService
+    from server.datax.store import DataXStore
+
+    datax = DataXService(DataXStore(tmp_path / "datax-app"))
+    project = datax.create_project(name="Public metrics")
+    job = datax.import_source(
+        project.project_id,
+        file_name="metrics.csv",
+        content=b"amount\n10\n",
+    )
+    assert job.status == "ready"
+    source = datax.list_sources(project.project_id)[0]
+    model = datax.create_model(
+        project.project_id,
+        name="Public model",
+        entities=[
+            {
+                "entity_id": "metrics",
+                "source_id": source.source_id,
+                "alias": "metrics",
+            }
+        ],
+        fields=[
+            {
+                "field_id": "amount",
+                "entity_id": "metrics",
+                "source_field": "amount",
+                "name": "amount",
+                "role": "measure",
+            }
+        ],
+    )
+    configure_datax(datax)
+    request.addfinalizer(lambda: configure_datax(main_module.datax_service))
+    xpert_store, _ = stores
+    created = xpert_store.create_xpert(name="Data X App", slug="datax-app")
+    draft = created.draft.model_copy(deep=True)
+    agent = next(
+        node for node in draft.workflow.nodes if node.data.get("kind") == "workflow_agent"
+    )
+    agent.data["toolMode"] = "mcp_tools"
+    middleware = type(agent).model_validate(
+        {
+            "id": "datax-middleware",
+            "type": "runtime_middleware",
+            "data": {
+                "kind": "runtime_middleware",
+                "runtimeMiddlewareId": "datax_indicators",
+                "runtimeMiddlewareKind": "runtime_middleware.datax_indicators",
+                "middlewarePriority": "50",
+                "runtimeMiddlewareConfig": {
+                    "projectIds": [project.project_id],
+                    "modelIds": [model.model_id],
+                    "allowProposals": False,
+                    "maxResultRows": 100,
+                },
+            },
+        }
+    )
+    draft.workflow.nodes.append(middleware)
+    tool_policy = type(agent).model_validate(
+        {
+            "id": "datax-tool-policy",
+            "type": "runtime_middleware",
+            "data": {
+                "kind": "runtime_middleware",
+                "runtimeMiddlewareId": "tool_policy",
+                "runtimeMiddlewareKind": "runtime_middleware.tool_policy",
+                "middlewarePriority": "20",
+                "runtimeMiddlewareConfig": {"default_action": "allow"},
+            },
+        }
+    )
+    draft.workflow.nodes.append(tool_policy)
+    draft.workflow.edges.append(
+        type(draft.workflow.edges[0]).model_validate(
+            {
+                "id": "bind-datax",
+                "source": middleware.id,
+                "target": agent.id,
+                "sourceHandle": "middleware-binding",
+                "targetHandle": "middleware",
+            }
+        )
+    )
+    draft.workflow.edges.append(
+        type(draft.workflow.edges[0]).model_validate(
+            {
+                "id": "bind-datax-policy",
+                "source": tool_policy.id,
+                "target": agent.id,
+                "sourceHandle": "middleware-binding",
+                "targetHandle": "middleware",
+            }
+        )
+    )
+    updated = xpert_store.update_xpert(
+        created.id,
+        {"draft": draft.model_dump(mode="json")},
+    )
+    xpert_store.publish_xpert(created.id, expected_revision=updated.draft_revision)
+    create = await client.post(f"/api/xperts/{created.id}/app", json={})
+    app_payload = create.json()["app"]
+
+    denied = await client.post(
+        f"/api/xpert-apps/{app_payload['app_id']}/deploy",
+        json={"version": 1},
+    )
+    assert denied.status_code == 422
+    assert any(
+        issue["code"] == "app_datax_read_not_allowed"
+        for issue in denied.json()["detail"]["issues"]
+    )
+
+    update = await client.patch(
+        f"/api/xpert-apps/{app_payload['app_id']}",
+        json={"policy": {"allow_datax_read": True, "allow_tools": True}},
+    )
+    assert update.status_code == 200, update.text
+    deployed = await client.post(
+        f"/api/xpert-apps/{app_payload['app_id']}/deploy",
+        json={"version": 1},
+    )
+    assert deployed.status_code == 200, deployed.text
+
+    middleware.data["runtimeMiddlewareConfig"]["allowProposals"] = True
+    changed = xpert_store.update_xpert(
+        created.id,
+        {"draft": draft.model_dump(mode="json")},
+    )
+    xpert_store.publish_xpert(created.id, expected_revision=changed.draft_revision)
+    write_denied = await client.post(
+        f"/api/xpert-apps/{app_payload['app_id']}/deploy",
+        json={"version": 2},
+    )
+    assert write_denied.status_code == 422
+    assert any(
+        issue["code"] == "app_datax_write_forbidden"
+        for issue in write_denied.json()["detail"]["issues"]
+    )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("interactive_kind", ["human_intervention", "human_in_the_loop"])
 async def test_deploy_preflight_rejects_interactive_hitl(
     client: httpx.AsyncClient,

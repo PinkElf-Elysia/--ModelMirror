@@ -62,3 +62,22 @@ The optional `office-host` profile uses the official NGINX image to serve the
 Task Pane and proxy the local HTTPS/WSS endpoints. NGINX is distributed under
 the 2-clause BSD License. The Office automation implementation is independently
 written; Xpert AGPL code is used only as a behavioral reference.
+
+## Data X analytics dependencies
+
+DuckDB is distributed under the MIT License and provides the isolated local
+analytics engine used by Data X projects.
+
+Project: https://github.com/duckdb/duckdb
+
+openpyxl is distributed under the MIT License and is used to import XLSX source
+snapshots. Recharts is distributed under the MIT License and renders the fixed
+KPI, table, line, and bar result views in the React client.
+
+Projects:
+
+- https://foss.heptapod.net/openpyxl/openpyxl
+- https://github.com/recharts/recharts
+
+No Xpert Data X source code is copied into ModelMirror. Its public documentation
+is used as a domain reference while the implementation remains independent.

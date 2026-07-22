@@ -22,6 +22,8 @@
 
 动态知识工具受独立 `allow_knowledge_read` 策略控制。显式开启后，App 只能读取已发布工作流中 `knowledgeBaseIds` 固定的活动知识版本；不能扩展到其他知识库。任何启用了 `knowledgeWriteEnabled` 的 Xpert 都不能部署为 App，公开运行时也永远不注册 `knowledge_propose_write`。固定的 `knowledge_retrieval` / `knowledge_citation` 节点保持兼容，并继续随部署快照运行。
 
+Data X 工具受独立 `allow_datax_read` 策略控制。部署预检会验证中间件固定的项目和语义模型真实存在且 scope 一致，并要求工作流包含 `tool_policy`。启用后 App 只获得已发布指标的只读查询和受控结果展示；指标提案、草稿修改、发布、原始明细导出和任意 SQL 均被禁止。
+
 ## 访问凭据
 
 - 分享链接格式：`/apps/{slug}#access={share_token}`。Fragment 不进入 HTTP 请求日志，前端读取后立即从地址栏移除，并通过 `X-ModelMirror-App-Token` 发送。

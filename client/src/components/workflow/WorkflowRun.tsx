@@ -3,6 +3,7 @@ import RuntimeApprovalPanel from "../runtime/RuntimeApprovalPanel";
 import BrowserSessionPanel from "../runtime/BrowserSessionPanel";
 import ClientToolPanel from "../runtime/ClientToolPanel";
 import SandboxWorkspacePanel from "../runtime/SandboxWorkspacePanel";
+import DataXResultCard from "../datax/DataXResultCard";
 import {
   type WorkflowDefinition,
   type WorkflowRunEvent,
@@ -751,9 +752,12 @@ export default function WorkflowRun({
                   </span>
                 </div>
                 {step.output ? (
-                  <p className="mt-2 max-h-40 overflow-y-auto whitespace-pre-wrap break-words rounded-md bg-slate-950/35 p-2 text-xs leading-5 text-slate-300">
-                    {step.output}
-                  </p>
+                  <>
+                    <DataXResultCard content={step.output} />
+                    <p className="mt-2 max-h-40 overflow-y-auto whitespace-pre-wrap break-words rounded-md bg-slate-950/35 p-2 text-xs leading-5 text-slate-300">
+                      {step.output}
+                    </p>
+                  </>
                 ) : null}
               </div>
             ))

@@ -907,6 +907,65 @@ def register_builtin_middleware_nodes(
 
     registry.register(
         RuntimeMiddlewareNode(
+            id="datax_indicators",
+            kind="runtime_middleware.datax_indicators",
+            title="Data X 语义指标",
+            description="在显式项目和语义模型范围内查询已发布指标，并可创建需要人工审批的指标提案。",
+            category="tool",
+            icon="ChartNoAxesCombined",
+            fields=[
+                RuntimeMiddlewareField(
+                    name="projectIds",
+                    label="项目 ID",
+                    type="textarea",
+                    required=True,
+                    rows=3,
+                    placeholder="datax_project_...",
+                    description="逗号或换行分隔，最多 10 个。",
+                ),
+                RuntimeMiddlewareField(
+                    name="modelIds",
+                    label="语义模型 ID",
+                    type="textarea",
+                    required=True,
+                    rows=3,
+                    placeholder="datax_model_...",
+                    description="模型必须属于上方项目范围，最多 20 个。",
+                ),
+                RuntimeMiddlewareField(
+                    name="allowProposals",
+                    label="允许创建指标提案",
+                    type="boolean",
+                    default=False,
+                    description="批准后只生成草稿，仍需用户显式发布。",
+                ),
+                RuntimeMiddlewareField(
+                    name="maxResultRows",
+                    label="最大结果行数",
+                    type="number",
+                    default=100,
+                    min_value=1,
+                    max_value=500,
+                ),
+            ],
+            tags=["agent", "datax", "analytics", "indicators", "duckdb"],
+            metadata={
+                "middleware_name": "datax_indicators",
+                "runtime_hook": "agent_tools",
+                "capability_name": "datax_tools",
+                "real_execution": True,
+                "app_policy_field": "allow_datax_read",
+            },
+            config_version=1,
+            execution_status="real",
+            requires_tool_mode="mcp_tools",
+            app_policy="conditional",
+            security_category="scoped_data_read",
+        )
+    )
+
+    registry.register(
+        RuntimeMiddlewareNode(
             id="office_automation",
             kind="runtime_middleware.office_automation",
             title="Office 实时自动化",

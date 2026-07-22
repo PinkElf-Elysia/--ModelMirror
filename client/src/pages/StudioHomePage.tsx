@@ -81,6 +81,12 @@ interface RuntimeRunPayload {
   updated_at: number;
 }
 
+interface DataXProjectPayload {
+  project_id: string;
+  name: string;
+  status: string;
+}
+
 interface ResourceAction {
   disabled?: boolean;
   href?: string;
@@ -175,6 +181,12 @@ const tagFilters: Array<{ key: ResourceTag; label: string }> = [
 ];
 
 const quickActions: QuickAction[] = [
+  {
+    title: "创建 Data X 项目",
+    description: "导入本地文件，建立语义模型并发布可由 Agent 查询的业务指标。",
+    href: "/datax",
+    label: "打开 Data X",
+  },
   {
     title: "Xpert 自动化",
     description: "按单次、间隔或 Cron 调度固定版本 Xpert，处理重试、预算与死信。",
@@ -441,6 +453,9 @@ export default function StudioHomePage() {
     createLoadable<InstalledSkillPayload[]>([]),
   );
   const [runtimeRuns, setRuntimeRuns] = useState(createLoadable<RuntimeRunPayload[]>([]));
+  const [dataXProjects, setDataXProjects] = useState(
+    createLoadable<DataXProjectPayload[]>([]),
+  );
 
   useEffect(() => {
     document.title = "模镜 - Xpert 工作空间";
@@ -525,10 +540,28 @@ export default function StudioHomePage() {
       }
     }
 
+    async function loadDataX() {
+      try {
+        const data = await fetchJson<{ items: DataXProjectPayload[] }>(
+          "/api/datax/projects",
+        );
+        if (cancelled) return;
+        setDataXProjects({ data: data.items ?? [], error: "", loading: false });
+      } catch (error) {
+        if (cancelled) return;
+        setDataXProjects({
+          data: [],
+          error: error instanceof Error ? error.message : "Data X 加载失败",
+          loading: false,
+        });
+      }
+    }
+
     void loadKnowledge();
     void loadMcp();
     void loadSkills();
     void loadRuns();
+    void loadDataX();
 
     return () => {
       cancelled = true;
@@ -639,17 +672,25 @@ export default function StudioHomePage() {
       },
       {
         category: "database",
-        count: "规划中",
-        description: "对齐 Xpert 数据库资源页。当前不新增表结构和连接器。",
-        icon: "DB",
+        count: dataXProjects.error ? "0" : String(dataXProjects.data.length),
+        description: "本地文件快照、DuckDB 语义模型、版本化指标与 Agent 数据分析。",
+        error: dataXProjects.error,
+        icon: "DX",
         id: "database",
-        items: ["表列表", "状态", "版本", "消息", "激活时间"],
-        metricLabel: "数据库",
-        primaryAction: { disabled: true, label: "待接入" },
-        status: "待接入",
-        tags: ["planned", "xpert"],
-        title: "数据库",
-        tone: "planned",
+        items: dataXProjects.error
+          ? []
+          : [
+              ...dataXProjects.data.slice(0, 4).map((project) => project.name),
+              "CSV / XLSX / Parquet",
+              "基础与派生指标",
+            ],
+        loading: dataXProjects.loading,
+        metricLabel: "Data X 项目",
+        primaryAction: { href: "/datax", label: "打开 Data X" },
+        status: "可运行",
+        tags: ["runnable", "creatable", "observable", "xpert"],
+        title: "Data X 语义指标",
+        tone: "ready",
       },
       {
         category: "skills",
@@ -721,6 +762,7 @@ export default function StudioHomePage() {
     ];
   }, [
     artifacts,
+    dataXProjects,
     fileAssets,
     installedSkills,
     knowledgeBases,

@@ -132,6 +132,10 @@ def _deployment_preflight(version: XpertVersion, policy: XpertAppPolicy) -> dict
     has_knowledge_writer = False
     has_file_memory = False
     has_file_memory_writeback = False
+    has_datax_runtime = False
+    has_datax_write = False
+    datax_project_ids: set[str] = set()
+    datax_model_ids: set[str] = set()
     contract_forbidden_middleware: set[str] = set()
     hardcoded_forbidden = {
         "human_in_the_loop",
@@ -164,7 +168,19 @@ def _deployment_preflight(version: XpertVersion, policy: XpertAppPolicy) -> dict
                 _truthy(data.get("knowledgeReadEnabled"))
                 or _truthy(data.get("knowledgeWriteEnabled"))
             )
-            if str(data.get("toolNames") or "").strip() or not dynamic_knowledge:
+            dynamic_datax = False
+            if kind == "workflow_agent":
+                dynamic_datax = any(
+                    str(bound.data.get("runtimeMiddlewareId") or "") == "datax_indicators"
+                    and any(
+                        edge.source == bound.id
+                        and edge.target == node.id
+                        and str(edge.targetHandle or "") == "middleware"
+                        for edge in version.workflow.edges
+                    )
+                    for bound in version.workflow.nodes
+                )
+            if str(data.get("toolNames") or "").strip() or not (dynamic_knowledge or dynamic_datax):
                 has_tool_call = True
         if kind == "workflow_agent":
             has_dynamic_knowledge_read = has_dynamic_knowledge_read or _truthy(
@@ -203,6 +219,16 @@ def _deployment_preflight(version: XpertVersion, policy: XpertAppPolicy) -> dict
             and data.get("runtimeMiddlewareId") == "office_automation"
         ):
             has_office_runtime = True
+        if (
+            kind == "runtime_middleware"
+            and data.get("runtimeMiddlewareId") == "datax_indicators"
+        ):
+            has_datax_runtime = True
+            config = data.get("runtimeMiddlewareConfig")
+            config = config if isinstance(config, dict) else {}
+            has_datax_write = has_datax_write or _truthy(config.get("allowProposals"))
+            datax_project_ids.update(_scoped_values(config.get("projectIds")))
+            datax_model_ids.update(_scoped_values(config.get("modelIds")))
         if kind == "runtime_middleware" and data.get("runtimeMiddlewareId") in {
             "scheduler",
             "ralph_loop",
@@ -265,6 +291,50 @@ def _deployment_preflight(version: XpertVersion, policy: XpertAppPolicy) -> dict
                 "message": "Public Xpert Apps cannot deploy knowledge write proposal tools.",
             }
         )
+    if has_datax_runtime and not policy.allow_datax_read:
+        issues.append(
+            {
+                "code": "app_datax_read_not_allowed",
+                "message": "This Xpert version uses Data X, but App Data X read access is disabled.",
+            }
+        )
+    if has_datax_runtime and not has_tool_policy:
+        issues.append(
+            {
+                "code": "app_datax_tool_policy_required",
+                "message": "Public Data X access requires a tool_policy middleware node.",
+            }
+        )
+    if has_datax_write:
+        issues.append(
+            {
+                "code": "app_datax_write_forbidden",
+                "message": "Public Xpert Apps cannot deploy Data X proposal tools.",
+            }
+        )
+    if has_datax_runtime:
+        try:
+            try:
+                from server.datax.api import get_datax_service
+            except ModuleNotFoundError:
+                from datax.api import get_datax_service
+
+            datax_service = get_datax_service()
+            for project_id in sorted(datax_project_ids):
+                datax_service.get_project(project_id)
+            for model_id in sorted(datax_model_ids):
+                model = datax_service.get_model(model_id)
+                if model.project_id not in datax_project_ids:
+                    raise ValueError(
+                        f"Data X model '{model_id}' is outside the configured project scope."
+                    )
+        except Exception as exc:
+            issues.append(
+                {
+                    "code": "app_datax_scope_invalid",
+                    "message": f"Data X deployment scope is invalid: {exc}",
+                }
+            )
     if has_interactive_hitl:
         issues.append(
             {
@@ -357,6 +427,14 @@ def _truthy(value: Any) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "on"}
     return bool(value)
+
+
+def _scoped_values(value: Any) -> list[str]:
+    if isinstance(value, list):
+        values = value
+    else:
+        values = str(value or "").replace("\r", "\n").replace(",", "\n").split("\n")
+    return list(dict.fromkeys(str(item).strip() for item in values if str(item).strip()))
 
 
 def _public_app_payload(app: Any) -> dict:

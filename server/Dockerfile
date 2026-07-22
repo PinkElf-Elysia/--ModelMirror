@@ -17,7 +17,7 @@ RUN apt-get update \
 
 COPY requirements.txt .
 COPY THIRD_PARTY_NOTICES.md /usr/share/doc/modelmirror/THIRD_PARTY_NOTICES.md
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --retries 5 --timeout 120 -r requirements.txt
 
 COPY main.py .
 COPY data ./data
@@ -25,6 +25,7 @@ COPY api ./api
 COPY mcp ./mcp
 COPY registry ./registry
 COPY rag ./rag
+COPY datax ./datax
 COPY skills ./skills
 COPY xperts ./xperts
 COPY workflow_native ./workflow_native
