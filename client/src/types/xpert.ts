@@ -222,6 +222,7 @@ export interface XpertAppPolicy {
   allow_handoffs: boolean;
   allow_xpert_memory: boolean;
   allow_knowledge_read: boolean;
+  allow_datax_read: boolean;
 }
 
 export interface XpertAppLimits {

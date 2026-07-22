@@ -133,6 +133,25 @@ except ModuleNotFoundError:
     from rag.rag_service import RagService
 
 try:
+    from server.datax import (
+        DataXService,
+        DataXStore,
+        DataXToolsetProvider,
+        configure_datax,
+        datax_router,
+        register_datax_toolset_capability,
+    )
+except ModuleNotFoundError:
+    from datax import (
+        DataXService,
+        DataXStore,
+        DataXToolsetProvider,
+        configure_datax,
+        datax_router,
+        register_datax_toolset_capability,
+    )
+
+try:
     from server.mcp.manager import (
         MCPClientError,
         MCPClientManager,
@@ -525,6 +544,7 @@ app.add_middleware(
 
 app.include_router(dify_router)
 app.include_router(rag_router)
+app.include_router(datax_router)
 app.include_router(skills_router)
 app.include_router(xperts_router)
 app.include_router(xpert_apps_router)
@@ -546,6 +566,10 @@ workflow_mcp_provider = MCPToolsetProvider(tool_registry, mcp_manager)
 xpert_context_store = get_xpert_context_store()
 workflow_memory_provider = MemoryToolsetProvider(xpert_context_store)
 workflow_knowledge_provider = KnowledgeToolsetProvider(get_rag_service)
+datax_store = DataXStore(os.getenv("DATAX_STORAGE_DIR", "").strip() or None)
+datax_service = DataXService(datax_store)
+configure_datax(datax_service)
+workflow_datax_provider = DataXToolsetProvider(datax_service)
 runtime_approval_store = RuntimeApprovalStore(
     storage_dir=AGENT_TASK_STORAGE_DIR or None
 )
@@ -644,6 +668,7 @@ runtime_capabilities.register(
     workflow_knowledge_provider,
     description="Active knowledge retrieval and approval-gated write tools.",
 )
+register_datax_toolset_capability(runtime_capabilities, workflow_datax_provider)
 register_authoring_toolset_capabilities(
     runtime_capabilities,
     workflow_xpert_authoring_provider,
@@ -666,6 +691,7 @@ async def validate_runtime_approval_decision(
         workflow_mcp_provider,
         workflow_memory_provider,
         workflow_knowledge_provider,
+        workflow_datax_provider,
         workflow_todo_provider,
         workflow_sandbox_provider,
         workflow_browser_provider,
@@ -3167,11 +3193,18 @@ async def _run_workflow_response(
                 "mcp_tools": "allow_tools",
                 "memory_tools": "allow_xpert_memory",
                 "knowledge_tools": "allow_knowledge_read",
+                "datax_tools": "allow_datax_read",
             }.get(capability_name, "allow_tools")
             if not app_capability_allowed(app_policy_name):
                 return ToolPermissionPolicy(allow_by_default=False)
             policy = workflow_runtime_context.get("tool_policy")
             if runtime_run_type == "xpert_app" and capability_name == "knowledge_tools":
+                return (
+                    policy
+                    if isinstance(policy, ToolPermissionPolicy)
+                    else workflow_tool_policy
+                )
+            if runtime_run_type == "xpert_app" and capability_name == "datax_tools":
                 return (
                     policy
                     if isinstance(policy, ToolPermissionPolicy)
@@ -3351,6 +3384,7 @@ async def _run_workflow_response(
             browser_automation = middleware_spec(specs, "browser_automation")
             client_tools = middleware_spec(specs, "client_tools")
             office_automation = middleware_spec(specs, "office_automation")
+            datax_indicators = middleware_spec(specs, "datax_indicators")
             scheduler = middleware_spec(specs, "scheduler")
             xpert_authoring = middleware_spec(specs, "xpert_authoring")
             skill_creator = middleware_spec(specs, "skill_creator")
@@ -3529,6 +3563,11 @@ async def _run_workflow_response(
                 if office_automation is not None
                 else {}
             )
+            context_metadata["datax_config"] = (
+                dict(datax_indicators.config)
+                if datax_indicators is not None
+                else {}
+            )
             context_metadata["automation_config"] = (
                 dict(scheduler.config) if scheduler is not None else {}
             )
@@ -3674,6 +3713,9 @@ async def _run_workflow_response(
                 matched_tool = await workflow_knowledge_provider.find_tool(tool_name)
                 capability_name = "knowledge_tools"
             if not matched_tool:
+                matched_tool = await workflow_datax_provider.find_tool(tool_name)
+                capability_name = "datax_tools"
+            if not matched_tool:
                 matched_tool = await workflow_todo_provider.find_tool(tool_name)
                 capability_name = "todo_tools"
             if not matched_tool:
@@ -3716,6 +3758,17 @@ async def _run_workflow_response(
                     "allow_knowledge_read"
                 ):
                     raise PermissionError("Xpert App knowledge read access is disabled.")
+            if capability_name == "datax_tools":
+                if tool_name in {
+                    "datax_indicator_propose_create",
+                    "datax_indicator_propose_update",
+                } and runtime_run_type == "xpert_app":
+                    raise PermissionError("Xpert App Data X proposal access is disabled.")
+                if tool_name not in {
+                    "datax_indicator_propose_create",
+                    "datax_indicator_propose_update",
+                } and not app_capability_allowed("allow_datax_read"):
+                    raise PermissionError("Xpert App Data X read access is disabled.")
             if capability_name == "sandbox_tools" and runtime_run_type == "xpert_app":
                 raise PermissionError("Xpert App Sandbox and Skill access is disabled.")
             if capability_name == "browser_tools" and runtime_run_type == "xpert_app":
@@ -3791,6 +3844,19 @@ async def _run_workflow_response(
                         "browser_config": effective_context.metadata.get("browser_config") or {},
                         "client_tools_config": effective_context.metadata.get("client_tools_config") or {},
                         "office_automation_config": effective_context.metadata.get("office_automation_config") or {},
+                        "datax_project_ids": (
+                            list((effective_context.metadata.get("datax_config") or {}).get("projectIds") or [])
+                            if isinstance((effective_context.metadata.get("datax_config") or {}).get("projectIds"), list)
+                            else [item.strip() for item in re.split(r"[,\n]", str((effective_context.metadata.get("datax_config") or {}).get("projectIds") or "")) if item.strip()]
+                        ),
+                        "datax_model_ids": (
+                            list((effective_context.metadata.get("datax_config") or {}).get("modelIds") or [])
+                            if isinstance((effective_context.metadata.get("datax_config") or {}).get("modelIds"), list)
+                            else [item.strip() for item in re.split(r"[,\n]", str((effective_context.metadata.get("datax_config") or {}).get("modelIds") or "")) if item.strip()]
+                        ),
+                        "datax_allow_proposals": workflow_truthy((effective_context.metadata.get("datax_config") or {}).get("allowProposals", False)),
+                        "datax_max_result_rows": int((effective_context.metadata.get("datax_config") or {}).get("maxResultRows") or 100),
+                        "run_type": runtime_run_type,
                         "automation_config": effective_context.metadata.get("automation_config") or {},
                         "todo_scope_type": todo_scope_type,
                         "todo_scope_id": todo_scope_id,
@@ -3834,6 +3900,8 @@ async def _run_workflow_response(
             include_memory_write: bool = False,
             include_knowledge_read: bool = False,
             include_knowledge_write: bool = False,
+            include_datax: bool = False,
+            include_datax_proposals: bool = False,
             include_todo: bool = False,
             include_sandbox: bool = False,
             include_skills: bool = False,
@@ -3890,6 +3958,17 @@ async def _run_workflow_response(
                     for tool in knowledge_tools
                     if tool.name == "knowledge_propose_write"
                 )
+            datax_tools = await workflow_datax_provider.list_tools()
+            if include_datax and app_capability_allowed("allow_datax_read"):
+                tools.extend(tool for tool in datax_tools if tool.name not in {
+                    "datax_indicator_propose_create",
+                    "datax_indicator_propose_update",
+                })
+            if include_datax_proposals and runtime_run_type != "xpert_app":
+                tools.extend(tool for tool in datax_tools if tool.name in {
+                    "datax_indicator_propose_create",
+                    "datax_indicator_propose_update",
+                })
             if include_todo:
                 tools.extend(await workflow_todo_provider.list_tools())
             if include_sandbox or include_skills:
@@ -3961,6 +4040,7 @@ async def _run_workflow_response(
                     capability_name = {
                         "memory": "memory_tools",
                         "knowledge": "knowledge_tools",
+                        "datax": "datax_tools",
                         "todo": "todo_tools",
                         "sandbox": "sandbox_tools",
                         "skill": "sandbox_tools",
@@ -4001,6 +4081,8 @@ async def _run_workflow_response(
             include_knowledge_read: bool = False,
             include_knowledge_write: bool = False,
             knowledge_base_ids: list[str] | None = None,
+            include_datax: bool = False,
+            include_datax_proposals: bool = False,
             include_todo: bool = False,
             include_sandbox: bool = False,
             include_skills: bool = False,
@@ -4026,6 +4108,8 @@ async def _run_workflow_response(
                 include_memory_write=include_memory_write,
                 include_knowledge_read=include_knowledge_read,
                 include_knowledge_write=include_knowledge_write,
+                include_datax=include_datax,
+                include_datax_proposals=include_datax_proposals,
                 include_todo=include_todo,
                 include_sandbox=include_sandbox,
                 include_skills=include_skills,
@@ -4073,6 +4157,8 @@ async def _run_workflow_response(
                     )
                 if include_automation:
                     required_tools.update({"automation_list", "automation_get"})
+                if include_datax:
+                    required_tools.update({"datax_scope", "datax_indicator_list"})
                 if include_xpert_authoring:
                     required_tools.add("xpert_authoring_catalog")
                 if include_skill_creator:
@@ -5780,6 +5866,9 @@ async def _run_workflow_response(
                         office_automation_spec = middleware_spec(
                             agent_specs, "office_automation"
                         )
+                        datax_indicators_spec = middleware_spec(
+                            agent_specs, "datax_indicators"
+                        )
                         scheduler_spec = middleware_spec(agent_specs, "scheduler")
                         xpert_authoring_spec = middleware_spec(
                             agent_specs, "xpert_authoring"
@@ -5802,6 +5891,13 @@ async def _run_workflow_response(
                         browser_enabled = browser_automation_spec is not None
                         client_tools_enabled = client_tools_spec is not None
                         office_automation_enabled = office_automation_spec is not None
+                        datax_enabled = datax_indicators_spec is not None
+                        datax_allow_proposals = bool(
+                            datax_enabled
+                            and workflow_truthy(
+                                datax_indicators_spec.config.get("allowProposals", False)
+                            )
+                        )
                         automation_enabled = scheduler_spec is not None
                         xpert_authoring_enabled = xpert_authoring_spec is not None
                         skill_creator_enabled = skill_creator_spec is not None
@@ -6075,6 +6171,37 @@ async def _run_workflow_response(
                             raise ValueError(
                                 "office_automation requires workflow_agent toolMode=mcp_tools."
                             )
+                        if datax_enabled:
+                            if tool_mode != "mcp_tools":
+                                raise ValueError(
+                                    "datax_indicators requires workflow_agent toolMode=mcp_tools."
+                                )
+                            project_values = datax_indicators_spec.config.get("projectIds")
+                            model_values = datax_indicators_spec.config.get("modelIds")
+                            datax_project_ids = (
+                                [str(item).strip() for item in project_values if str(item).strip()]
+                                if isinstance(project_values, list)
+                                else [item.strip() for item in re.split(r"[,\n]", str(project_values or "")) if item.strip()]
+                            )
+                            datax_model_ids = (
+                                [str(item).strip() for item in model_values if str(item).strip()]
+                                if isinstance(model_values, list)
+                                else [item.strip() for item in re.split(r"[,\n]", str(model_values or "")) if item.strip()]
+                            )
+                            if not 1 <= len(datax_project_ids) <= 10:
+                                raise ValueError(
+                                    "datax_indicators requires between 1 and 10 projects."
+                                )
+                            if not 1 <= len(datax_model_ids) <= 20:
+                                raise ValueError(
+                                    "datax_indicators requires between 1 and 20 semantic models."
+                                )
+                            for datax_model_id in datax_model_ids:
+                                datax_model = datax_service.get_model(datax_model_id)
+                                if datax_model.project_id not in datax_project_ids:
+                                    raise ValueError(
+                                        "datax_indicators model scope must be contained by project scope."
+                                    )
                         if exception_handling not in {"none", "fail", "empty_output"}:
                             raise ValueError(
                                 "workflow_agent exceptionHandling must be none, fail, or empty_output."
@@ -6550,6 +6677,8 @@ async def _run_workflow_response(
                                             or knowledge_writer_spec is not None
                                         ),
                                         knowledge_base_ids=knowledge_base_ids,
+                                        include_datax=datax_enabled,
+                                        include_datax_proposals=datax_allow_proposals,
                                         include_todo=todo_spec is not None,
                                         include_sandbox=sandbox_enabled,
                                         include_skills=skills_enabled,
@@ -6644,6 +6773,8 @@ async def _run_workflow_response(
                                                 or knowledge_writer_spec is not None
                                             ),
                                             knowledge_base_ids=knowledge_base_ids,
+                                            include_datax=datax_enabled,
+                                            include_datax_proposals=datax_allow_proposals,
                                             include_todo=todo_spec is not None,
                                             include_sandbox=sandbox_enabled,
                                             include_skills=skills_enabled,
@@ -9901,6 +10032,7 @@ async def team_chat(payload: TeamChatRequest, request: Request):
 
 @app.on_event("startup")
 async def start_mcp_ttl_cleanup() -> None:
+    await asyncio.to_thread(datax_service.recover_import_jobs)
     mcp_manager.start_ttl_cleanup(on_cleanup=tool_registry.unregister_sessions)
     get_pipeline_executor().start()
     get_evaluation_executor().start()

@@ -14,6 +14,7 @@ class XpertAppPolicy(BaseModel):
     allow_handoffs: bool = False
     allow_xpert_memory: bool = False
     allow_knowledge_read: bool = False
+    allow_datax_read: bool = False
 
 
 class XpertAppLimits(BaseModel):

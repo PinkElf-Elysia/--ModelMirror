@@ -4,6 +4,7 @@ import re
 import json
 from collections import defaultdict, deque
 from string import Formatter
+from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from jsonschema import Draft202012Validator
@@ -2806,6 +2807,54 @@ def validate_automation_middleware_bindings(
                         node_id=middleware_node.id,
                     )
                 )
+            if middleware_id == "datax_indicators":
+                if tool_mode != "mcp_tools":
+                    issues.append(
+                        ValidationIssue(
+                            code="datax_indicators_requires_runtime_tool_mode",
+                            message=(
+                                "datax_indicators requires workflow_agent "
+                                "toolMode=mcp_tools."
+                            ),
+                            node_id=middleware_node.id,
+                        )
+                    )
+                def scoped_ids(value: Any) -> list[str]:
+                    values = value if isinstance(value, list) else re.split(r"[,\n]", str(value or ""))
+                    return list(
+                        dict.fromkeys(str(item).strip() for item in values if str(item).strip())
+                    )
+
+                project_ids = scoped_ids(config.get("projectIds"))
+                model_ids = scoped_ids(config.get("modelIds"))
+                if not 1 <= len(project_ids) <= 10:
+                    issues.append(
+                        ValidationIssue(
+                            code="datax_indicators_projects_required",
+                            message="datax_indicators requires between 1 and 10 project IDs.",
+                            node_id=middleware_node.id,
+                        )
+                    )
+                if not 1 <= len(model_ids) <= 20:
+                    issues.append(
+                        ValidationIssue(
+                            code="datax_indicators_models_required",
+                            message="datax_indicators requires between 1 and 20 model IDs.",
+                            node_id=middleware_node.id,
+                        )
+                    )
+                try:
+                    max_rows = int(config.get("maxResultRows", 100))
+                except (TypeError, ValueError):
+                    max_rows = 0
+                if not 1 <= max_rows <= 500:
+                    issues.append(
+                        ValidationIssue(
+                            code="datax_indicators_max_rows_invalid",
+                            message="datax_indicators maxResultRows must be between 1 and 500.",
+                            node_id=middleware_node.id,
+                        )
+                    )
             if (
                 middleware_id == "knowledge_writer"
                 and not config_truthy(config.get("auto_propose_verified_output"))

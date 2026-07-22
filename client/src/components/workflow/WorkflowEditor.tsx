@@ -16,6 +16,7 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { models } from "../../data/models";
 import {
   type CodeOperation,
@@ -30,6 +31,11 @@ import {
 } from "../../types/workflow";
 import { type RuntimeMiddlewareField } from "../../types/runtimeMiddleware";
 import { type XpertListResponse, type XpertSummary } from "../../types/xpert";
+import {
+  createXpert,
+  toXpertDraftWorkflow,
+  updateXpert,
+} from "../../utils/xpertApi";
 import { readStoredWorkflow, saveStoredWorkflow } from "../../utils/workflowStorage";
 import NodePalette from "./NodePalette";
 import WorkflowNodeCard from "./WorkflowNodeCard";
@@ -2611,10 +2617,12 @@ function WorkflowCanvas({
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [saveNotice, setSaveNotice] = useState("");
   const [isSaving, setIsSaving] = useState(false);
+  const [isConverting, setIsConverting] = useState(false);
   const [isNodePaletteOpen, setIsNodePaletteOpen] = useState(false);
   const [workspaceTab, setWorkspaceTab] =
     useState<WorkflowWorkspaceTab>("config");
   const { screenToFlowPosition } = useReactFlow();
+  const navigate = useNavigate();
 
   const definition = useMemo<WorkflowDefinition>(
     () => ({
@@ -2729,6 +2737,19 @@ function WorkflowCanvas({
     setSelectedEdgeId(null);
   }, [selectedEdgeId, setEdges]);
 
+  const deleteSelectedNode = useCallback(() => {
+    if (!selectedNodeId) return;
+    setNodes((currentNodes) =>
+      currentNodes.filter((node) => node.id !== selectedNodeId),
+    );
+    setEdges((currentEdges) =>
+      currentEdges.filter(
+        (edge) => edge.source !== selectedNodeId && edge.target !== selectedNodeId,
+      ),
+    );
+    setSelectedNodeId(null);
+  }, [selectedNodeId, setEdges, setNodes]);
+
   function updateNodeData(nodeId: string, patch: Partial<WorkflowNodeData>) {
     setNodes((currentNodes) =>
       currentNodes.map((node) =>
@@ -2767,6 +2788,47 @@ function WorkflowCanvas({
       setIsSaving(false);
     }
     window.setTimeout(() => setSaveNotice(""), 1800);
+  }
+
+  async function convertToXpertDraft() {
+    if (onSave || isConverting) return;
+    const currentDefinition = {
+      ...definition,
+      updatedAt: new Date().toISOString(),
+    };
+    setIsConverting(true);
+    try {
+      const inputVariable =
+        currentDefinition.nodes
+          .find((node) => node.data.kind === "input")
+          ?.data.variableName?.trim() || "user_input";
+      const outputVariable =
+        currentDefinition.nodes
+          .find((node) => node.data.kind === "output")
+          ?.data.outputVariable?.trim() || "agent_output";
+      const created = await createXpert({
+        name: title.trim() || "未命名 Xpert",
+        description: "由经典工作流草稿转换。",
+        tags: ["workflow-import"],
+      });
+      await updateXpert(created.id, {
+        draft: {
+          ...created.draft,
+          workflow: toXpertDraftWorkflow(currentDefinition),
+          input_variable: inputVariable,
+          output_variable: outputVariable,
+        },
+      });
+      saveStoredWorkflow(currentDefinition);
+      navigate(`/agents/studio/${created.id}`);
+    } catch (error) {
+      setSaveNotice(
+        error instanceof Error ? error.message : "转换 Xpert 草稿失败，请稍后重试",
+      );
+      window.setTimeout(() => setSaveNotice(""), 2600);
+    } finally {
+      setIsConverting(false);
+    }
   }
 
   function onDrop(event: React.DragEvent<HTMLDivElement>) {
@@ -2825,6 +2887,30 @@ function WorkflowCanvas({
     );
   }, [nodes]);
 
+  useEffect(() => {
+    function handleDeleteKey(event: KeyboardEvent) {
+      if (event.key !== "Delete" && event.key !== "Backspace") return;
+      const target = event.target as HTMLElement | null;
+      if (
+        target?.isContentEditable ||
+        target?.tagName === "INPUT" ||
+        target?.tagName === "TEXTAREA" ||
+        target?.tagName === "SELECT"
+      ) {
+        return;
+      }
+      if (selectedNodeId) {
+        event.preventDefault();
+        deleteSelectedNode();
+      } else if (selectedEdgeId) {
+        event.preventDefault();
+        deleteSelectedEdge();
+      }
+    }
+    window.addEventListener("keydown", handleDeleteKey);
+    return () => window.removeEventListener("keydown", handleDeleteKey);
+  }, [deleteSelectedEdge, deleteSelectedNode, selectedEdgeId, selectedNodeId]);
+
   return (
     <div className="grid min-h-[calc(100vh-8rem)] gap-5 xl:grid-cols-[minmax(0,1fr)_380px]">
       <aside className="hidden">
@@ -2866,6 +2952,16 @@ function WorkflowCanvas({
               <span className="rounded-full border border-emerald-300/25 bg-emerald-300/10 px-3 py-1.5 text-xs font-semibold text-emerald-100">
                 {saveNotice}
               </span>
+            ) : null}
+            {!onSave ? (
+              <button
+                className="rounded-full border border-cyan-300/30 bg-cyan-300/10 px-4 py-2 text-sm font-semibold text-cyan-100 transition hover:bg-cyan-300/20 disabled:opacity-50"
+                disabled={isConverting}
+                onClick={() => void convertToXpertDraft()}
+                type="button"
+              >
+                {isConverting ? "转换中..." : "转为 Xpert 草稿"}
+              </button>
             ) : null}
             <button
               className="rounded-full border border-white/10 bg-white/[0.06] px-4 py-2 text-sm font-semibold text-slate-100 transition hover:border-hire-300/40 hover:bg-hire-300/10 hover:text-hire-100"
@@ -2922,6 +3018,17 @@ function WorkflowCanvas({
                   type="button"
                 >
                   × 删除连线
+                </button>
+              </Panel>
+            ) : null}
+            {selectedNodeId ? (
+              <Panel position="bottom-left">
+                <button
+                  className="mb-16 rounded-full border border-rose-300/35 bg-rose-400/15 px-3 py-1.5 text-xs font-semibold text-rose-100 shadow-lg shadow-rose-950/30 transition hover:bg-rose-400/25"
+                  onClick={deleteSelectedNode}
+                  type="button"
+                >
+                  × 删除节点
                 </button>
               </Panel>
             ) : null}

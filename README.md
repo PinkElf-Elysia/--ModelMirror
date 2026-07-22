@@ -15,6 +15,7 @@
 - Skill：Skill 安装、管理和聊天注入。
 - 工作流：`/workflow` 使用经典自研 React Flow 画布；`/workflow-native` 保留实验线。
 - RAG：`/rag` 使用本地 RAG 资料库，支持文档上传、切分、向量检索和聊天引用。
+- Data X：`/datax` 支持 CSV/XLSX/Parquet 快照、语义模型、版本化指标、受限分析和指标提案审批。
 - Xpert Studio：创建草稿、发布不可变版本，并通过 Goal、Handoff、文件、记忆与 Knowledge Pipeline 组合执行。
 - Xpert App/API：把已发布版本固定部署为未列出分享 App，并提供带密钥、配额和回滚的 OpenAI 兼容接口。
 - newAPI：`/settings` 以内嵌 iframe 接入 newAPI 控制台，后端可优先走 OpenAI 兼容网关。
@@ -22,7 +23,7 @@
 ## 技术栈
 
 - 前端：React + TypeScript + Tailwind CSS + Vite + React Router + ReactMarkdown + @xyflow/react。
-- 后端：FastAPI + Pydantic + httpx + ChromaDB + MCP Python SDK。
+- 后端：FastAPI + Pydantic + httpx + ChromaDB + DuckDB + MCP Python SDK。
 - 本地部署：Docker Compose，包含 `client`、`server`、`new-api` 服务。
 
 ## 快速启动
@@ -61,6 +62,7 @@ http://localhost:5173/workflow
 http://localhost:5173/agents/studio
 http://localhost:5173/agents/goals
 http://localhost:5173/rag
+http://localhost:5173/datax
 http://localhost:5173/settings
 http://localhost:3000
 ```

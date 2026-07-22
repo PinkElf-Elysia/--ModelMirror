@@ -726,3 +726,11 @@ The Xpert Studio fields `enableFileUnderstanding`, `memoryReadEnabled`, `memoryR
 `xpert_authoring` 与 `skill_creator` 使用 Agent middleware binding，不参与控制流拓扑。两者要求 `toolMode=mcp_tools`，并从节点配置编译允许创建/更新的动作与目标 ID 范围。工具只创建或校验 proposal，不能调用 Xpert publish 或 Skill install；管理端批准后也只写草稿层。
 
 中间件 registry 的 `config_version / execution_status / requires_tool_mode / app_policy / security_category` 是校验与部署预检共享的安全契约。公开 App 对 `app_policy=forbidden` 的中间件 fail-closed。详细状态机、revision、Skill 包白名单与 API 见 `docs/XPERT_AUTHORING.md`。
+
+## 2026-07-22 Data X Indicators Middleware
+
+`datax_indicators` 通过 middleware binding 绑定 `workflow_agent`，不新增控制流节点或第二套 runner。配置固定项目、语义模型、结果行数和 proposal 权限；运行工具继续经过选择器、policy、HITL、audit 与 checkpoint。Workflow、已发布 Xpert、Goal、Handoff 和 Automation 自动继承该语义，SSE wire format 不变。
+
+画布节点现在可以通过选中后的删除按钮或 Delete/Backspace 删除，关联边同步清理。classic `/workflow/:id` 草稿（包括 MetaAgent 导入草稿）可显式转为服务端 Xpert 草稿，转换后进入同一 Xpert Studio 编辑和发布路径。
+
+Data X 的数据模型、受限查询 DSL、提案/发布边界和 App 策略见 `docs/XPERT_DATAX.md`。

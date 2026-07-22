@@ -17,7 +17,7 @@ Do not use for: refactoring, writing scripts from scratch, debugging business lo
 
 本文件是模镜仓库内 AI Agent、人类开发者和自动化任务的项目级操作说明。任何代码生成、重构、测试、提交和发布都必须优先遵守本文档。
 
-最后更新日期：2026-07-19
+最后更新日期：2026-07-22
 维护人：模镜团队
 
 ## 1. 项目边界
@@ -32,6 +32,7 @@ Do not use for: refactoring, writing scripts from scratch, debugging business lo
 - 工作流：`/workflow` 默认使用经典自研 React Flow 画布，`/workflow-native` 是实验线。
 - 协作 Runtime：AgentTask、HandoffExecutor、Conversation Goal 与 RunRegistry 共同提供单进程文件型协作闭环。
 - RAG：`/rag` 是本地资料库、版本化 Knowledge Pipeline 与检索增强页面。
+- Data X：`/datax` 提供文件快照、语义模型、版本化指标、受限分析查询和指标提案审批。
 - 上下文：Xpert Chat 支持会话附件、文件理解、显式记忆和待确认记忆候选。
 - 运行观测：`/runtime` 聚合 MCP、Tool Registry、RunRegistry、Skill 和脱敏环境状态。
 - 设置：`/settings` 内嵌 newAPI 控制台。
@@ -51,6 +52,7 @@ Do not use for: refactoring, writing scripts from scratch, debugging business lo
 - `/workflow`
 - `/workflow-native`
 - `/rag`
+- `/datax`
 - `/mcps`
 - `/skills`
 - `/studio`
@@ -374,7 +376,20 @@ Office 自动化是高风险客户端副作用路径。修改 `server/xpert_runt
 
 详细契约见 `docs/XPERT_OFFICE_AUTOMATION.md`。
 
-## 21. Git 规范
+## 21. Data X 高风险路径
+
+- CSV、XLSX、Parquet 必须先固定为不可变 SHA-256 快照，再导入项目隔离的 DuckDB；导入失败不得切换 ready 状态。
+- Data X API 和 Runtime Toolset 禁止接受任意 SQL。查询必须从已验证的指标、字段、过滤和排序 DSL 编译，并使用参数绑定处理值。
+- 语义模型最多包含 5 个实体，只允许显式 `inner` / `left` 等值连接；字段必须属于已声明实体和来源快照。
+- 指标草稿不得改变线上语义。只有显式发布产生的不可变 `IndicatorVersion` 可供 Agent、Goal、Handoff、Automation 和 App 查询。
+- 派生指标表达式只允许已发布指标 code、数字、括号和 `+ - * /`；必须拒绝函数、属性访问、循环依赖和除零。
+- `datax_indicators` 必须绑定 `workflow_agent`、启用 Runtime 工具模式，并显式限制项目和模型范围。模型不能通过参数扩大 scope。
+- Agent 只能创建指标提案；批准只生成草稿，仍需人工预览和显式发布。
+- 公共 App 的 Data X 默认关闭。启用 `allow_datax_read` 后仍只允许固定 scope 内的已发布指标；提案、原始明细和文件导出永远禁止。
+- API、audit 和 checkpoint 不得保存上传数据、完整查询结果、DuckDB 路径、展开 SQL、密钥或未脱敏工具输出。
+- 修改 Data X 必须运行 `server/tests/test_datax.py`、workflow validate、Xpert App preflight、前端生产构建和容器重启持久化验收。
+
+## 22. Git 规范
 
 ### 自编写高风险路径
 
@@ -406,7 +421,7 @@ docs: 更新聊天图片输出 harness
 feature: 添加 MCP stdio 客户端管理器
 ```
 
-## 22. 交付格式
+## 23. 交付格式
 
 最终回复应包含：
 

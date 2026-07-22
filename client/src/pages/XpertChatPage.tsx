@@ -6,6 +6,7 @@ import RuntimeApprovalPanel from "../components/runtime/RuntimeApprovalPanel";
 import BrowserSessionPanel from "../components/runtime/BrowserSessionPanel";
 import ClientToolPanel from "../components/runtime/ClientToolPanel";
 import SandboxWorkspacePanel from "../components/runtime/SandboxWorkspacePanel";
+import DataXResultCard from "../components/datax/DataXResultCard";
 import FileMemoryPanel from "../components/xpert/FileMemoryPanel";
 import {
   type XpertConversationMessage,
@@ -810,6 +811,7 @@ export default function XpertChatPage() {
                 {messages.map((message, index) => (
                   <article className={`max-w-[86%] rounded-lg border p-3 ${message.role === "user" ? "ml-auto border-hire-300/25 bg-hire-300/10" : "border-white/10 bg-white/[0.045]"}`} key={`${message.role}-${index}`}>
                     <p className="text-[10px] font-semibold uppercase text-slate-500">{roleCopy(message.role)}</p>
+                    {message.role === "assistant" ? <DataXResultCard content={message.content} /> : null}
                     <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-slate-100">{message.content}</p>
                     <button
                       className="mt-2 text-[10px] font-semibold text-cyan-200/75 transition hover:text-cyan-100"
