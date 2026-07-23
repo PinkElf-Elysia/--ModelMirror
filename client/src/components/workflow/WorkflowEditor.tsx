@@ -341,6 +341,29 @@ function createNodeData(
     };
   }
 
+  if (kind === "external_xpert") {
+    return {
+      kind,
+      title: "外部 Xpert",
+      description: "将已发布 Xpert 作为当前智能体的同步协作者工具。",
+      xpertId: "",
+      toolName: "external_expert",
+      versionPolicy: "current_published",
+      pinnedVersion: "",
+    };
+  }
+
+  if (kind === "knowledge_base") {
+    return {
+      kind,
+      title: "知识库资源",
+      description: "将一个知识库绑定到当前智能体的只读知识工具。",
+      knowledgeBaseId: "",
+      topK: "5",
+      scoreThreshold: "0",
+    };
+  }
+
   if (kind === "agent_task") {
     return {
       kind,
@@ -819,6 +842,7 @@ function AgentStudioPanel({
   registryTools,
   registryToolsError,
   boundMiddlewares,
+  boundResources,
   onSelectNode,
 }: {
   data: WorkflowNodeData;
@@ -826,6 +850,7 @@ function AgentStudioPanel({
   registryTools: RegistryToolOption[];
   registryToolsError: string;
   boundMiddlewares: WorkflowNode[];
+  boundResources: WorkflowNode[];
   onSelectNode: (nodeId: string) => void;
 }) {
   const isWorkflowAgent = data.kind === "workflow_agent";
@@ -1330,7 +1355,246 @@ function AgentStudioPanel({
           />
         </Field>
       </ConfigSection>
+
+      {isWorkflowAgent ? (
+        <ConfigSection
+          description="资源绑定不进入控制流，只向当前智能体开放对应 Runtime 工具。"
+          title="资源绑定"
+        >
+          {boundResources.length ? (
+            <div className="space-y-2">
+              {boundResources.map((resource) => (
+                <button
+                  className="flex w-full items-center gap-3 rounded-lg border border-cyan-300/20 bg-cyan-300/10 px-3 py-2 text-left transition hover:border-cyan-200/45"
+                  key={resource.id}
+                  onClick={() => onSelectNode(resource.id)}
+                  type="button"
+                >
+                  <span className="flex h-7 w-7 items-center justify-center rounded-md bg-cyan-300/15 text-[10px] font-semibold text-cyan-100">
+                    {resource.data.kind === "external_xpert" ? "XP" : "KB"}
+                  </span>
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-xs font-semibold text-cyan-50">
+                      {resource.data.title}
+                    </span>
+                    <span className="block truncate text-[11px] text-cyan-200/70">
+                      {resource.data.kind === "external_xpert"
+                        ? String(resource.data.toolName || "external_xpert")
+                        : String(resource.data.knowledgeBaseId || "未选择知识库")}
+                    </span>
+                  </span>
+                </button>
+              ))}
+            </div>
+          ) : (
+            <p className="rounded-lg border border-dashed border-white/15 bg-white/[0.035] px-3 py-3 text-xs leading-5 text-slate-400">
+              从节点库拖入外部 Xpert 或知识库，再用专用端口绑定到当前智能体。
+            </p>
+          )}
+        </ConfigSection>
+      ) : null}
     </div>
+  );
+}
+
+interface WorkflowResourceOption {
+  id: string;
+  slug?: string;
+  name: string;
+  description?: string;
+  status?: string;
+  published_version?: number | null;
+  active_version_id?: string | null;
+  document_count?: number;
+}
+
+function ResourceNodeConfig({
+  data,
+  update,
+}: {
+  data: WorkflowNodeData;
+  update: (patch: Partial<WorkflowNodeData>) => void;
+}) {
+  const [options, setOptions] = useState<WorkflowResourceOption[]>([]);
+  const [loadError, setLoadError] = useState("");
+  const resourceKind =
+    data.kind === "external_xpert" ? "external_xpert" : "knowledge_base";
+
+  useEffect(() => {
+    let cancelled = false;
+    void fetch(`/api/workflow/resource-options?kind=${resourceKind}`)
+      .then(async (response) => {
+        const payload = (await response.json()) as {
+          items?: WorkflowResourceOption[];
+        };
+        if (!response.ok || !Array.isArray(payload.items)) {
+          throw new Error("资源选项暂不可用。");
+        }
+        if (!cancelled) {
+          setOptions(payload.items);
+          setLoadError("");
+        }
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) {
+          setOptions([]);
+          setLoadError(
+            error instanceof Error ? error.message : "资源选项加载失败。",
+          );
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [resourceKind]);
+
+  if (data.kind === "external_xpert") {
+    return (
+      <ConfigSection
+        description="发布 Xpert 时会把当前发布版本解析为不可变固定版本。"
+        title="外部 Xpert"
+      >
+        <Field label="已发布 Xpert">
+          <select
+            className={textInputClass()}
+            onChange={(event) => {
+              const selected = options.find(
+                (item) => item.id === event.target.value,
+              );
+              update({
+                xpertId: event.target.value,
+                description: selected?.description || data.description,
+                pinnedVersion:
+                  data.versionPolicy === "pinned"
+                    ? String(selected?.published_version ?? "")
+                    : data.pinnedVersion,
+              });
+            }}
+            value={data.xpertId ?? ""}
+          >
+            <option className="bg-slate-950" value="">
+              选择外部 Xpert
+            </option>
+            {options.map((item) => (
+              <option
+                className="bg-slate-950"
+                disabled={item.status !== "published"}
+                key={item.id}
+                value={item.id}
+              >
+                {item.name} · {item.status} · v{item.published_version ?? "-"}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field label="工具名称">
+          <input
+            className={textInputClass()}
+            onChange={(event) => update({ toolName: event.target.value })}
+            placeholder="research_expert"
+            value={data.toolName ?? ""}
+          />
+        </Field>
+        <Field label="版本策略">
+          <select
+            className={textInputClass()}
+            onChange={(event) =>
+              update({
+                versionPolicy: event.target.value,
+                pinnedVersion:
+                  event.target.value === "pinned"
+                    ? String(
+                        options.find((item) => item.id === data.xpertId)
+                          ?.published_version ?? "",
+                      )
+                    : "",
+              })
+            }
+            value={data.versionPolicy ?? "current_published"}
+          >
+            <option className="bg-slate-950" value="current_published">
+              草稿跟随当前发布版本
+            </option>
+            <option className="bg-slate-950" value="pinned">
+              草稿固定版本
+            </option>
+          </select>
+        </Field>
+        {data.versionPolicy === "pinned" ? (
+          <Field label="固定版本">
+            <input
+              className={textInputClass()}
+              min={1}
+              onChange={(event) =>
+                update({ pinnedVersion: event.target.value })
+              }
+              type="number"
+              value={data.pinnedVersion ?? ""}
+            />
+          </Field>
+        ) : null}
+        {loadError ? (
+          <p className="text-xs leading-5 text-amber-200">{loadError}</p>
+        ) : null}
+      </ConfigSection>
+    );
+  }
+
+  return (
+    <ConfigSection
+      description="使用知识库活动索引的 Retrieval Profile；该绑定只提供读取、原文和引用工具。"
+      title="知识库资源"
+    >
+      <Field label="知识库">
+        <select
+          className={textInputClass()}
+          onChange={(event) =>
+            update({ knowledgeBaseId: event.target.value })
+          }
+          value={data.knowledgeBaseId ?? ""}
+        >
+          <option className="bg-slate-950" value="">
+            选择知识库
+          </option>
+          {options.map((item) => (
+            <option className="bg-slate-950" key={item.id} value={item.id}>
+              {item.name} ·{" "}
+              {item.status === "active"
+                ? `active ${item.active_version_id ?? ""}`
+                : "暂无活动索引"}
+            </option>
+          ))}
+        </select>
+      </Field>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <Field label="Top-K">
+          <input
+            className={textInputClass()}
+            max={10}
+            min={1}
+            onChange={(event) => update({ topK: event.target.value })}
+            type="number"
+            value={data.topK ?? "5"}
+          />
+        </Field>
+        <Field label="Score 阈值">
+          <input
+            className={textInputClass()}
+            max={1}
+            min={0}
+            onChange={(event) =>
+              update({ scoreThreshold: event.target.value })
+            }
+            step={0.05}
+            type="number"
+            value={data.scoreThreshold ?? "0"}
+          />
+        </Field>
+      </div>
+      {loadError ? (
+        <p className="text-xs leading-5 text-amber-200">{loadError}</p>
+      ) : null}
+    </ConfigSection>
   );
 }
 
@@ -1463,6 +1727,21 @@ function NodeConfig({
               Number(right.data.middlewarePriority ?? 100);
             return priorityDifference || left.id.localeCompare(right.id);
           })
+      : [];
+  const boundResources =
+    data.kind === "workflow_agent"
+      ? edges
+          .filter(
+            (edge) =>
+              edge.target === node.id &&
+              ["expert", "knowledge"].includes(edge.targetHandle ?? ""),
+          )
+          .map((edge) => nodes.find((candidate) => candidate.id === edge.source))
+          .filter(
+            (candidate): candidate is WorkflowNode =>
+              candidate?.data.kind === "external_xpert" ||
+              candidate?.data.kind === "knowledge_base",
+          )
       : [];
   const updateRuntimeMiddlewareConfig = (fieldName: string, value: unknown) =>
     update({
@@ -2001,9 +2280,14 @@ function NodeConfig({
         </>
       ) : null}
 
+      {data.kind === "external_xpert" || data.kind === "knowledge_base" ? (
+        <ResourceNodeConfig data={data} update={update} />
+      ) : null}
+
       {data.kind === "agent" || data.kind === "workflow_agent" ? (
         <AgentStudioPanel
           boundMiddlewares={boundMiddlewares}
+          boundResources={boundResources}
           data={data}
           onSelectNode={onSelectNode}
           registryTools={registryTools}
@@ -2663,6 +2947,75 @@ function WorkflowCanvas({
       const sourceNode = nodes.find((node) => node.id === connection.source);
       const targetNode = nodes.find((node) => node.id === connection.target);
       const middlewareBinding = connection.targetHandle === "middleware";
+      const resourceBinding =
+        connection.targetHandle === "expert" ||
+        connection.targetHandle === "knowledge";
+      if (resourceBinding) {
+        const expected =
+          connection.targetHandle === "expert"
+            ? {
+                sourceKind: "external_xpert",
+                sourceHandle: "expert-binding",
+                color: "#93c5fd",
+              }
+            : {
+                sourceKind: "knowledge_base",
+                sourceHandle: "knowledge-binding",
+                color: "#5eead4",
+              };
+        if (
+          connection.sourceHandle !== expected.sourceHandle ||
+          sourceNode?.data.kind !== expected.sourceKind ||
+          targetNode?.data.kind !== "workflow_agent"
+        ) {
+          setSaveNotice("资源节点必须连接到 workflow_agent 对应的资源入口。");
+          return;
+        }
+        if (edges.some((edge) => edge.source === connection.source)) {
+          setSaveNotice("一个资源节点只能绑定一个工作流智能体。");
+          return;
+        }
+        setEdges((currentEdges) =>
+          addEdge(
+            {
+              ...connection,
+              animated: true,
+              className:
+                "modelmirror-workflow-edge modelmirror-resource-binding-edge",
+              style: {
+                stroke: expected.color,
+                strokeDasharray: "7 5",
+                strokeWidth: 2,
+              },
+            },
+            currentEdges,
+          ),
+        );
+        if (targetNode.data.toolMode !== "mcp_tools") {
+          setNodes((currentNodes) =>
+            currentNodes.map((item) =>
+              item.id === targetNode.id
+                ? {
+                    ...item,
+                    data: { ...item.data, toolMode: "mcp_tools" },
+                  }
+                : item,
+            ),
+          );
+        }
+        setSaveNotice("");
+        return;
+      }
+      if (
+        ["expert-binding", "knowledge-binding"].includes(
+          connection.sourceHandle ?? "",
+        ) ||
+        sourceNode?.data.kind === "external_xpert" ||
+        sourceNode?.data.kind === "knowledge_base"
+      ) {
+        setSaveNotice("资源节点只能通过专用端口绑定到 workflow_agent。");
+        return;
+      }
       if (middlewareBinding) {
         if (
           connection.sourceHandle !== "middleware-binding" ||

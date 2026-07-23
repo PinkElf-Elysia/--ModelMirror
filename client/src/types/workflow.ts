@@ -17,6 +17,8 @@ export type WorkflowNodeKind =
   | "question_classifier"
   | "agent"
   | "workflow_agent"
+  | "external_xpert"
+  | "knowledge_base"
   | "agent_task"
   | "agent_handoff"
   | "handoff_router"
@@ -60,6 +62,11 @@ export interface WorkflowNodeData extends Record<string, unknown> {
   schema?: string;
   queryVariable?: string;
   knowledgeBaseId?: string;
+  xpertId?: string;
+  versionPolicy?: string;
+  pinnedVersion?: string;
+  topK?: string;
+  scoreThreshold?: string;
   top_k?: string;
   sourcePathVariable?: string;
   categories?: string;

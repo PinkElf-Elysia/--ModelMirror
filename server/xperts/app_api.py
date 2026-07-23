@@ -134,6 +134,7 @@ def _deployment_preflight(version: XpertVersion, policy: XpertAppPolicy) -> dict
     has_file_memory_writeback = False
     has_datax_runtime = False
     has_datax_write = False
+    has_external_xpert = False
     datax_project_ids: set[str] = set()
     datax_model_ids: set[str] = set()
     contract_forbidden_middleware: set[str] = set()
@@ -162,6 +163,13 @@ def _deployment_preflight(version: XpertVersion, policy: XpertAppPolicy) -> dict
         ):
             contract_forbidden_middleware.add(middleware_id)
         if kind == "mcp_tool":
+            has_tool_call = True
+        if kind == "external_xpert":
+            has_external_xpert = True
+            has_tool_call = True
+        if kind == "knowledge_base":
+            has_knowledge = True
+            has_dynamic_knowledge_read = True
             has_tool_call = True
         if kind in {"agent", "workflow_agent"} and data.get("toolMode") == "mcp_tools":
             dynamic_knowledge = kind == "workflow_agent" and (
@@ -273,6 +281,13 @@ def _deployment_preflight(version: XpertVersion, policy: XpertAppPolicy) -> dict
             {
                 "code": "app_handoffs_not_allowed",
                 "message": "This Xpert version uses Handoff, but App Handoff access is disabled.",
+            }
+        )
+    if has_external_xpert:
+        issues.append(
+            {
+                "code": "app_external_xpert_forbidden",
+                "message": "Public Xpert Apps cannot deploy external Xpert collaborators.",
             }
         )
     if has_dynamic_knowledge_read and not policy.allow_knowledge_read:

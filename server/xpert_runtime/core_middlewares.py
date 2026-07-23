@@ -30,8 +30,44 @@ def is_middleware_binding_edge(edge: Any) -> bool:
     return str(getattr(edge, "targetHandle", None) or "").strip() == "middleware"
 
 
+RESOURCE_BINDING_HANDLES = {"expert", "knowledge", "toolset"}
+
+
+def is_resource_binding_edge(edge: Any) -> bool:
+    return (
+        str(getattr(edge, "targetHandle", None) or "").strip()
+        in RESOURCE_BINDING_HANDLES
+    )
+
+
+def is_non_control_binding_edge(edge: Any) -> bool:
+    return is_middleware_binding_edge(edge) or is_resource_binding_edge(edge)
+
+
 def control_flow_edges(edges: list[Any]) -> list[Any]:
-    return [edge for edge in edges if not is_middleware_binding_edge(edge)]
+    return [edge for edge in edges if not is_non_control_binding_edge(edge)]
+
+
+def bound_resource_nodes(
+    nodes_by_id: dict[str, Any],
+    edges: list[Any],
+    agent_node_id: str,
+    binding_handle: str,
+) -> list[Any]:
+    if binding_handle not in RESOURCE_BINDING_HANDLES:
+        return []
+    result: list[Any] = []
+    for edge in edges:
+        if (
+            str(getattr(edge, "target", "")) != agent_node_id
+            or str(getattr(edge, "targetHandle", None) or "").strip()
+            != binding_handle
+        ):
+            continue
+        node = nodes_by_id.get(str(getattr(edge, "source", "")))
+        if node is not None:
+            result.append(node)
+    return sorted(result, key=lambda item: str(getattr(item, "id", "")))
 
 
 def middleware_spec_from_node(node: Any, *, binding: str) -> RuntimeMiddlewareSpec:

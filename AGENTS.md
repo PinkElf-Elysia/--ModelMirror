@@ -389,7 +389,19 @@ Office 自动化是高风险客户端副作用路径。修改 `server/xpert_runt
 - API、audit 和 checkpoint 不得保存上传数据、完整查询结果、DuckDB 路径、展开 SQL、密钥或未脱敏工具输出。
 - 修改 Data X 必须运行 `server/tests/test_datax.py`、workflow validate、Xpert App preflight、前端生产构建和容器重启持久化验收。
 
-## 22. Git 规范
+## 22. Workflow 资源绑定与 EvoAgentX 复用规则
+
+- `external_xpert`、`knowledge_base` 与未来 `toolset_resource` 必须通过专用 binding handle 连接 `workflow_agent`；资源边不得进入控制流拓扑、变量传播或节点调度。
+- 同一资源节点只能绑定一个 Agent，且不得混用控制流边。新增资源类型必须同步更新 schema、validate、topological order、runner、registry、前端 handle 和专门测试。
+- 外部 Xpert 草稿可跟随当前发布版，但 Xpert 发布时必须解析为具体不可变版本；运行时禁止自身调用、协作循环和超过 4 层嵌套。
+- 外部 Xpert 必须复用 classic runner，不得通过本服务 HTTP 回环；调用继续经过 Tool Policy、HITL、Audit、middleware 和 RunRegistry 父子链。
+- 知识资源只能访问显式绑定的知识库和活动索引；无活动版本时安全返回空结果，不得回退到其他知识库。审批写入仍走 Knowledge Inbox。
+- 公开 Xpert App 必须拒绝 `external_xpert`；知识资源继续受 `allow_knowledge_read` 与 Tool Policy 双门禁。
+- 修改资源节点至少运行 `test_workflow_resource_nodes.py`、workflow validate、Xpert publish、Knowledge Toolset、App preflight 和前端生产构建。
+- EvoAgentX 只允许选择性移植已锁定 commit 且许可证审计通过的 MIT 文件；必须保留版权和 NOTICE，并在 `docs/EVOAGENTX_ALIGNMENT.md` 记录来源。
+- EvoAgentX optimizer 或 planner 只能产生候选 Xpert 草稿与评估报告，不得静默发布、覆盖人工草稿或修改不可变线上版本。
+
+## 23. Git 规范
 
 ### 自编写高风险路径
 
@@ -421,7 +433,7 @@ docs: 更新聊天图片输出 harness
 feature: 添加 MCP stdio 客户端管理器
 ```
 
-## 23. 交付格式
+## 24. 交付格式
 
 最终回复应包含：
 

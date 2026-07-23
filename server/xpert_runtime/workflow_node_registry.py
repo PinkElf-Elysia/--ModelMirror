@@ -5,7 +5,14 @@ from typing import Any, Literal
 
 
 WorkflowNodeRegistryTab = Literal["workflow", "knowledge"]
-WorkflowNodeCategory = Literal["logic", "transform", "tool", "memory", "other"]
+WorkflowNodeCategory = Literal[
+    "logic",
+    "transform",
+    "resource",
+    "tool",
+    "memory",
+    "other",
+]
 
 
 @dataclass(slots=True)
@@ -304,6 +311,33 @@ def register_builtin_workflow_nodes(registry: WorkflowNodeRegistry) -> None:
                     description="把 JSON 字符串解析为结构化变量。",
                     category="transform",
                     tags=["json", "deserialize"],
+                ),
+            ],
+        )
+    )
+
+    registry.register_section(
+        WorkflowPaletteSection(
+            id="resource",
+            tab="workflow",
+            label="资源",
+            description="Bind published Xperts and active knowledge bases to one workflow agent.",
+            items=[
+                WorkflowPaletteItem(
+                    kind="external_xpert",
+                    icon="XP",
+                    title="外部 Xpert",
+                    description="Expose a pinned published Xpert as a synchronous collaborator tool.",
+                    category="resource",
+                    tags=["xpert", "expert", "resource", "binding"],
+                ),
+                WorkflowPaletteItem(
+                    kind="knowledge_base",
+                    icon="KB",
+                    title="知识库",
+                    description="Bind one knowledge base to the agent's read-only knowledge tools.",
+                    category="resource",
+                    tags=["knowledge", "rag", "resource", "binding"],
                 ),
             ],
         )
