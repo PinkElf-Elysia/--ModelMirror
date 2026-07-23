@@ -339,6 +339,17 @@ def register_builtin_workflow_nodes(registry: WorkflowNodeRegistry) -> None:
                     category="resource",
                     tags=["knowledge", "rag", "resource", "binding"],
                 ),
+                WorkflowPaletteItem(
+                    kind="toolset_resource",
+                    icon="TS",
+                    title="MCP Toolset",
+                    description=(
+                        "Bind one immutable published MCP Toolset version to a "
+                        "workflow agent."
+                    ),
+                    category="resource",
+                    tags=["mcp", "toolset", "resource", "binding"],
+                ),
             ],
         )
     )

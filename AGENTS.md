@@ -391,13 +391,18 @@ Office 自动化是高风险客户端副作用路径。修改 `server/xpert_runt
 
 ## 22. Workflow 资源绑定与 EvoAgentX 复用规则
 
-- `external_xpert`、`knowledge_base` 与未来 `toolset_resource` 必须通过专用 binding handle 连接 `workflow_agent`；资源边不得进入控制流拓扑、变量传播或节点调度。
+- `external_xpert`、`knowledge_base` 与 `toolset_resource` 必须通过专用 binding handle 连接 `workflow_agent`；资源边不得进入控制流拓扑、变量传播或节点调度。
 - 同一资源节点只能绑定一个 Agent，且不得混用控制流边。新增资源类型必须同步更新 schema、validate、topological order、runner、registry、前端 handle 和专门测试。
 - 外部 Xpert 草稿可跟随当前发布版，但 Xpert 发布时必须解析为具体不可变版本；运行时禁止自身调用、协作循环和超过 4 层嵌套。
 - 外部 Xpert 必须复用 classic runner，不得通过本服务 HTTP 回环；调用继续经过 Tool Policy、HITL、Audit、middleware 和 RunRegistry 父子链。
 - 知识资源只能访问显式绑定的知识库和活动索引；无活动版本时安全返回空结果，不得回退到其他知识库。审批写入仍走 Knowledge Inbox。
 - 公开 Xpert App 必须拒绝 `external_xpert`；知识资源继续受 `allow_knowledge_read` 与 Tool Policy 双门禁。
 - 修改资源节点至少运行 `test_workflow_resource_nodes.py`、workflow validate、Xpert publish、Knowledge Toolset、App preflight 和前端生产构建。
+- MCP Toolset 草稿与发布版本必须分离。Xpert 发布时 `latest` 必须解析为具体 Toolset 版本；新发现工具、草稿别名和 Schema 变化不得静默扩展已发布 Xpert。
+- Stdio Toolset 只接受 argv，工作目录必须位于 MCP sandbox；远程 Toolset 默认阻断私网、回环、元数据和 URL credentials，旧 SSE 仅作兼容。
+- Toolset Header、环境变量和 Provider key 只能引用加密 Credential ID。普通 API、版本 JSON、日志、audit 和 checkpoint 不得返回明文；主密钥错误时必须 fail-closed。
+- 管理侧工具测试也必须经过参数 Schema、Tool Policy 和 Audit。固定版本遇到工具消失或必填参数不兼容漂移时必须拒绝调用。
+- 修改 Toolset Runtime 至少运行 `test_toolset_store.py`、`test_toolset_service.py`、`test_toolset_api.py`、`test_workflow_toolset_resource.py`、MCP/Toolset/Workflow/Xpert/App 回归和前端生产构建。
 - EvoAgentX 只允许选择性移植已锁定 commit 且许可证审计通过的 MIT 文件；必须保留版权和 NOTICE，并在 `docs/EVOAGENTX_ALIGNMENT.md` 记录来源。
 - EvoAgentX optimizer 或 planner 只能产生候选 Xpert 草稿与评估报告，不得静默发布、覆盖人工草稿或修改不可变线上版本。
 

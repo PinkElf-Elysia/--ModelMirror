@@ -364,6 +364,17 @@ function createNodeData(
     };
   }
 
+  if (kind === "toolset_resource") {
+    return {
+      kind,
+      title: "MCP Toolset",
+      description: "将已发布的 MCP Toolset 版本绑定到当前智能体。",
+      toolsetId: "",
+      versionPolicy: "current_published",
+      pinnedVersion: "",
+    };
+  }
+
   if (kind === "agent_task") {
     return {
       kind,
@@ -1371,7 +1382,11 @@ function AgentStudioPanel({
                   type="button"
                 >
                   <span className="flex h-7 w-7 items-center justify-center rounded-md bg-cyan-300/15 text-[10px] font-semibold text-cyan-100">
-                    {resource.data.kind === "external_xpert" ? "XP" : "KB"}
+                    {resource.data.kind === "external_xpert"
+                      ? "XP"
+                      : resource.data.kind === "knowledge_base"
+                        ? "KB"
+                        : "TS"}
                   </span>
                   <span className="min-w-0 flex-1">
                     <span className="block truncate text-xs font-semibold text-cyan-50">
@@ -1380,7 +1395,9 @@ function AgentStudioPanel({
                     <span className="block truncate text-[11px] text-cyan-200/70">
                       {resource.data.kind === "external_xpert"
                         ? String(resource.data.toolName || "external_xpert")
-                        : String(resource.data.knowledgeBaseId || "未选择知识库")}
+                        : resource.data.kind === "knowledge_base"
+                          ? String(resource.data.knowledgeBaseId || "未选择知识库")
+                          : String(resource.data.toolsetId || "未选择 Toolset")}
                     </span>
                   </span>
                 </button>
@@ -1388,7 +1405,7 @@ function AgentStudioPanel({
             </div>
           ) : (
             <p className="rounded-lg border border-dashed border-white/15 bg-white/[0.035] px-3 py-3 text-xs leading-5 text-slate-400">
-              从节点库拖入外部 Xpert 或知识库，再用专用端口绑定到当前智能体。
+              从节点库拖入外部 Xpert、知识库或 Toolset，再用专用端口绑定到当前智能体。
             </p>
           )}
         </ConfigSection>
@@ -1406,6 +1423,7 @@ interface WorkflowResourceOption {
   published_version?: number | null;
   active_version_id?: string | null;
   document_count?: number;
+  tool_count?: number;
 }
 
 function ResourceNodeConfig({
@@ -1418,7 +1436,11 @@ function ResourceNodeConfig({
   const [options, setOptions] = useState<WorkflowResourceOption[]>([]);
   const [loadError, setLoadError] = useState("");
   const resourceKind =
-    data.kind === "external_xpert" ? "external_xpert" : "knowledge_base";
+    data.kind === "external_xpert"
+      ? "external_xpert"
+      : data.kind === "toolset_resource"
+        ? "toolset"
+        : "knowledge_base";
 
   useEffect(() => {
     let cancelled = false;
@@ -1533,6 +1555,97 @@ function ResourceNodeConfig({
             />
           </Field>
         ) : null}
+        {loadError ? (
+          <p className="text-xs leading-5 text-amber-200">{loadError}</p>
+        ) : null}
+      </ConfigSection>
+    );
+  }
+
+  if (data.kind === "toolset_resource") {
+    return (
+      <ConfigSection
+        description="草稿可跟随当前发布版本；发布 Xpert 时会解析并固定不可变 Toolset 版本。"
+        title="MCP Toolset"
+      >
+        <Field label="已发布 Toolset">
+          <select
+            className={textInputClass()}
+            onChange={(event) => {
+              const selected = options.find(
+                (item) => item.id === event.target.value,
+              );
+              update({
+                toolsetId: event.target.value,
+                description: selected?.description || data.description,
+                pinnedVersion:
+                  data.versionPolicy === "pinned"
+                    ? String(selected?.published_version ?? "")
+                    : data.pinnedVersion,
+              });
+            }}
+            value={data.toolsetId ?? ""}
+          >
+            <option className="bg-slate-950" value="">
+              选择 Toolset
+            </option>
+            {options.map((item) => (
+              <option
+                className="bg-slate-950"
+                disabled={item.status !== "published"}
+                key={item.id}
+                value={item.id}
+              >
+                {item.name} · {item.status} · v{item.published_version ?? "-"} ·{" "}
+                {item.tool_count ?? 0} tools
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field label="版本策略">
+          <select
+            className={textInputClass()}
+            onChange={(event) =>
+              update({
+                versionPolicy: event.target.value,
+                pinnedVersion:
+                  event.target.value === "pinned"
+                    ? String(
+                        options.find((item) => item.id === data.toolsetId)
+                          ?.published_version ?? "",
+                      )
+                    : "",
+              })
+            }
+            value={data.versionPolicy ?? "current_published"}
+          >
+            <option className="bg-slate-950" value="current_published">
+              草稿跟随当前发布版本
+            </option>
+            <option className="bg-slate-950" value="pinned">
+              草稿固定版本
+            </option>
+          </select>
+        </Field>
+        {data.versionPolicy === "pinned" ? (
+          <Field label="固定版本">
+            <input
+              className={textInputClass()}
+              min={1}
+              onChange={(event) =>
+                update({ pinnedVersion: event.target.value })
+              }
+              type="number"
+              value={data.pinnedVersion ?? ""}
+            />
+          </Field>
+        ) : null}
+        <a
+          className="inline-flex text-xs font-semibold text-cyan-200 hover:text-cyan-100"
+          href="/toolsets"
+        >
+          打开 Toolset 管理页
+        </a>
         {loadError ? (
           <p className="text-xs leading-5 text-amber-200">{loadError}</p>
         ) : null}
@@ -1734,13 +1847,16 @@ function NodeConfig({
           .filter(
             (edge) =>
               edge.target === node.id &&
-              ["expert", "knowledge"].includes(edge.targetHandle ?? ""),
+              ["expert", "knowledge", "toolset"].includes(
+                edge.targetHandle ?? "",
+              ),
           )
           .map((edge) => nodes.find((candidate) => candidate.id === edge.source))
           .filter(
             (candidate): candidate is WorkflowNode =>
               candidate?.data.kind === "external_xpert" ||
-              candidate?.data.kind === "knowledge_base",
+              candidate?.data.kind === "knowledge_base" ||
+              candidate?.data.kind === "toolset_resource",
           )
       : [];
   const updateRuntimeMiddlewareConfig = (fieldName: string, value: unknown) =>
@@ -2280,7 +2396,9 @@ function NodeConfig({
         </>
       ) : null}
 
-      {data.kind === "external_xpert" || data.kind === "knowledge_base" ? (
+      {data.kind === "external_xpert" ||
+      data.kind === "knowledge_base" ||
+      data.kind === "toolset_resource" ? (
         <ResourceNodeConfig data={data} update={update} />
       ) : null}
 
@@ -2949,7 +3067,8 @@ function WorkflowCanvas({
       const middlewareBinding = connection.targetHandle === "middleware";
       const resourceBinding =
         connection.targetHandle === "expert" ||
-        connection.targetHandle === "knowledge";
+        connection.targetHandle === "knowledge" ||
+        connection.targetHandle === "toolset";
       if (resourceBinding) {
         const expected =
           connection.targetHandle === "expert"
@@ -2958,11 +3077,17 @@ function WorkflowCanvas({
                 sourceHandle: "expert-binding",
                 color: "#93c5fd",
               }
-            : {
+            : connection.targetHandle === "knowledge"
+              ? {
                 sourceKind: "knowledge_base",
                 sourceHandle: "knowledge-binding",
                 color: "#5eead4",
-              };
+                }
+              : {
+                  sourceKind: "toolset_resource",
+                  sourceHandle: "toolset-binding",
+                  color: "#fcd34d",
+                };
         if (
           connection.sourceHandle !== expected.sourceHandle ||
           sourceNode?.data.kind !== expected.sourceKind ||
@@ -3007,11 +3132,12 @@ function WorkflowCanvas({
         return;
       }
       if (
-        ["expert-binding", "knowledge-binding"].includes(
+        ["expert-binding", "knowledge-binding", "toolset-binding"].includes(
           connection.sourceHandle ?? "",
         ) ||
         sourceNode?.data.kind === "external_xpert" ||
-        sourceNode?.data.kind === "knowledge_base"
+        sourceNode?.data.kind === "knowledge_base" ||
+        sourceNode?.data.kind === "toolset_resource"
       ) {
         setSaveNotice("资源节点只能通过专用端口绑定到 workflow_agent。");
         return;

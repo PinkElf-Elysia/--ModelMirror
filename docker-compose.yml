@@ -119,6 +119,7 @@ services:
       XPERT_STORAGE_DIR: /app/xperts/storage
       AGENT_TASK_STORAGE_DIR: /app/xpert_runtime/storage
       DATAX_STORAGE_DIR: /app/datax/storage
+      TOOLSET_STORAGE_DIR: /app/toolsets/storage
       HANDOFF_EXECUTOR_ENABLED: "true"
       HANDOFF_EXECUTOR_MAX_CONCURRENCY: "2"
       GOAL_COORDINATOR_ENABLED: "true"
@@ -135,6 +136,7 @@ services:
       - ./server/xperts/storage:/app/xperts/storage
       - ./server/xpert_runtime/storage:/app/xpert_runtime/storage
       - ./server/datax/storage:/app/datax/storage
+      - ./server/toolsets/storage:/app/toolsets/storage
       - sandbox_socket:/run/modelmirror-sandbox
       - sandbox_workspaces:/app/sandbox-workspaces:ro
       - browser_socket:/run/modelmirror-browser

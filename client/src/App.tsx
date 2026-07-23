@@ -27,6 +27,7 @@ import AutomationsPage from "./pages/AutomationsPage";
 import DataXHomePage from "./pages/DataXHomePage";
 import DataXProjectPage from "./pages/DataXProjectPage";
 import DataXInboxPage from "./pages/DataXInboxPage";
+import ToolsetsPage from "./pages/ToolsetsPage";
 
 export default function App() {
   return (
@@ -50,6 +51,7 @@ export default function App() {
       <Route element={<MatrixOasisPage />} path="/matrix-oasis" />
       <Route element={<ExpertTeamPage />} path="/expert-team" />
       <Route element={<McpBrowserPage />} path="/mcps" />
+      <Route element={<ToolsetsPage />} path="/toolsets" />
       <Route element={<SkillBrowserPage />} path="/skills" />
       <Route element={<RuntimeOpsPage />} path="/runtime" />
       <Route element={<ComingSoonPage resource="prompts" />} path="/prompts" />

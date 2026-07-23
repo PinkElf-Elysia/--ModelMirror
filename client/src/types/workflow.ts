@@ -19,6 +19,7 @@ export type WorkflowNodeKind =
   | "workflow_agent"
   | "external_xpert"
   | "knowledge_base"
+  | "toolset_resource"
   | "agent_task"
   | "agent_handoff"
   | "handoff_router"
@@ -62,6 +63,7 @@ export interface WorkflowNodeData extends Record<string, unknown> {
   schema?: string;
   queryVariable?: string;
   knowledgeBaseId?: string;
+  toolsetId?: string;
   xpertId?: string;
   versionPolicy?: string;
   pinnedVersion?: string;

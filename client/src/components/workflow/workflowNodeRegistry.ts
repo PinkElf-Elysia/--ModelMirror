@@ -211,6 +211,13 @@ export const workflowPaletteSections: WorkflowPaletteSection[] = [
         description: "将知识库的检索、原文和引用能力绑定到工作流智能体。",
         tags: ["knowledge", "rag", "resource", "binding"],
       },
+      {
+        kind: "toolset_resource",
+        icon: "TS",
+        title: "MCP Toolset",
+        description: "将已发布的固定版本 MCP Toolset 绑定到工作流智能体。",
+        tags: ["mcp", "toolset", "resource", "binding"],
+      },
     ],
   },
   {

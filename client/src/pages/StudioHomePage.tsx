@@ -648,7 +648,7 @@ export default function StudioHomePage() {
             ],
         loading: mcpSessions.loading || registryTools.loading,
         metricLabel: "已注册工具",
-        primaryAction: { href: "/mcps", label: "连接 MCP" },
+        primaryAction: { href: "/toolsets", label: "管理 Toolset" },
         secondaryAction: { href: "/runtime", label: "查看运维" },
         status: "部分实现",
         tags: ["runnable", "creatable", "observable", "xpert"],

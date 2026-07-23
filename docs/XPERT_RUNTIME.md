@@ -253,3 +253,13 @@ Ralph Loop performs bounded continuation and strict verification before the Agen
 Queries do not accept SQL. `DataXService` compiles a bounded DSL of published indicators, dimensions, parameterized filters, time ranges, ordering, and limits. Draft edits do not affect the immutable published snapshot used by runtime queries. Derived expressions are evaluated from published metric results with a restricted arithmetic AST.
 
 The `datax_indicators` Agent middleware compiles explicit project/model scopes into `datax_tools`. Workflow, Xpert Chat, Goal, Handoff, and Automation share this provider. Agent writes are proposal-only; approval creates a draft and explicit publication remains a separate operation. Public Apps require `allow_datax_read`, an active tool policy, and valid project/model scope, and never receive proposal tools. See `docs/XPERT_DATAX.md`.
+
+## Versioned MCP Toolset Runtime
+
+`ToolsetStore` persists editable MCP Toolset definitions and immutable published versions. A version fixes the transport profile, credential references, enabled tools, aliases, default arguments, JSON Schema hashes, prefix, and release metadata. Xpert publication resolves `latest` to a concrete Toolset version; later discovery or draft edits cannot expand an already published Xpert.
+
+Stdio profiles accept argv only and run inside the MCP sandbox boundary. Streamable HTTP is the preferred remote transport and legacy SSE remains compatibility-only. Remote transports reject URL credentials and, under the default policy, resolve and block loopback, private, link-local, reserved, multicast, Docker-local, and metadata targets. Reconnect attempts and operation timeouts are bounded.
+
+Secrets are referenced by credential ID. The encrypted credential file never stores plaintext; create and rotate responses reveal a value only once, while normal APIs return mask, prefix, kind, and status. Losing or replacing the local master key marks existing credentials unavailable and never falls back to plaintext.
+
+`toolset_resource` is a non-control binding into `workflow_agent`. The runtime exposes only tools enabled in the fixed version. Calls merge versioned default arguments, validate the resulting object against the fixed JSON Schema, then enter the existing permission policy, durable HITL, audit, middleware, and checkpoint path. A missing tool or newly required remote parameter is a hard Schema-drift failure; compatible optional additions produce a warning. Public Xpert Apps reject MCP Toolset resources until the later public tool-policy round.

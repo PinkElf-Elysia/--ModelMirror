@@ -1,11 +1,22 @@
 # Xpert 对齐总纲
 
+## 2026-07-23 增量：XPERT-TOOLSET-MCP-02A
+
+Toolset 收尾路线已从“命名白名单打包”修正为完整运行闭环：
+
+1. `XPERT-TOOLSET-MCP-02A`：本轮已实现 MCP Toolset 草稿、加密凭据、Stdio / Streamable HTTP / 旧 SSE 连接、工具发现与 Schema 配置、受策略约束的测试调用、不可变版本发布和 Agent 资源绑定。
+2. `XPERT-TOOLSET-API-02B`：下一轮实现 OpenAPI 3.x 与 OData v4 导入、鉴权和受控 HTTP 执行。
+3. `XPERT-TOOLSET-SEMANTICS-02C`：随后补内置 Provider、工具敏感/终点/记忆语义、并行调用、并发和递归预算。
+4. `XPERT-AGENT-FEATURES-02D`：最后收口开场白、问题建议、标题/摘要、文件与记忆能力和显式音频模型。
+
+`toolset_resource -> workflow_agent` 使用 `targetHandle="toolset"`，不进入控制流、变量传播或节点调度。Xpert 发布会把 `latest` 解析为具体 Toolset 版本；运行时只暴露该快照中启用的工具，Schema 发生不兼容漂移时拒绝调用。公开 App 在工具级公共安全策略完成前继续禁止此资源。
+
 ## 2026-07-22 路线切换：资源节点收尾与 EvoAgentX 主线
 
 Xpert 对齐进入收尾阶段。当前优先补齐真实画布语义，而不是继续扩展企业治理、远程市场或运维目录：
 
 1. `XPERT-RESOURCE-NODES-01`：新增 `external_xpert` 与 `knowledge_base` 资源节点，通过 `expert` / `knowledge` 特殊绑定边向单个 `workflow_agent` 提供同步协作者工具和限定知识工具。绑定边不参与控制流、变量传播或节点调度；外部 Xpert 在发布时固定不可变版本，知识库继续消费活动索引。
-2. `XPERT-TOOLSET-BINDING-02`：把命名 MCP/Runtime 工具组合收口为可绑定 Agent 的稳定 `toolset_resource`，不建设企业 Provider 治理。
+2. `XPERT-TOOLSET-RUNTIME-02`：按 MCP、API、工具语义、Agent Features 四轮补齐完整 Toolset；MCP 02A 已进入真实运行闭环。
 3. `XPERT-PLUGIN-PROMPT-03`：交付可信本地插件清单与版本化 Prompt Profile 的编辑、发布、Agent 绑定和斜杠命令最小闭环，不建设远程市场、计费或组织权限。
 4. `XPERT-ALIGNMENT-FREEZE-04`：形成 Xpert 已实现、延期与冻结清单；GraphRAG、企业权限、多租户、市场治理和剩余 UI 像素对齐暂缓。
 5. `EVOAGENTX-ALIGNMENT-AUDIT-01`：转向 EvoAgentX 元智能体、评估、benchmark、optimizer、自进化和记忆模块审计，并从审计过的 MIT 代码中选择性移植。
@@ -249,7 +260,7 @@ EvoAgentX 曾只作为 `goal -> sub_tasks -> inferred edges` 的历史参考。X
 | RunRegistry / Trace | 部分实现 | workflow/xpert/chat/goal/agent_task/agent_handoff run、checkpoint、workflow/chat/Xpert/Goal 观测与 `/runtime` 运维总览 | 内存态，可观测索引，不是调度器；Goal 重启恢复会创建 recovery run | 为文件、记忆与知识执行提供护栏 |
 | Workflow Agent | 部分实现 | `workflow_agent` 节点、模型执行、Runtime Toolset、文件理解、结构化输出、类型化记忆召回/候选写回、失败重试、备用模型与异常策略 | 轻量 JSON 决策，不是 function calling；并行工具调用仍未接入 | 基于真实任务反馈收敛 Agent 执行契约 |
 | Chat Toolset | 部分实现 | `/api/chat` 可选 MCP 工具模式，chat run 与 checkpoint | 默认关闭，不改变普通聊天；无自动 handoff | 补工具偏好、安全提示和观测 UI |
-| Toolset / MCP | 部分实现 | `MCPToolsetProvider`、`run_tool_with_runtime`、tool policy/audit、MCP 管理基础、`/runtime` MCP Runtime 状态细分与只读运维，`/studio` 已提供 MCP 与 Runtime 入口 | 缺可固定命名工具组合并绑定 Agent 的 Toolset 资源；Runtime Ops 不执行 MCP start/stop | `XPERT-TOOLSET-BINDING-02` |
+| Toolset / MCP | 部分实现 | `/toolsets` 支持 MCP Toolset 草稿、加密凭据、三种传输、发现/启停/别名/默认参数/测试、不可变发布版本和 `toolset_resource` Agent 绑定；固定版本调用继续经过 policy/HITL/audit | API Toolset、内置 Provider、工具级敏感/终点/记忆语义和受限并行调用尚未实现；公开 App 暂禁 Toolset 资源 | `XPERT-TOOLSET-API-02B` |
 | Plugin / Skill | 部分实现 | `/skills`、安装运行时、Workspace Skill 草稿、审批后显式安装、Sandbox staging 与显式 Skill Plugin Hooks | Agent 只能提案；草稿安装不会覆盖既有 Skill；Hook 仅支持离线 manifest，不提供组织权限 | 基于真实 Skill 草稿与 Hook 使用反馈收敛协议 |
 | Knowledge Pipeline | 已实现 | FileAsset/Artifact/Chunk/CitationAnchor、结构感知 Processor、General/QA/Summary、可执行 Graph、逐文档/逐视觉页恢复、图片与扫描 PDF 的 OCR/VLM、版本化 ingestion job、递归与父子分块、向量/FTS5 双索引、混合检索、Rerank、离线评估、Promotion Gate、Knowledge Toolset、审批写入、预览、激活/回滚 | 成熟 RAG 基础闭环完成；仍为本地单进程 worker，旧上传保留 legacy index；评估标签需人工维护；图片向量、版面坐标与 GraphRAG 暂缓 | 真实使用反馈与技术债审计 |
 | Prompt / Slash Command | 下一步 | 仅有提示词资源页雏形和聊天 prompt 使用 | 尚无版本化 Prompt Profile、Agent 绑定和 slash command | `XPERT-PLUGIN-PROMPT-03` 后冻结 Xpert 对齐 |
