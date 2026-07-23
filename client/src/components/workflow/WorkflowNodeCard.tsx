@@ -107,6 +107,20 @@ const nodeMeta = {
     bg: "bg-cyan-300/10",
     text: "text-cyan-100",
   },
+  external_xpert: {
+    icon: "XP",
+    label: "外部 Xpert",
+    border: "border-blue-300/40",
+    bg: "bg-blue-300/10",
+    text: "text-blue-100",
+  },
+  knowledge_base: {
+    icon: "KB",
+    label: "知识库资源",
+    border: "border-teal-300/40",
+    bg: "bg-teal-300/10",
+    text: "text-teal-100",
+  },
   agent_task: {
     icon: "▣",
     label: "Agent Task",
@@ -218,6 +232,16 @@ function outputName(data: WorkflowNode["data"]) {
   if (data.kind === "workflow_agent") {
     return `${data.agentName ?? "workflow-agent"} · ${data.toolMode ?? "none"} → ${data.outputVariable ?? "agent_output"}`;
   }
+  if (data.kind === "external_xpert") {
+    const version =
+      data.versionPolicy === "pinned"
+        ? `v${data.pinnedVersion ?? "?"}`
+        : "current";
+    return `${data.toolName ?? "external_xpert"} -> ${version}`;
+  }
+  if (data.kind === "knowledge_base") {
+    return `${data.knowledgeBaseId || "选择知识库"} · top ${data.topK ?? "5"}`;
+  }
   if (data.kind === "agent_task") {
     return `${data.assignedAgent ?? "workflow-planner"} → ${data.outputVariable ?? "agent_task_id"}`;
   }
@@ -278,11 +302,27 @@ export default function WorkflowNodeCard({ data, selected }: NodeProps<WorkflowN
             title="绑定 Agent 中间件"
             type="target"
           />
+          <Handle
+            className="!h-3 !w-3 !border-2 !border-surface-900 !bg-blue-300"
+            id="expert"
+            position={Position.Left}
+            style={{ top: "52%" }}
+            title="绑定外部 Xpert"
+            type="target"
+          />
+          <Handle
+            className="!h-3 !w-3 !border-2 !border-surface-900 !bg-teal-300"
+            id="knowledge"
+            position={Position.Left}
+            style={{ top: "88%" }}
+            title="绑定知识库"
+            type="target"
+          />
           <div className="pointer-events-none absolute -left-14 top-[66%] text-[10px] font-semibold text-indigo-200">
             middleware
           </div>
         </>
-      ) : data.kind !== "input" ? (
+      ) : !["input", "external_xpert", "knowledge_base"].includes(data.kind) ? (
         <Handle
           className="!h-3 !w-3 !border-2 !border-surface-900 !bg-slate-200"
           position={Position.Left}
@@ -359,6 +399,22 @@ export default function WorkflowNodeCard({ data, selected }: NodeProps<WorkflowN
             type="source"
           />
         </>
+      ) : data.kind === "external_xpert" ? (
+        <Handle
+          className="!h-3 !w-3 !border-2 !border-surface-900 !bg-blue-300"
+          id="expert-binding"
+          position={Position.Right}
+          title="绑定到 workflow_agent 的 expert 入口"
+          type="source"
+        />
+      ) : data.kind === "knowledge_base" ? (
+        <Handle
+          className="!h-3 !w-3 !border-2 !border-surface-900 !bg-teal-300"
+          id="knowledge-binding"
+          position={Position.Right}
+          title="绑定到 workflow_agent 的 knowledge 入口"
+          type="source"
+        />
       ) : data.kind !== "output" ? (
         <Handle
           className="!h-3 !w-3 !border-2 !border-surface-900 !bg-hire-300"

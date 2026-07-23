@@ -228,6 +228,7 @@ class XpertStore:
         *,
         release_notes: str = "",
         expected_revision: int | None = None,
+        workflow_override: NativeWorkflowDefinition | None = None,
     ) -> XpertVersion:
         with self._lock:
             items = self._read_unlocked()
@@ -240,7 +241,11 @@ class XpertStore:
                     "Xpert draft changed during publish preflight. Validate and retry."
                 )
             next_version = max((version.version for version in item.versions), default=0) + 1
-            workflow = item.draft.workflow.model_copy(deep=True)
+            workflow = (
+                workflow_override.model_copy(deep=True)
+                if workflow_override is not None
+                else item.draft.workflow.model_copy(deep=True)
+            )
             workflow.id = f"xpert-{item.id}-v{next_version}"
             workflow.title = item.name
             workflow.version = f"xpert-v{next_version}"

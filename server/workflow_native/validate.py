@@ -50,6 +50,10 @@ NODE_KIND_ALIASES = {
     "agent": "agent",
     "workflow_agent": "workflow_agent",
     "workflow-agent": "workflow_agent",
+    "external_xpert": "external_xpert",
+    "external-xpert": "external_xpert",
+    "knowledge_base": "knowledge_base",
+    "knowledge-base": "knowledge_base",
     "agent_task": "agent_task",
     "agent-task": "agent_task",
     "agent_handoff": "agent_handoff",
@@ -92,6 +96,8 @@ SUPPORTED_NODE_KINDS = {
     "question_classifier",
     "agent",
     "workflow_agent",
+    "external_xpert",
+    "knowledge_base",
     "agent_task",
     "agent_handoff",
     "handoff_router",
@@ -1021,6 +1027,95 @@ def validate_node_configuration(
                 ValidationIssue(
                     code="invalid_workflow_agent_output_variable",
                     message="Workflow agent outputVariable must be an identifier.",
+                    node_id=node.id,
+                )
+            )
+
+    if kind == "external_xpert":
+        if not str(data.get("xpertId") or "").strip():
+            issues.append(
+                ValidationIssue(
+                    code="missing_external_xpert_id",
+                    message="External Xpert resource needs data.xpertId.",
+                    node_id=node.id,
+                )
+            )
+        tool_name = str(data.get("toolName") or "").strip()
+        if not tool_name:
+            issues.append(
+                ValidationIssue(
+                    code="missing_external_xpert_tool_name",
+                    message="External Xpert resource needs data.toolName.",
+                    node_id=node.id,
+                )
+            )
+        elif not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]{0,63}", tool_name):
+            issues.append(
+                ValidationIssue(
+                    code="invalid_external_xpert_tool_name",
+                    message="External Xpert toolName must be a stable tool identifier.",
+                    node_id=node.id,
+                )
+            )
+        version_policy = str(
+            data.get("versionPolicy") or "current_published"
+        ).strip()
+        if version_policy not in {"current_published", "pinned"}:
+            issues.append(
+                ValidationIssue(
+                    code="invalid_external_xpert_version_policy",
+                    message=(
+                        "External Xpert versionPolicy must be current_published or pinned."
+                    ),
+                    node_id=node.id,
+                )
+            )
+        if version_policy == "pinned":
+            try:
+                pinned_version = int(data.get("pinnedVersion"))
+            except (TypeError, ValueError):
+                pinned_version = 0
+            if pinned_version < 1:
+                issues.append(
+                    ValidationIssue(
+                        code="invalid_external_xpert_pinned_version",
+                        message="Pinned External Xpert resources require pinnedVersion >= 1.",
+                        node_id=node.id,
+                    )
+                )
+
+    if kind == "knowledge_base":
+        if not str(data.get("knowledgeBaseId") or "").strip():
+            issues.append(
+                ValidationIssue(
+                    code="missing_knowledge_base_resource_id",
+                    message="Knowledge base resource needs data.knowledgeBaseId.",
+                    node_id=node.id,
+                )
+            )
+        try:
+            resource_top_k = int(data.get("topK", 5))
+        except (TypeError, ValueError):
+            resource_top_k = 0
+        if resource_top_k < 1 or resource_top_k > 10:
+            issues.append(
+                ValidationIssue(
+                    code="invalid_knowledge_base_resource_top_k",
+                    message="Knowledge base resource topK must be between 1 and 10.",
+                    node_id=node.id,
+                )
+            )
+        try:
+            score_threshold = float(data.get("scoreThreshold", 0))
+        except (TypeError, ValueError):
+            score_threshold = -1
+        if score_threshold < 0 or score_threshold > 1:
+            issues.append(
+                ValidationIssue(
+                    code="invalid_knowledge_base_resource_score_threshold",
+                    message=(
+                        "Knowledge base resource scoreThreshold must be between 0 and 1."
+                    ),
                     node_id=node.id,
                 )
             )
@@ -2337,54 +2432,150 @@ def validate_edges(
             )
             continue
         valid_edges.append(edge)
-        if is_middleware_binding_edge(edge):
+        if is_non_control_binding_edge(edge):
             bindings_by_source[edge.source].append(edge)
             source_kind = kinds_by_id.get(edge.source)
             target_kind = kinds_by_id.get(edge.target)
+            target_handle = str(edge.targetHandle or "").strip()
+            expected_source_kind = {
+                "middleware": "runtime_middleware",
+                "expert": "external_xpert",
+                "knowledge": "knowledge_base",
+            }.get(target_handle)
+            expected_source_handle = {
+                "middleware": "middleware-binding",
+                "expert": "expert-binding",
+                "knowledge": "knowledge-binding",
+            }.get(target_handle)
             if (
-                source_kind != "runtime_middleware"
+                expected_source_kind is None
+                or source_kind != expected_source_kind
                 or target_kind != "workflow_agent"
-                or str(edge.sourceHandle or "").strip() != "middleware-binding"
+                or str(edge.sourceHandle or "").strip() != expected_source_handle
             ):
                 issues.append(
                     ValidationIssue(
-                        code="invalid_middleware_binding",
+                        code=f"invalid_{target_handle or 'resource'}_binding",
                         message=(
-                            "Middleware binding edges must connect the runtime_middleware "
-                            "middleware-binding handle to a workflow_agent middleware handle."
+                            "Resource binding edges must connect the matching resource "
+                            "handle to a workflow_agent resource handle."
                         ),
                         edge_id=edge.id,
                     )
                 )
         else:
             control_node_ids.update({edge.source, edge.target})
-            if str(edge.sourceHandle or "").strip() == "middleware-binding":
+            if str(edge.sourceHandle or "").strip() in {
+                "middleware-binding",
+                "expert-binding",
+                "knowledge-binding",
+            }:
                 issues.append(
                     ValidationIssue(
-                        code="invalid_middleware_binding",
+                        code="invalid_resource_binding",
                         message=(
-                            "The middleware-binding source handle can only connect to a "
-                            "workflow_agent middleware handle."
+                            "A resource binding source handle can only connect to its "
+                            "matching workflow_agent resource handle."
                         ),
                         edge_id=edge.id,
                     )
                 )
 
     for source_id, binding_edges in bindings_by_source.items():
+        source_kind = kinds_by_id.get(source_id)
         if len(binding_edges) > 1:
             issues.append(
                 ValidationIssue(
-                    code="duplicate_middleware_binding",
-                    message="A runtime_middleware node can bind to only one workflow_agent.",
+                    code=(
+                        "duplicate_middleware_binding"
+                        if source_kind == "runtime_middleware"
+                        else "duplicate_resource_binding"
+                    ),
+                    message=(
+                        "A middleware node can bind to only one workflow_agent."
+                        if source_kind == "runtime_middleware"
+                        else "A resource node can bind to only one workflow_agent."
+                    ),
                     node_id=source_id,
                 )
             )
         if source_id in control_node_ids:
             issues.append(
                 ValidationIssue(
-                    code="mixed_middleware_binding_and_control_flow",
-                    message="A bound runtime_middleware node cannot also use control-flow edges.",
+                    code=(
+                        "mixed_middleware_binding_and_control_flow"
+                        if source_kind == "runtime_middleware"
+                        else "mixed_resource_binding_and_control_flow"
+                    ),
+                    message=(
+                        "A bound middleware node cannot also use control-flow edges."
+                        if source_kind == "runtime_middleware"
+                        else "A bound resource node cannot also use control-flow edges."
+                    ),
                     node_id=source_id,
+                )
+            )
+
+    for node_id, kind in kinds_by_id.items():
+        if kind not in {"external_xpert", "knowledge_base"}:
+            continue
+        if node_id not in bindings_by_source:
+            issues.append(
+                ValidationIssue(
+                    code="missing_resource_binding",
+                    message=(
+                        "External Xpert and Knowledge Base nodes must bind to exactly "
+                        "one workflow_agent."
+                    ),
+                    node_id=node_id,
+                )
+            )
+        if node_id in control_node_ids:
+            issues.append(
+                ValidationIssue(
+                    code="resource_node_in_control_flow",
+                    message="Resource nodes cannot participate in workflow control flow.",
+                    node_id=node_id,
+                )
+            )
+
+    expert_tool_names_by_agent: dict[str, set[str]] = defaultdict(set)
+    for edge in valid_edges:
+        if str(edge.targetHandle or "").strip() != "expert":
+            continue
+        source = nodes_by_id.get(edge.source)
+        if source is None:
+            continue
+        tool_name = str(source.data.get("toolName") or "").strip()
+        if tool_name in expert_tool_names_by_agent[edge.target]:
+            issues.append(
+                ValidationIssue(
+                    code="duplicate_external_xpert_tool_name",
+                    message=(
+                        "External Xpert toolName values must be unique for each workflow_agent."
+                    ),
+                    node_id=source.id,
+                )
+            )
+        expert_tool_names_by_agent[edge.target].add(tool_name)
+
+    for edge in valid_edges:
+        if str(edge.targetHandle or "").strip() not in {"expert", "knowledge"}:
+            continue
+        target = nodes_by_id.get(edge.target)
+        if (
+            target is not None
+            and str(target.data.get("toolMode") or "none") != "mcp_tools"
+        ):
+            issues.append(
+                ValidationIssue(
+                    code="resource_binding_requires_runtime_tool_mode",
+                    message=(
+                        "Bound External Xpert and Knowledge resources require "
+                        "workflow_agent toolMode=mcp_tools."
+                    ),
+                    node_id=target.id,
+                    edge_id=edge.id,
                 )
             )
 
@@ -2877,11 +3068,11 @@ def topological_order(
     edges: list[NativeWorkflowEdge],
     issues: list[ValidationIssue],
 ) -> list[str]:
-    bound_middleware_ids = {
-        edge.source for edge in edges if is_middleware_binding_edge(edge)
+    bound_resource_ids = {
+        edge.source for edge in edges if is_non_control_binding_edge(edge)
     }
     node_ids = {
-        node.id for node in nodes if node.id not in bound_middleware_ids
+        node.id for node in nodes if node.id not in bound_resource_ids
     }
     indegree = {node_id: 0 for node_id in node_ids}
     outgoing: dict[str, list[str]] = defaultdict(list)
@@ -2889,7 +3080,7 @@ def topological_order(
     for edge in edges:
         if edge.source not in node_ids or edge.target not in node_ids:
             continue
-        if is_middleware_binding_edge(edge):
+        if is_non_control_binding_edge(edge):
             continue
         outgoing[edge.source].append(edge.target)
         indegree[edge.target] += 1
@@ -2919,6 +3110,14 @@ def topological_order(
 
 def is_middleware_binding_edge(edge: NativeWorkflowEdge) -> bool:
     return str(edge.targetHandle or "").strip() == "middleware"
+
+
+def is_resource_binding_edge(edge: NativeWorkflowEdge) -> bool:
+    return str(edge.targetHandle or "").strip() in {"expert", "knowledge", "toolset"}
+
+
+def is_non_control_binding_edge(edge: NativeWorkflowEdge) -> bool:
+    return is_middleware_binding_edge(edge) or is_resource_binding_edge(edge)
 
 
 def _validate_middleware_number(

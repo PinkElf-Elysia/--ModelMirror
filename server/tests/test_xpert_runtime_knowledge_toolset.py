@@ -87,6 +87,59 @@ async def test_knowledge_search_fuses_allowed_bases_and_bounds_text() -> None:
 
 
 @pytest.mark.asyncio
+async def test_knowledge_search_applies_bound_resource_limits() -> None:
+    service = SimpleNamespace(
+        search_knowledge=AsyncMock(
+            side_effect=[
+                {
+                    "version_id": "v1",
+                    "sources": [
+                        {"chunk_id": "keep", "document_name": "One", "text": "A", "score": 0.9},
+                        {"chunk_id": "drop", "document_name": "One", "text": "B", "score": 0.6},
+                    ],
+                    "warnings": [],
+                },
+                {
+                    "version_id": "v2",
+                    "sources": [
+                        {"chunk_id": "second", "document_name": "Two", "text": "C", "score": 0.8}
+                    ],
+                    "warnings": [],
+                },
+            ]
+        )
+    )
+    provider = KnowledgeToolsetProvider(service)
+
+    result = await provider.call_tool(
+        RuntimeToolCall(
+            tool_name="knowledge_search",
+            arguments={"query": "architecture"},
+            metadata=knowledge_metadata(
+                knowledge_resource_configs=[
+                    {
+                        "knowledge_base_id": "kb_one",
+                        "top_k": 2,
+                        "score_threshold": 0.75,
+                    },
+                    {
+                        "knowledge_base_id": "kb_two",
+                        "top_k": 1,
+                        "score_threshold": 0,
+                    },
+                ]
+            ),
+        )
+    )
+
+    payload = json.loads(result.output)
+    assert [item["chunk_id"] for item in payload["results"]] == ["keep", "second"]
+    assert payload["results"][0]["resource_score_threshold"] == 0.75
+    assert service.search_knowledge.await_args_list[0].kwargs["top_k"] == 2
+    assert service.search_knowledge.await_args_list[1].kwargs["top_k"] == 1
+
+
+@pytest.mark.asyncio
 async def test_knowledge_tools_reject_cross_base_access() -> None:
     provider = KnowledgeToolsetProvider(SimpleNamespace())
 

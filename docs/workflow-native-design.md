@@ -1,5 +1,7 @@
 # workflow-native 自研工作流设计
 
+> 2026-07-22 Resource Nodes：新增 `external_xpert` 与 `knowledge_base`。资源节点通过 `sourceHandle="expert-binding" -> targetHandle="expert"` 或 `sourceHandle="knowledge-binding" -> targetHandle="knowledge"` 绑定单个 `workflow_agent`，不参与控制流、变量可达性或节点调度。发布 Xpert 时外部专家解析为不可变版本；知识库继续读取活动索引。同步专家调用与异步 Handoff 是两套明确语义。
+
 > 2026-07-19 Office Automation：`office_automation` 可通过 middleware binding 绑定到 `workflow_agent`，复用 `wait_kind=client_tool` 的持久暂停和恢复语义。22 个 Word/Excel/PowerPoint 工具由用户主动绑定的 Office.js Task Pane 执行；绑定边不参与控制流，修改工具必须有 HITL 覆盖，公开 App/API 禁止该中间件。完整契约见 `docs/XPERT_OFFICE_AUTOMATION.md`。
 
 > 2026-07-19 File Memory Middleware：`xpert_file_memory` 可通过 middleware binding 绑定到 `workflow_agent`，提供索引、摘要 digest、正文选择和候选写回。绑定边不参与控制流；显式配置优先于旧 `memoryReadEnabled/memoryWriteEnabled` 字段。普通 Workflow 无 Xpert 上下文时安全跳过，公开 App 只允许显式开启的只读访问。完整契约见 `docs/XPERT_FILE_MEMORY.md`。
@@ -40,6 +42,26 @@
 ## Xpert 工作流节点规划
 
 真实 Xpert 画布把节点入口分成工作流、中间件、知识流水线、工具集等菜单。ModelMirror 后续仍基于现有 React/FastAPI classic workflow 迭代，但节点规划按 Xpert 分类收敛。
+
+### 资源绑定边
+
+资源绑定边把可复用资源编译为目标 Agent 的 Runtime Toolset，不是普通工作流步骤：
+
+| 资源节点 | 绑定契约 | 执行语义 |
+| --- | --- | --- |
+| `external_xpert` | `expert-binding -> expert` | 调用发布时固定版本的外部 Xpert；复用 classic runner，不通过 HTTP 回环 |
+| `knowledge_base` | `knowledge-binding -> knowledge` | 向目标 Agent 暴露限定知识库的 `knowledge_search/get/cite`；使用活动 Retrieval Profile |
+| `toolset_resource` | `toolset-binding -> toolset` | 下一轮交付命名 Toolset 资源；当前不生成该节点 |
+| `runtime_middleware` | `middleware-binding -> middleware` | 编译目标 Agent 的 middleware pipeline |
+
+共同约束：
+
+- 同一资源节点只能绑定一个 `workflow_agent`，不得同时连接控制流边。
+- 绑定 Agent 必须启用 Runtime 工具模式；Tool Policy、HITL、Audit 和 checkpoint 继续生效。
+- 资源节点不进入拓扑排序、变量声明、可达性检查和节点执行队列。
+- `external_xpert` 最大嵌套深度为 4，禁止自身调用和协作循环；公开 App 第一版禁止该资源。
+- `knowledge_base` 第一版只读。写入仍通过 Knowledge Proposal/Inbox、候选版本、Evaluation Gate 和 Promote。
+- `agent_handoff` / `handoff_router` 用于异步移交、后台执行和人工接管，不与同步 `external_xpert` 合并。
 
 ### 工作流节点分类
 

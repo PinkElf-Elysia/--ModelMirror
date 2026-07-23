@@ -200,6 +200,7 @@ try:
         GoalStore,
         GoalValidationError,
         InMemoryToolAuditStore,
+        ExternalXpertToolsetProvider,
         KnowledgeToolsetProvider,
         MCPToolsetProvider,
         MemoryToolsetProvider,
@@ -232,9 +233,11 @@ try:
         WorkflowExecution,
         WorkflowExecutionStore,
         RuntimeToolCall,
+        RuntimeToolResult,
         TodoToolsetProvider,
         ToolPermissionPolicy,
         bound_middleware_specs,
+        bound_resource_nodes,
         build_context_compression_middleware,
         build_xpert_file_memory_middleware,
         build_human_in_the_loop_middleware,
@@ -252,6 +255,7 @@ try:
         create_default_runtime,
         event_recorder,
         goal_to_payload,
+        is_non_control_binding_edge,
         middleware_config_int,
         middleware_config_schema,
         middleware_spec,
@@ -263,6 +267,7 @@ try:
         register_office_toolset_capability,
         register_automation_toolset_capability,
         register_authoring_toolset_capabilities,
+        register_external_xpert_toolset_capability,
         run_tool_with_runtime,
         runtime_middleware_registry,
         runtime_approval_router,
@@ -309,6 +314,7 @@ except ModuleNotFoundError:
         GoalStore,
         GoalValidationError,
         InMemoryToolAuditStore,
+        ExternalXpertToolsetProvider,
         KnowledgeToolsetProvider,
         MCPToolsetProvider,
         MemoryToolsetProvider,
@@ -341,9 +347,11 @@ except ModuleNotFoundError:
         WorkflowExecution,
         WorkflowExecutionStore,
         RuntimeToolCall,
+        RuntimeToolResult,
         TodoToolsetProvider,
         ToolPermissionPolicy,
         bound_middleware_specs,
+        bound_resource_nodes,
         build_context_compression_middleware,
         build_xpert_file_memory_middleware,
         build_human_in_the_loop_middleware,
@@ -361,6 +369,7 @@ except ModuleNotFoundError:
         create_default_runtime,
         event_recorder,
         goal_to_payload,
+        is_non_control_binding_edge,
         middleware_config_int,
         middleware_config_schema,
         middleware_spec,
@@ -372,6 +381,7 @@ except ModuleNotFoundError:
         register_office_toolset_capability,
         register_automation_toolset_capability,
         register_authoring_toolset_capabilities,
+        register_external_xpert_toolset_capability,
         run_tool_with_runtime,
         runtime_middleware_registry,
         runtime_approval_router,
@@ -566,6 +576,19 @@ workflow_mcp_provider = MCPToolsetProvider(tool_registry, mcp_manager)
 xpert_context_store = get_xpert_context_store()
 workflow_memory_provider = MemoryToolsetProvider(xpert_context_store)
 workflow_knowledge_provider = KnowledgeToolsetProvider(get_rag_service)
+
+
+async def run_external_xpert_resource_tool(
+    resource: dict[str, Any],
+    task: str,
+    call: RuntimeToolCall,
+) -> RuntimeToolResult:
+    return await execute_external_xpert_resource(resource, task, call)
+
+
+workflow_external_xpert_provider = ExternalXpertToolsetProvider(
+    run_external_xpert_resource_tool
+)
 datax_store = DataXStore(os.getenv("DATAX_STORAGE_DIR", "").strip() or None)
 datax_service = DataXService(datax_store)
 configure_datax(datax_service)
@@ -667,6 +690,10 @@ runtime_capabilities.register(
     "knowledge_tools",
     workflow_knowledge_provider,
     description="Active knowledge retrieval and approval-gated write tools.",
+)
+register_external_xpert_toolset_capability(
+    runtime_capabilities,
+    workflow_external_xpert_provider,
 )
 register_datax_toolset_capability(runtime_capabilities, workflow_datax_provider)
 register_authoring_toolset_capabilities(
@@ -893,6 +920,8 @@ WorkflowNodeType = Literal[
     "question_classifier",
     "agent",
     "workflow_agent",
+    "external_xpert",
+    "knowledge_base",
     "agent_task",
     "agent_handoff",
     "handoff_router",
@@ -2278,10 +2307,26 @@ def workflow_topological_order(
     nodes: list[WorkflowNodePayload],
     edges: list[WorkflowEdgePayload],
 ) -> list[str]:
-    node_ids = {node.id for node in nodes}
-    indegree = {node.id: 0 for node in nodes}
+    all_node_ids = {node.id for node in nodes}
+    bound_resource_node_ids = {
+        edge.source for edge in edges if is_non_control_binding_edge(edge)
+    }
+    bound_resource_node_ids.update(
+        node.id
+        for node in nodes
+        if workflow_node_kind(node)
+        in {"external_xpert", "knowledge_base"}
+    )
+    node_ids = all_node_ids - bound_resource_node_ids
+    indegree = {node_id: 0 for node_id in node_ids}
     outgoing: dict[str, list[str]] = defaultdict(list)
 
+    for edge in edges:
+        if edge.source not in all_node_ids or edge.target not in all_node_ids:
+            raise HTTPException(
+                status_code=400,
+                detail="Workflow edge references an unknown node.",
+            )
     for edge in control_flow_edges(edges):
         if edge.source not in node_ids or edge.target not in node_ids:
             raise HTTPException(status_code=400, detail="工作流连线引用了不存在的节点。")
@@ -2299,7 +2344,7 @@ def workflow_topological_order(
             if indegree[target_id] == 0:
                 queue.append(target_id)
 
-    if len(order) != len(nodes):
+    if len(order) != len(node_ids):
         raise HTTPException(status_code=400, detail="工作流暂不支持循环，请移除环形连线。")
 
     return order
@@ -3713,6 +3758,19 @@ async def _run_workflow_response(
                 matched_tool = await workflow_knowledge_provider.find_tool(tool_name)
                 capability_name = "knowledge_tools"
             if not matched_tool:
+                external_resources = (
+                    middleware_context.metadata.get("external_xpert_tools")
+                    if middleware_context is not None
+                    else None
+                )
+                matched_tool = await workflow_external_xpert_provider.find_tool(
+                    tool_name,
+                    external_resources
+                    if isinstance(external_resources, list)
+                    else None,
+                )
+                capability_name = "external_xpert_tools"
+            if not matched_tool:
                 matched_tool = await workflow_datax_provider.find_tool(tool_name)
                 capability_name = "datax_tools"
             if not matched_tool:
@@ -3769,6 +3827,8 @@ async def _run_workflow_response(
                     "datax_indicator_propose_update",
                 } and not app_capability_allowed("allow_datax_read"):
                     raise PermissionError("Xpert App Data X read access is disabled.")
+            if capability_name == "external_xpert_tools" and runtime_run_type == "xpert_app":
+                raise PermissionError("Xpert App external Xpert access is disabled.")
             if capability_name == "sandbox_tools" and runtime_run_type == "xpert_app":
                 raise PermissionError("Xpert App Sandbox and Skill access is disabled.")
             if capability_name == "browser_tools" and runtime_run_type == "xpert_app":
@@ -3832,6 +3892,12 @@ async def _run_workflow_response(
                         "xpert_id": run_context.get("xpert_id"),
                         "xpert_slug": run_context.get("xpert_slug"),
                         "xpert_version": run_context.get("xpert_version"),
+                        "external_xpert_depth": int(
+                            run_context.get("external_xpert_depth") or 0
+                        ),
+                        "external_xpert_path": list(
+                            run_context.get("external_xpert_path") or []
+                        ),
                         "conversation_id": run_context.get("conversation_id"),
                         "goal_id": run_context.get("goal_id"),
                         "goal_step_id": run_context.get("goal_step_id"),
@@ -3839,6 +3905,12 @@ async def _run_workflow_response(
                         "file_asset_ids": run_context.get("file_asset_ids") or [],
                         "file_owner_xpert_id": run_context.get("file_owner_xpert_id"),
                         "file_conversation_id": run_context.get("file_conversation_id"),
+                        "knowledge_resource_configs": list(
+                            effective_context.metadata.get(
+                                "knowledge_resource_configs"
+                            )
+                            or []
+                        ),
                         "sandbox_config": effective_context.metadata.get("sandbox_config") or {},
                         "skills_config": effective_context.metadata.get("skills_config") or {},
                         "browser_config": effective_context.metadata.get("browser_config") or {},
@@ -3900,6 +3972,7 @@ async def _run_workflow_response(
             include_memory_write: bool = False,
             include_knowledge_read: bool = False,
             include_knowledge_write: bool = False,
+            external_xpert_tools: list[dict[str, Any]] | None = None,
             include_datax: bool = False,
             include_datax_proposals: bool = False,
             include_todo: bool = False,
@@ -3957,6 +4030,12 @@ async def _run_workflow_response(
                     tool
                     for tool in knowledge_tools
                     if tool.name == "knowledge_propose_write"
+                )
+            if external_xpert_tools and runtime_run_type != "xpert_app":
+                tools.extend(
+                    await workflow_external_xpert_provider.list_tools(
+                        external_xpert_tools
+                    )
                 )
             datax_tools = await workflow_datax_provider.list_tools()
             if include_datax and app_capability_allowed("allow_datax_read"):
@@ -4040,6 +4119,7 @@ async def _run_workflow_response(
                     capability_name = {
                         "memory": "memory_tools",
                         "knowledge": "knowledge_tools",
+                        "external_xpert": "external_xpert_tools",
                         "datax": "datax_tools",
                         "todo": "todo_tools",
                         "sandbox": "sandbox_tools",
@@ -4081,6 +4161,7 @@ async def _run_workflow_response(
             include_knowledge_read: bool = False,
             include_knowledge_write: bool = False,
             knowledge_base_ids: list[str] | None = None,
+            external_xpert_tools: list[dict[str, Any]] | None = None,
             include_datax: bool = False,
             include_datax_proposals: bool = False,
             include_todo: bool = False,
@@ -4108,6 +4189,7 @@ async def _run_workflow_response(
                 include_memory_write=include_memory_write,
                 include_knowledge_read=include_knowledge_read,
                 include_knowledge_write=include_knowledge_write,
+                external_xpert_tools=external_xpert_tools,
                 include_datax=include_datax,
                 include_datax_proposals=include_datax_proposals,
                 include_todo=include_todo,
@@ -4361,6 +4443,7 @@ async def _run_workflow_response(
                     "knowledge_read_enabled": include_knowledge_read,
                     "knowledge_write_enabled": include_knowledge_write,
                     "knowledge_base_ids": list(knowledge_base_ids or []),
+                    "external_xpert_tools": list(external_xpert_tools or []),
                 }
                 if isinstance(approval_payload, dict):
                     resume_metadata["resolved_approval"] = approval_payload
@@ -4511,6 +4594,9 @@ async def _run_workflow_response(
                                 "knowledge_read_enabled": include_knowledge_read,
                                 "knowledge_write_enabled": include_knowledge_write,
                                 "knowledge_base_ids": list(knowledge_base_ids or []),
+                                "external_xpert_tools": list(
+                                    external_xpert_tools or []
+                                ),
                             },
                             pipeline=pipeline,
                             middleware_context=middleware_context,
@@ -6051,6 +6137,122 @@ async def _run_workflow_response(
                                 if item.strip()
                             )
                         )
+                        run_context = task_state.get("runtime_metadata") or {}
+                        knowledge_resource_configs: list[dict[str, Any]] = []
+                        for resource_node in bound_resource_nodes(
+                            nodes_by_id,
+                            payload.workflow.edges,
+                            node.id,
+                            "knowledge",
+                        ):
+                            resource_data = (
+                                resource_node.data
+                                if isinstance(resource_node.data, dict)
+                                else {}
+                            )
+                            knowledge_base_id = str(
+                                resource_data.get("knowledgeBaseId") or ""
+                            ).strip()
+                            if not knowledge_base_id:
+                                continue
+                            if knowledge_base_id not in knowledge_base_ids:
+                                knowledge_base_ids.append(knowledge_base_id)
+                            knowledge_resource_configs.append(
+                                {
+                                    "node_id": resource_node.id,
+                                    "knowledge_base_id": knowledge_base_id,
+                                    "top_k": max(
+                                        1,
+                                        min(
+                                            int(resource_data.get("topK") or 5),
+                                            10,
+                                        ),
+                                    ),
+                                    "score_threshold": max(
+                                        0.0,
+                                        min(
+                                            float(
+                                                resource_data.get(
+                                                    "scoreThreshold"
+                                                )
+                                                or 0
+                                            ),
+                                            1.0,
+                                        ),
+                                    ),
+                                }
+                            )
+                        if knowledge_resource_configs:
+                            knowledge_read_enabled = True
+
+                        external_xpert_tools: list[dict[str, Any]] = []
+                        current_xpert_id = str(
+                            run_context.get("xpert_id") or ""
+                        ).strip()
+                        external_xpert_path = [
+                            str(item)
+                            for item in run_context.get("external_xpert_path", [])
+                            if str(item)
+                        ]
+                        for resource_node in bound_resource_nodes(
+                            nodes_by_id,
+                            payload.workflow.edges,
+                            node.id,
+                            "expert",
+                        ):
+                            resource_data = (
+                                resource_node.data
+                                if isinstance(resource_node.data, dict)
+                                else {}
+                            )
+                            reference = str(
+                                resource_data.get("xpertId") or ""
+                            ).strip()
+                            target_xpert = await asyncio.to_thread(
+                                get_xpert_store().resolve_xpert,
+                                reference,
+                            )
+                            version_policy = str(
+                                resource_data.get("versionPolicy")
+                                or "current_published"
+                            ).strip()
+                            pinned_version = (
+                                int(resource_data.get("pinnedVersion") or 0)
+                                if version_policy == "pinned"
+                                else int(target_xpert.published_version or 0)
+                            )
+                            if target_xpert.status != "published" or pinned_version < 1:
+                                raise ValueError(
+                                    f"External Xpert must be published: {reference}"
+                                )
+                            await asyncio.to_thread(
+                                get_xpert_store().get_version,
+                                target_xpert.id,
+                                pinned_version,
+                            )
+                            if (
+                                target_xpert.id == current_xpert_id
+                                or target_xpert.id in external_xpert_path
+                            ):
+                                raise ValueError(
+                                    "External Xpert collaboration cannot call itself or create a cycle."
+                                )
+                            external_xpert_tools.append(
+                                {
+                                    "node_id": resource_node.id,
+                                    "xpert_id": target_xpert.id,
+                                    "xpert_slug": target_xpert.slug,
+                                    "tool_name": str(
+                                        resource_data.get("toolName") or ""
+                                    ).strip(),
+                                    "description": str(
+                                        resource_data.get("description")
+                                        or target_xpert.description
+                                        or f"Delegate a task to {target_xpert.name}."
+                                    ).strip()[:1000],
+                                    "pinned_version": pinned_version,
+                                }
+                            )
                         if knowledge_writer_spec is not None:
                             writer_kb_id = str(
                                 knowledge_writer_spec.config.get("knowledge_base_id") or ""
@@ -6065,11 +6267,16 @@ async def _run_workflow_response(
                             raise ValueError(
                                 "workflow_agent memoryWriteTarget must be conversation or xpert."
                             )
-                        if knowledge_read_enabled or knowledge_write_enabled:
+                        if (
+                            knowledge_read_enabled
+                            or knowledge_write_enabled
+                            or external_xpert_tools
+                        ):
                             if tool_mode != "mcp_tools":
                                 raise ValueError(
-                                    "workflow_agent knowledge tools require Runtime tool mode."
+                                    "Bound knowledge and external Xpert resources require Runtime tool mode."
                                 )
+                        if knowledge_read_enabled or knowledge_write_enabled:
                             if not 1 <= len(knowledge_base_ids) <= 5:
                                 raise ValueError(
                                     "workflow_agent knowledge tools require between 1 and 5 knowledge bases."
@@ -6106,7 +6313,6 @@ async def _run_workflow_response(
                                 raise ValueError(
                                     "knowledge_writer requires Runtime tool mode unless automatic proposal is enabled."
                                 )
-                        run_context = task_state.get("runtime_metadata") or {}
                         if enable_file_understanding:
                             file_context = variables.get("xpert_file_context", "").strip()
                             if file_context:
@@ -6236,6 +6442,7 @@ async def _run_workflow_response(
                                 "knowledge_read_enabled": knowledge_read_enabled,
                                 "knowledge_write_enabled": knowledge_write_enabled,
                                 "knowledge_base_ids": knowledge_base_ids,
+                                "external_xpert_count": len(external_xpert_tools),
                             },
                         )
                         (
@@ -6248,6 +6455,12 @@ async def _run_workflow_response(
                             title,
                             workflow_agent_run.run_id,
                             model_id,
+                        )
+                        agent_context.metadata.update(
+                            {
+                                "external_xpert_tools": external_xpert_tools,
+                                "knowledge_resource_configs": knowledge_resource_configs,
+                            }
                         )
                         compression_spec = middleware_spec(
                             agent_specs,
@@ -6301,6 +6514,7 @@ async def _run_workflow_response(
                                 "knowledge_read_enabled": knowledge_read_enabled,
                                 "knowledge_write_enabled": knowledge_write_enabled,
                                 "knowledge_base_count": len(knowledge_base_ids),
+                                "external_xpert_count": len(external_xpert_tools),
                             },
                         )
                         if enable_file_understanding and run_context.get("file_count"):
@@ -6677,6 +6891,7 @@ async def _run_workflow_response(
                                             or knowledge_writer_spec is not None
                                         ),
                                         knowledge_base_ids=knowledge_base_ids,
+                                        external_xpert_tools=external_xpert_tools,
                                         include_datax=datax_enabled,
                                         include_datax_proposals=datax_allow_proposals,
                                         include_todo=todo_spec is not None,
@@ -6773,6 +6988,7 @@ async def _run_workflow_response(
                                                 or knowledge_writer_spec is not None
                                             ),
                                             knowledge_base_ids=knowledge_base_ids,
+                                            external_xpert_tools=external_xpert_tools,
                                             include_datax=datax_enabled,
                                             include_datax_proposals=datax_allow_proposals,
                                             include_todo=todo_spec is not None,
@@ -8377,6 +8593,115 @@ async def consume_workflow_stream(response: Any) -> dict[str, Any]:
     if final_event is None:
         raise RuntimeError("Xpert workflow ended without a final result.")
     return final_event
+
+
+EXTERNAL_XPERT_MAX_DEPTH = 4
+
+
+async def execute_external_xpert_resource(
+    resource: dict[str, Any],
+    task: str,
+    call: RuntimeToolCall,
+) -> RuntimeToolResult:
+    depth = int(call.metadata.get("external_xpert_depth") or 0)
+    if depth >= EXTERNAL_XPERT_MAX_DEPTH:
+        raise ValueError(
+            f"External Xpert nesting depth exceeds {EXTERNAL_XPERT_MAX_DEPTH}."
+        )
+    target_xpert_id = str(resource.get("xpert_id") or "").strip()
+    target_version = int(resource.get("pinned_version") or 0)
+    if not target_xpert_id or target_version < 1:
+        raise ValueError("External Xpert resource is not pinned to a published version.")
+
+    current_xpert_id = str(call.metadata.get("xpert_id") or "").strip()
+    path = [
+        str(item)
+        for item in call.metadata.get("external_xpert_path", [])
+        if str(item)
+    ]
+    if current_xpert_id and current_xpert_id not in path:
+        path.append(current_xpert_id)
+    if target_xpert_id == current_xpert_id or target_xpert_id in path:
+        raise ValueError("External Xpert collaboration cycle detected.")
+
+    parent_run_id = str(call.metadata.get("run_id") or "").strip() or None
+    if parent_run_id:
+        await run_registry.record_checkpoint(
+            parent_run_id,
+            event_type="external_xpert.started",
+            title="External Xpert collaboration started",
+            summary=(
+                f"target={target_xpert_id}, version={target_version}, depth={depth + 1}"
+            ),
+            metadata={
+                "target_xpert_id": target_xpert_id,
+                "target_xpert_version": target_version,
+                "depth": depth + 1,
+            },
+        )
+
+    prepared = await prepare_published_xpert_run(
+        target_xpert_id,
+        XpertRunRequest(
+            message=task,
+            messages=[],
+            version=target_version,
+        ),
+    )
+    prepared.runtime_metadata.update(
+        {
+            "external_xpert_depth": depth + 1,
+            "external_xpert_path": path,
+            "external_xpert_source_id": current_xpert_id or None,
+            "external_xpert_tool_name": call.tool_name,
+        }
+    )
+    response = await _run_workflow_response(
+        prepared.request,
+        None,
+        runtime_run_type="xpert",
+        runtime_source_id=prepared.xpert.id,
+        runtime_metadata=prepared.runtime_metadata,
+        runtime_parent_run_id=parent_run_id,
+    )
+    final_event = await consume_workflow_stream(response)
+    if final_event.get("event") in {
+        "runtime_approval_pending",
+        "client_tool_waiting",
+    }:
+        raise RuntimeError(
+            "The external Xpert paused for an interactive action. "
+            "Resolve that action before retrying the collaboration."
+        )
+    output = str(final_event.get("final_output") or "")
+    child_run_id = str(final_event.get("run_id") or "")
+    if parent_run_id:
+        await run_registry.record_checkpoint(
+            parent_run_id,
+            event_type="external_xpert.completed",
+            title="External Xpert collaboration completed",
+            summary=(
+                f"target={prepared.xpert.id}, version={prepared.version.version}, "
+                f"output_length={len(output)}"
+            ),
+            metadata={
+                "target_xpert_id": prepared.xpert.id,
+                "target_xpert_version": prepared.version.version,
+                "child_run_id": child_run_id or None,
+                "output_length": len(output),
+            },
+        )
+    return RuntimeToolResult(
+        output=output,
+        metadata={
+            "content_types": ["text"],
+            "target_xpert_id": prepared.xpert.id,
+            "target_xpert_slug": prepared.xpert.slug,
+            "target_xpert_version": prepared.version.version,
+            "child_run_id": child_run_id or None,
+            "output_length": len(output),
+        },
+    )
 
 
 async def execute_xpert_handoff_target(
@@ -10134,6 +10459,57 @@ async def list_workflow_node_registry():
     """Return Xpert-style workflow node palette metadata."""
 
     return workflow_node_registry.to_payload()
+
+
+@app.get("/api/workflow/resource-options", response_model=dict[str, Any])
+async def list_workflow_resource_options(
+    kind: Literal["external_xpert", "knowledge_base"],
+):
+    if kind == "external_xpert":
+        items = await asyncio.to_thread(
+            get_xpert_store().list_xperts,
+            status=None,
+            search="",
+            limit=200,
+        )
+        return {
+            "kind": kind,
+            "items": [
+                {
+                    "id": item.id,
+                    "slug": item.slug,
+                    "name": item.name,
+                    "description": item.description,
+                    "status": item.status,
+                    "published_version": item.published_version,
+                }
+                for item in items
+            ],
+        }
+
+    knowledge_bases = await asyncio.to_thread(
+        get_rag_service().list_knowledge_bases
+    )
+    items: list[dict[str, Any]] = []
+    for item in knowledge_bases:
+        kb_id = str(item.get("id") or item.get("kb_id") or "")
+        active = await asyncio.to_thread(
+            get_rag_service().get_active_pipeline_version,
+            kb_id,
+        )
+        items.append(
+            {
+                "id": kb_id,
+                "name": str(item.get("name") or kb_id),
+                "description": str(item.get("description") or ""),
+                "status": "active" if active is not None else "no_active_index",
+                "active_version_id": (
+                    str(active.get("version_id") or "") if active else None
+                ),
+                "document_count": int(item.get("document_count") or 0),
+            }
+        )
+    return {"kind": kind, "items": items}
 
 
 @app.post("/api/runtime/agent-tasks")

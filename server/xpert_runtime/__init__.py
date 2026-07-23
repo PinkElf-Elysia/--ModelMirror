@@ -37,10 +37,12 @@ from .defaults import create_default_runtime, event_recorder, system_prompt_inje
 from .core_middlewares import (
     RuntimeMiddlewareSpec,
     bound_middleware_specs,
+    bound_resource_nodes,
     build_context_compression_middleware,
     control_flow_edges,
     estimate_messages_tokens,
     estimate_text_tokens,
+    is_non_control_binding_edge,
     middleware_config_int,
     middleware_config_schema,
     middleware_spec,
@@ -48,6 +50,10 @@ from .core_middlewares import (
     select_runtime_tools,
     todo_planning_instruction,
     validate_structured_output,
+)
+from .external_xpert_toolset import (
+    ExternalXpertToolsetProvider,
+    register_external_xpert_toolset_capability,
 )
 from .events import RuntimeEventStore
 from .middleware import AgentMiddleware, MiddlewarePipeline
@@ -361,7 +367,11 @@ __all__ = [
     "register_todo_toolset_capability",
     "build_context_compression_middleware",
     "bound_middleware_specs",
+    "bound_resource_nodes",
     "control_flow_edges",
+    "is_non_control_binding_edge",
+    "ExternalXpertToolsetProvider",
+    "register_external_xpert_toolset_capability",
     "estimate_messages_tokens",
     "estimate_text_tokens",
     "middleware_config_int",

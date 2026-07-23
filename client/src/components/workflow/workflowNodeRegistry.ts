@@ -5,6 +5,7 @@ export type WorkflowPaletteNodeKind = Exclude<WorkflowNodeKind, "runtime_middlew
 export type WorkflowPaletteCategoryId =
   | "logic"
   | "transform"
+  | "resource"
   | "tool"
   | "memory"
   | "other";
@@ -188,6 +189,27 @@ export const workflowPaletteSections: WorkflowPaletteSection[] = [
         description: "待接入：把 JSON 字符串解析为结构化变量。",
         statusLabel: "待接入",
         tags: ["json", "deserialize"],
+      },
+    ],
+  },
+  {
+    id: "resource",
+    label: "资源",
+    description: "把已发布 Xpert 与知识库绑定为智能体可调用资源。",
+    items: [
+      {
+        kind: "external_xpert",
+        icon: "XP",
+        title: "外部 Xpert",
+        description: "将已发布 Xpert 作为同步协作者工具绑定到工作流智能体。",
+        tags: ["xpert", "expert", "resource", "binding"],
+      },
+      {
+        kind: "knowledge_base",
+        icon: "KB",
+        title: "知识库",
+        description: "将知识库的检索、原文和引用能力绑定到工作流智能体。",
+        tags: ["knowledge", "rag", "resource", "binding"],
       },
     ],
   },

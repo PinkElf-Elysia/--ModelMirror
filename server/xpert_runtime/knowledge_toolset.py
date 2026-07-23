@@ -195,19 +195,60 @@ class KnowledgeToolsetProvider:
         query = str(call.arguments.get("query") or "").strip()
         if not query:
             raise ValueError("query is required.")
-        top_k = max(1, min(int(call.arguments.get("top_k") or 5), 10))
+        resource_configs = self._resource_configs(call)
+        requested_top_k = call.arguments.get("top_k")
+        top_k = max(
+            1,
+            min(
+                int(
+                    requested_top_k
+                    or max(
+                        (
+                            int(item.get("top_k") or 5)
+                            for item in resource_configs.values()
+                        ),
+                        default=5,
+                    )
+                ),
+                10,
+            ),
+        )
         requested_kb = str(call.arguments.get("kb_id") or "").strip()
         targets = [self._assert_allowed(requested_kb, allowed_kb_ids)] if requested_kb else allowed_kb_ids
         warnings: list[str] = []
         combined: list[dict[str, Any]] = []
         for kb_id in targets:
+            resource_config = resource_configs.get(kb_id, {})
+            target_top_k = max(
+                1,
+                min(
+                    int(requested_top_k or resource_config.get("top_k") or top_k),
+                    10,
+                ),
+            )
+            score_threshold = max(
+                0.0,
+                min(float(resource_config.get("score_threshold") or 0), 1.0),
+            )
             try:
-                result = await self.service.search_knowledge(kb_id, query, top_k=top_k)
+                result = await self.service.search_knowledge(
+                    kb_id,
+                    query,
+                    top_k=target_top_k,
+                )
             except Exception as exc:
                 warnings.append(f"{kb_id}: {str(exc)[:180]}")
                 continue
             warnings.extend(str(item)[:180] for item in result.get("warnings", []))
             for source in result.get("sources", []):
+                effective_score = float(
+                    source.get("rerank_score")
+                    or source.get("score")
+                    or source.get("fused_score")
+                    or 0.0
+                )
+                if effective_score < score_threshold:
+                    continue
                 combined.append(
                     {
                         "kb_id": kb_id,
@@ -225,6 +266,7 @@ class KnowledgeToolsetProvider:
                         "page_number": source.get("page_number"),
                         "visual_kind": source.get("visual_kind"),
                         "source_block_id": source.get("source_block_id"),
+                        "resource_score_threshold": score_threshold,
                     }
                 )
         if not combined and warnings:
@@ -253,6 +295,20 @@ class KnowledgeToolsetProvider:
                 "warning_count": len(warnings),
             },
         )
+
+    def _resource_configs(
+        self,
+        call: RuntimeToolCall,
+    ) -> dict[str, dict[str, Any]]:
+        raw = call.metadata.get("knowledge_resource_configs")
+        if not isinstance(raw, list):
+            return {}
+        return {
+            str(item.get("knowledge_base_id") or ""): dict(item)
+            for item in raw
+            if isinstance(item, dict)
+            and str(item.get("knowledge_base_id") or "").strip()
+        }
 
     def _allowed_knowledge_bases(self, call: RuntimeToolCall) -> list[str]:
         raw = call.metadata.get("knowledge_base_ids")

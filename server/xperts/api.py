@@ -37,11 +37,13 @@ from .store import (
 from .validation import validate_xpert_definition
 
 try:
+    from server.rag.api import get_rag_service
     from server.skills.api import get_skill_manager
-    from server.workflow_native.schemas import ValidationIssue
+    from server.workflow_native.schemas import NativeWorkflowDefinition, ValidationIssue
 except ModuleNotFoundError:
+    from rag.api import get_rag_service
     from skills.api import get_skill_manager
-    from workflow_native.schemas import ValidationIssue
+    from workflow_native.schemas import NativeWorkflowDefinition, ValidationIssue
 
 
 router = APIRouter(prefix="/api/xperts", tags=["xperts"])
@@ -84,6 +86,155 @@ def _validate_installed_skills(
             "valid": not any(issue.severity == "error" for issue in issues),
             "issues": issues,
         }
+    )
+
+
+def _prepare_published_resource_snapshot(
+    xpert: XpertDefinition,
+) -> tuple[NativeWorkflowDefinition, list[ValidationIssue]]:
+    store = get_xpert_store()
+    workflow = xpert.draft.workflow.model_copy(deep=True)
+    issues: list[ValidationIssue] = []
+
+    def external_nodes(
+        source_workflow: NativeWorkflowDefinition,
+    ) -> list:
+        return [
+            node
+            for node in source_workflow.nodes
+            if str((node.data or {}).get("kind") or node.type or "")
+            == "external_xpert"
+        ]
+
+    for node in workflow.nodes:
+        data = node.data if isinstance(node.data, dict) else {}
+        kind = str(data.get("kind") or node.type or "")
+        if kind == "knowledge_base":
+            kb_id = str(data.get("knowledgeBaseId") or "").strip()
+            if not kb_id:
+                continue
+            try:
+                get_rag_service().get_pipeline_draft(kb_id)
+                active = get_rag_service().get_active_pipeline_version(kb_id)
+                if active is None:
+                    issues.append(
+                        ValidationIssue(
+                            code="xpert_knowledge_active_version_missing",
+                            message=(
+                                "The bound knowledge base has no active index; "
+                                "runtime searches will return no results until one is activated."
+                            ),
+                            severity="warning",
+                            node_id=node.id,
+                        )
+                    )
+            except Exception:
+                issues.append(
+                    ValidationIssue(
+                        code="xpert_knowledge_base_not_found",
+                        message=f"Bound knowledge base not found: {kb_id}.",
+                        node_id=node.id,
+                    )
+                )
+        if kind != "external_xpert":
+            continue
+        reference = str(data.get("xpertId") or "").strip()
+        try:
+            target = store.resolve_xpert(reference)
+            if target.id == xpert.id:
+                raise XpertValidationError(
+                    "An Xpert cannot bind itself as an external expert."
+                )
+            policy = str(data.get("versionPolicy") or "current_published")
+            version_number = (
+                int(data.get("pinnedVersion") or 0)
+                if policy == "pinned"
+                else int(target.published_version or 0)
+            )
+            if target.status != "published" or version_number < 1:
+                raise XpertValidationError(
+                    f"External Xpert must be published: {reference}."
+                )
+            store.get_version(target.id, version_number)
+            data["xpertId"] = target.id
+            data["versionPolicy"] = "pinned"
+            data["pinnedVersion"] = version_number
+            node.data = data
+        except (XpertStoreError, TypeError, ValueError) as exc:
+            issues.append(
+                ValidationIssue(
+                    code="xpert_external_resource_invalid",
+                    message=str(exc),
+                    node_id=node.id,
+                )
+            )
+
+    def walk_dependencies(
+        owner_id: str,
+        owner_workflow: NativeWorkflowDefinition,
+        path: tuple[str, ...],
+    ) -> None:
+        for resource_node in external_nodes(owner_workflow):
+            resource_data = resource_node.data or {}
+            reference = str(resource_data.get("xpertId") or "").strip()
+            try:
+                target = store.resolve_xpert(reference)
+                policy = str(
+                    resource_data.get("versionPolicy") or "current_published"
+                )
+                version_number = (
+                    int(resource_data.get("pinnedVersion") or 0)
+                    if policy == "pinned"
+                    else int(target.published_version or 0)
+                )
+                if version_number < 1:
+                    continue
+                if target.id in path:
+                    issues.append(
+                        ValidationIssue(
+                            code="xpert_external_resource_cycle",
+                            message=(
+                                "External Xpert collaboration cycle detected: "
+                                + " -> ".join((*path, target.id))
+                            ),
+                            node_id=(
+                                resource_node.id if owner_id == xpert.id else None
+                            ),
+                        )
+                    )
+                    continue
+                target_version = store.get_version(target.id, version_number)
+                walk_dependencies(
+                    target.id,
+                    target_version.workflow,
+                    (*path, target.id),
+                )
+            except (XpertStoreError, TypeError, ValueError):
+                continue
+
+    walk_dependencies(xpert.id, workflow, (xpert.id,))
+    return workflow, issues
+
+
+def _validate_xpert_for_publish(
+    xpert: XpertDefinition,
+) -> tuple[XpertValidationResult, NativeWorkflowDefinition]:
+    workflow, resource_issues = _prepare_published_resource_snapshot(xpert)
+    candidate = xpert.model_copy(deep=True)
+    candidate.draft.workflow = workflow
+    validation = _validate_installed_skills(
+        candidate,
+        validate_xpert_definition(candidate),
+    )
+    issues = [*validation.issues, *resource_issues]
+    return (
+        validation.model_copy(
+            update={
+                "valid": not any(issue.severity == "error" for issue in issues),
+                "issues": issues,
+            }
+        ),
+        workflow,
     )
 
 
@@ -282,7 +433,11 @@ async def update_xpert(xpert_id: str, payload: XpertUpdateRequest) -> XpertDefin
 async def validate_xpert(xpert_id: str) -> XpertValidationResult:
     try:
         xpert = await asyncio.to_thread(get_xpert_store().get_xpert, xpert_id)
-        return _validate_installed_skills(xpert, validate_xpert_definition(xpert))
+        validation, _ = await asyncio.to_thread(
+            _validate_xpert_for_publish,
+            xpert,
+        )
+        return validation
     except XpertStoreError as exc:
         _raise_store_error(exc)
 
@@ -292,8 +447,9 @@ async def publish_xpert(xpert_id: str, payload: XpertPublishRequest) -> XpertVer
     try:
         store = get_xpert_store()
         xpert = await asyncio.to_thread(store.get_xpert, xpert_id)
-        validation = _validate_installed_skills(
-            xpert, validate_xpert_definition(xpert)
+        validation, workflow = await asyncio.to_thread(
+            _validate_xpert_for_publish,
+            xpert,
         )
         if not validation.valid:
             raise HTTPException(
@@ -308,6 +464,7 @@ async def publish_xpert(xpert_id: str, payload: XpertPublishRequest) -> XpertVer
             xpert_id,
             release_notes=payload.release_notes,
             expected_revision=xpert.draft_revision,
+            workflow_override=workflow,
         )
     except HTTPException:
         raise
