@@ -81,3 +81,19 @@ Projects:
 
 No Xpert Data X source code is copied into ModelMirror. Its public documentation
 is used as a domain reference while the implementation remains independent.
+
+## API Toolset document parsers
+
+PyYAML is distributed under the MIT License and parses trusted-management-plane
+OpenAPI YAML documents.
+
+Project: https://github.com/yaml/pyyaml
+
+defusedxml is distributed under the Python Software Foundation License and
+parses OData v4 CSDL metadata with XML entity and expansion protections.
+
+Project: https://github.com/tiran/defusedxml
+
+No Xpert AGPL implementation is copied into the API Toolset runtime. Xpert UI
+and public documentation are used only as behavioral and domain-model
+references.

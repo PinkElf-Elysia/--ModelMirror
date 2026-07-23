@@ -95,6 +95,36 @@ def _prepare_published_resource_snapshot(
     store = get_xpert_store()
     workflow = xpert.draft.workflow.model_copy(deep=True)
     issues: list[ValidationIssue] = []
+    nodes_by_id = {node.id: node for node in workflow.nodes}
+
+    def hitl_rules_for_agent(agent_node_id: str) -> set[str]:
+        rules: set[str] = set()
+        for edge in workflow.edges:
+            if edge.target != agent_node_id or edge.targetHandle != "middleware":
+                continue
+            middleware_node = nodes_by_id.get(edge.source)
+            if middleware_node is None:
+                continue
+            middleware_data = (
+                middleware_node.data
+                if isinstance(middleware_node.data, dict)
+                else {}
+            )
+            if (
+                str(middleware_data.get("runtimeMiddlewareId") or "")
+                != "human_in_the_loop"
+            ):
+                continue
+            config = middleware_data.get("runtimeMiddlewareConfig") or {}
+            rules.update(
+                value.strip()
+                for value in re.split(
+                    r"[,\n]+",
+                    str(config.get("interrupt_on_tools") or ""),
+                )
+                if value.strip()
+            )
+        return rules
 
     def external_nodes(
         source_workflow: NativeWorkflowDefinition,
@@ -131,11 +161,55 @@ def _prepare_published_resource_snapshot(
                     raise ValueError(
                         f"Toolset must be published before Xpert publish: {reference}."
                     )
-                toolset_service.store.get_version(toolset.id, version_number)
+                version = toolset_service.store.get_version(
+                    toolset.id,
+                    version_number,
+                )
                 data["toolsetId"] = toolset.id
                 data["versionPolicy"] = "pinned"
                 data["pinnedVersion"] = version_number
                 node.data = data
+                mutating_names = []
+                prefix = version.connection.tool_prefix
+                for tool in version.tools:
+                    if tool.read_only or not tool.requires_approval:
+                        continue
+                    exposed_name = tool.exposed_name
+                    mutating_names.append(
+                        f"{prefix}_{exposed_name}" if prefix else exposed_name
+                    )
+                if mutating_names:
+                    binding = next(
+                        (
+                            edge
+                            for edge in workflow.edges
+                            if edge.source == node.id
+                            and edge.targetHandle == "toolset"
+                        ),
+                        None,
+                    )
+                    rules = (
+                        hitl_rules_for_agent(binding.target)
+                        if binding is not None
+                        else set()
+                    )
+                    uncovered = sorted(
+                        name
+                        for name in mutating_names
+                        if "*" not in rules and name not in rules
+                    )
+                    if uncovered:
+                        issues.append(
+                            ValidationIssue(
+                                code="xpert_toolset_mutating_hitl_required",
+                                message=(
+                                    "Mutating API Toolset operations require "
+                                    "human_in_the_loop coverage: "
+                                    + ", ".join(uncovered)
+                                ),
+                                node_id=node.id,
+                            )
+                        )
             except Exception as exc:
                 issues.append(
                     ValidationIssue(

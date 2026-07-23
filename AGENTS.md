@@ -402,7 +402,11 @@ Office 自动化是高风险客户端副作用路径。修改 `server/xpert_runt
 - Stdio Toolset 只接受 argv，工作目录必须位于 MCP sandbox；远程 Toolset 默认阻断私网、回环、元数据和 URL credentials，旧 SSE 仅作兼容。
 - Toolset Header、环境变量和 Provider key 只能引用加密 Credential ID。普通 API、版本 JSON、日志、audit 和 checkpoint 不得返回明文；主密钥错误时必须 fail-closed。
 - 管理侧工具测试也必须经过参数 Schema、Tool Policy 和 Audit。固定版本遇到工具消失或必填参数不兼容漂移时必须拒绝调用。
-- 修改 Toolset Runtime 至少运行 `test_toolset_store.py`、`test_toolset_service.py`、`test_toolset_api.py`、`test_workflow_toolset_resource.py`、MCP/Toolset/Workflow/Xpert/App 回归和前端生产构建。
+- OpenAPI/OData Toolset 只能从固定 base URL 与编译后的 operation 执行。禁止任意 URL、任意 HTTP 模板、远程 `$ref`、跨域凭据重定向和未经校验的 OData `$filter`。
+- API Toolset 默认阻断回环、私网、link-local、reserved、云元数据和 URL credentials；`trusted_private` 只允许可信管理面显式选择，不能由模型参数开启。
+- API Key、Bearer、Basic 与 OAuth2 client credentials 均只能引用 Credential ID。OAuth token endpoint 必须经过同一网络策略，不得把 token 或认证 header 写入响应摘要。
+- OpenAPI/OData 写操作默认 `requires_approval=true`。管理测试需显式确认；已发布 Xpert 必须由同一 Agent 的 HITL 覆盖，运行时再次检查，任何异常不得 fail-open。
+- 修改 Toolset Runtime 至少运行 `test_toolset_store.py`、`test_toolset_service.py`、`test_toolset_api.py`、`test_toolset_api_compiler.py`、`test_toolset_api_runtime.py`、`test_workflow_toolset_resource.py`、MCP/Toolset/Workflow/Xpert/App 回归和前端生产构建。
 - EvoAgentX 只允许选择性移植已锁定 commit 且许可证审计通过的 MIT 文件；必须保留版权和 NOTICE，并在 `docs/EVOAGENTX_ALIGNMENT.md` 记录来源。
 - EvoAgentX optimizer 或 planner 只能产生候选 Xpert 草稿与评估报告，不得静默发布、覆盖人工草稿或修改不可变线上版本。
 

@@ -4,6 +4,21 @@ import PageContainer from "../components/PageContainer";
 
 type Transport = "stdio" | "streamable_http" | "legacy_sse";
 type CredentialKind = "header" | "environment" | "provider_key" | "generic";
+type ToolsetKind = "mcp" | "openapi" | "odata";
+type APIAuthType = "none" | "api_key" | "bearer" | "basic" | "oauth2_client_credentials";
+
+interface APIAuthProfile {
+  auth_type: APIAuthType;
+  credential_id: string;
+  api_key_name: string;
+  api_key_location: "header" | "query";
+  username_credential_id: string;
+  password_credential_id: string;
+  client_id_credential_id: string;
+  client_secret_credential_id: string;
+  token_url: string;
+  scopes: string[];
+}
 
 interface CredentialSummary {
   credential_id: string;
@@ -33,6 +48,14 @@ interface ConnectionProfile {
   tool_prefix: string;
   network_policy: "public_only" | "trusted_private";
   timeout_seconds: number;
+  api_base_url: string;
+  api_source_url: string;
+  api_source_label: string;
+  api_spec_version: string;
+  api_spec_hash: string;
+  api_auth: APIAuthProfile;
+  response_limit_bytes: number;
+  redirect_limit: number;
 }
 
 interface ToolDefinition {
@@ -44,6 +67,11 @@ interface ToolDefinition {
   enabled: boolean;
   order: number;
   schema_hash: string;
+  execution: Record<string, unknown>;
+  read_only: boolean;
+  requires_approval: boolean;
+  compatibility: "compatible" | "warning" | "breaking";
+  compatibility_message: string;
 }
 
 interface ToolsetVersion {
@@ -57,6 +85,7 @@ interface ToolsetVersion {
 
 interface ToolsetDefinition {
   id: string;
+  kind: ToolsetKind;
   name: string;
   description: string;
   tags: string[];
@@ -71,6 +100,14 @@ interface ToolsetDefinition {
   runtime_status: string;
   runtime_session_id: string | null;
   runtime_error: string;
+  import_warnings: string[];
+  drift_report: {
+    breaking?: string[];
+    warnings?: string[];
+    added?: string[];
+    removed?: string[];
+    compatible?: boolean;
+  };
   updated_at: number;
 }
 
@@ -95,6 +132,25 @@ const emptyConnection: ConnectionProfile = {
   tool_prefix: "",
   network_policy: "public_only",
   timeout_seconds: 30,
+  api_base_url: "",
+  api_source_url: "",
+  api_source_label: "",
+  api_spec_version: "",
+  api_spec_hash: "",
+  api_auth: {
+    auth_type: "none",
+    credential_id: "",
+    api_key_name: "",
+    api_key_location: "header",
+    username_credential_id: "",
+    password_credential_id: "",
+    client_id_credential_id: "",
+    client_secret_credential_id: "",
+    token_url: "",
+    scopes: [],
+  },
+  response_limit_bytes: 2 * 1024 * 1024,
+  redirect_limit: 3,
 };
 
 const inputClass =
@@ -128,7 +184,7 @@ function formatTime(value: number): string {
 
 function StatusDot({ status }: { status: string }) {
   const color =
-    status === "connected" || status === "published"
+    status === "connected" || status === "ready" || status === "published"
       ? "bg-emerald-300"
       : status === "error"
         ? "bg-rose-300"
@@ -164,8 +220,15 @@ export default function ToolsetsPage() {
   const [selectedId, setSelectedId] = useState("");
   const [draft, setDraft] = useState<ToolsetDefinition | null>(null);
   const [commandText, setCommandText] = useState("[]");
+  const [newKind, setNewKind] = useState<ToolsetKind>("mcp");
+  const [kindFilter, setKindFilter] = useState<"all" | "mcp" | "api">("all");
   const [newName, setNewName] = useState("");
   const [newDescription, setNewDescription] = useState("");
+  const [importMode, setImportMode] = useState<"text" | "url">("text");
+  const [apiDocument, setApiDocument] = useState("");
+  const [apiSourceUrl, setApiSourceUrl] = useState("");
+  const [apiBaseUrl, setApiBaseUrl] = useState("");
+  const [confirmMutatingTest, setConfirmMutatingTest] = useState(false);
   const [credentialName, setCredentialName] = useState("");
   const [credentialKind, setCredentialKind] = useState<CredentialKind>("header");
   const [credentialValue, setCredentialValue] = useState("");
@@ -186,9 +249,22 @@ export default function ToolsetsPage() {
     () => draft?.tools.find((tool) => tool.original_name === activeTool) ?? null,
     [activeTool, draft],
   );
+  const filteredToolsets = useMemo(
+    () =>
+      toolsets.filter((item) =>
+        kindFilter === "all"
+          ? true
+          : kindFilter === "mcp"
+            ? item.kind === "mcp"
+            : item.kind !== "mcp",
+      ),
+    [kindFilter, toolsets],
+  );
   const counts = useMemo(
     () => ({
-      connected: toolsets.filter((item) => item.runtime_status === "connected").length,
+      connected: toolsets.filter((item) =>
+        ["connected", "ready"].includes(item.runtime_status),
+      ).length,
       published: toolsets.filter((item) => item.status === "published").length,
       enabledTools: toolsets.reduce(
         (sum, item) => sum + item.tools.filter((tool) => tool.enabled).length,
@@ -234,6 +310,10 @@ export default function ToolsetsPage() {
     }
     setDraft(structuredClone(selected));
     setCommandText(JSON.stringify(selected.connection.command, null, 2));
+    setApiBaseUrl(selected.connection.api_base_url || "");
+    setApiSourceUrl(selected.connection.api_source_url || "");
+    setApiDocument("");
+    setConfirmMutatingTest(false);
     setActiveTool((current) =>
       selected.tools.some((tool) => tool.original_name === current)
         ? current
@@ -261,6 +341,7 @@ export default function ToolsetsPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          kind: newKind,
           name: newName.trim(),
           description: newDescription.trim(),
           connection: emptyConnection,
@@ -282,7 +363,7 @@ export default function ToolsetsPage() {
     setBusy("save");
     try {
       let command: string[] = [];
-      if (draft.connection.transport === "stdio") {
+      if (draft.kind === "mcp" && draft.connection.transport === "stdio") {
         const parsed = JSON.parse(commandText) as unknown;
         if (!Array.isArray(parsed) || !parsed.every((item) => typeof item === "string")) {
           throw new Error("Stdio 命令必须是字符串数组。");
@@ -310,6 +391,54 @@ export default function ToolsetsPage() {
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "保存失败。");
       return null;
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function importApiSpec() {
+    if (!draft || draft.kind === "mcp") return;
+    setBusy("import");
+    try {
+      const saved = await saveDraft();
+      if (!saved) return;
+      const imported = await requestJson<ToolsetDefinition>(
+        `/api/toolsets/${draft.id}/import`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            source_type: importMode,
+            document: importMode === "text" ? apiDocument : "",
+            source_url: importMode === "url" ? apiSourceUrl.trim() : "",
+            base_url: apiBaseUrl.trim(),
+            source_label: importMode === "text" ? "管理页导入" : "",
+          }),
+        },
+      );
+      setNotice(
+        `${draft.kind === "openapi" ? "OpenAPI" : "OData"} 已编译为 ${imported.tools.length} 个操作，新操作默认关闭。`,
+      );
+      await loadAll(imported.id);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "API 文档导入失败。");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function refreshApiSpec() {
+    if (!draft || draft.kind === "mcp") return;
+    setBusy("refresh");
+    try {
+      const refreshed = await requestJson<ToolsetDefinition>(
+        `/api/toolsets/${draft.id}/refresh`,
+        { method: "POST" },
+      );
+      setNotice("远程 API 文档已刷新，已发布版本保持不变。");
+      await loadAll(refreshed.id);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "API 文档刷新失败。");
     } finally {
       setBusy("");
     }
@@ -439,6 +568,7 @@ export default function ToolsetsPage() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             arguments: parseJsonObject(toolArguments, "测试参数"),
+            confirm_mutating: confirmMutatingTest,
           }),
         },
       );
@@ -483,9 +613,9 @@ export default function ToolsetsPage() {
               <span className="h-2 w-2 rounded-full bg-cyan-300" />
               Runtime Toolset
             </div>
-            <h1 className="mt-2 text-2xl font-semibold text-white">MCP Toolset 管理</h1>
+            <h1 className="mt-2 text-2xl font-semibold text-white">Toolset Runtime</h1>
             <p className="mt-1 max-w-3xl text-sm leading-6 text-slate-400">
-              配置连接与凭据，发现并测试工具，然后发布不可变版本供 Agent 绑定。
+              连接 MCP 或导入 OpenAPI/OData，配置工具 Schema 与凭据，再发布不可变版本供 Agent 绑定。
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -493,7 +623,7 @@ export default function ToolsetsPage() {
               {toolsets.length} 个 Toolset
             </span>
             <span className="rounded-full bg-emerald-300/10 px-3 py-1.5 text-xs text-emerald-200">
-              {counts.connected} 个已连接
+              {counts.connected} 个运行就绪
             </span>
             <span className="rounded-full bg-cyan-300/10 px-3 py-1.5 text-xs text-cyan-100">
               {counts.published} 个已发布 · {counts.enabledTools} 个工具
@@ -508,17 +638,26 @@ export default function ToolsetsPage() {
         </header>
 
         <nav aria-label="Toolset 类型" className="mt-4 flex gap-1 border-b border-white/10">
-          <button
-            className="border-b-2 border-cyan-300 px-3 py-2 text-sm font-semibold text-cyan-100"
-            type="button"
-          >
-            我的 Toolset
-          </button>
+          {([
+            ["all", "全部"],
+            ["mcp", "MCP"],
+            ["api", "API Toolset"],
+          ] as const).map(([value, label]) => (
+            <button
+              className={`px-3 py-2 text-sm font-semibold ${
+                kindFilter === value
+                  ? "border-b-2 border-cyan-300 text-cyan-100"
+                  : "text-slate-400 hover:text-white"
+              }`}
+              key={value}
+              onClick={() => setKindFilter(value)}
+              type="button"
+            >
+              {label}
+            </button>
+          ))}
           <button className="cursor-not-allowed px-3 py-2 text-sm text-slate-500" disabled type="button">
             内置 Provider（下一轮）
-          </button>
-          <button className="cursor-not-allowed px-3 py-2 text-sm text-slate-500" disabled type="button">
-            API Toolset（下一轮）
           </button>
         </nav>
 
@@ -528,7 +667,27 @@ export default function ToolsetsPage() {
         <div className="mt-5 grid min-h-[720px] gap-5 xl:grid-cols-[260px_minmax(420px,0.9fr)_minmax(420px,1.1fr)]">
           <aside className="border-r border-white/10 pr-5">
             <form className="border-b border-white/10 pb-5" onSubmit={createToolset}>
-              <h2 className="text-sm font-semibold text-white">创建 MCP Toolset</h2>
+              <h2 className="text-sm font-semibold text-white">创建 Toolset</h2>
+              <div className="mt-3 grid grid-cols-3 gap-1 rounded-md bg-white/5 p-1">
+                {([
+                  ["mcp", "MCP"],
+                  ["openapi", "OpenAPI"],
+                  ["odata", "OData"],
+                ] as Array<[ToolsetKind, string]>).map(([value, label]) => (
+                  <button
+                    className={`rounded px-2 py-2 text-xs font-semibold ${
+                      newKind === value
+                        ? "bg-cyan-300 text-slate-950"
+                        : "text-slate-400 hover:bg-white/5 hover:text-white"
+                    }`}
+                    key={value}
+                    onClick={() => setNewKind(value)}
+                    type="button"
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
               <label className="mt-3 block text-xs font-semibold text-slate-300">
                 名称
                 <input
@@ -561,16 +720,16 @@ export default function ToolsetsPage() {
             <div className="pt-4">
               <div className="mb-2 flex items-center justify-between text-xs text-slate-500">
                 <span>Toolset</span>
-                <span>{toolsets.length}</span>
+                <span>{filteredToolsets.length}</span>
               </div>
               <div className="divide-y divide-white/10 border-y border-white/10">
                 {loading ? <p className="py-5 text-center text-xs text-slate-500">正在加载...</p> : null}
-                {!loading && !toolsets.length ? (
+                {!loading && !filteredToolsets.length ? (
                   <p className="py-7 text-center text-xs leading-5 text-slate-500">
-                    创建第一个 Toolset 后，在这里连接 MCP 并选择工具。
+                    当前分类还没有 Toolset。
                   </p>
                 ) : null}
-                {toolsets.map((item) => (
+                {filteredToolsets.map((item) => (
                   <button
                     className={`w-full px-2 py-3 text-left transition ${
                       item.id === selectedId ? "bg-cyan-300/10" : "hover:bg-white/[0.035]"
@@ -584,7 +743,9 @@ export default function ToolsetsPage() {
                       <span className="truncate">{item.name}</span>
                     </span>
                     <span className="mt-1 flex justify-between gap-2 text-[11px] text-slate-500">
-                      <span>{item.connection.transport}</span>
+                      <span>
+                        {item.kind === "mcp" ? item.connection.transport : item.kind}
+                      </span>
                       <span>{item.published_version ? `v${item.published_version}` : "未发布"}</span>
                     </span>
                   </button>
@@ -598,7 +759,7 @@ export default function ToolsetsPage() {
               <div className="max-w-sm text-center">
                 <h2 className="text-base font-semibold text-white">选择一个 Toolset</h2>
                 <p className="mt-2 text-sm leading-6 text-slate-500">
-                  连接成功后会发现 MCP 工具，启用至少一个工具即可发布版本。
+                  连接 MCP 或导入 API 文档后会发现工具；启用至少一个操作即可发布版本。
                 </p>
               </div>
             </section>
@@ -615,22 +776,50 @@ export default function ToolsetsPage() {
                     </p>
                   </div>
                   <div className="flex gap-2">
-                    <button
-                      className={secondaryButton}
-                      disabled={busy !== ""}
-                      onClick={() => void runConnection("disconnect")}
-                      type="button"
-                    >
-                      断开
-                    </button>
-                    <button
-                      className={primaryButton}
-                      disabled={busy !== ""}
-                      onClick={() => void runConnection("connect")}
-                      type="button"
-                    >
-                      {busy === "connect" ? "连接中..." : "保存并连接"}
-                    </button>
+                    {draft.kind === "mcp" ? (
+                      <>
+                        <button
+                          className={secondaryButton}
+                          disabled={busy !== ""}
+                          onClick={() => void runConnection("disconnect")}
+                          type="button"
+                        >
+                          断开
+                        </button>
+                        <button
+                          className={primaryButton}
+                          disabled={busy !== ""}
+                          onClick={() => void runConnection("connect")}
+                          type="button"
+                        >
+                          {busy === "connect" ? "连接中..." : "保存并连接"}
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <button
+                          className={secondaryButton}
+                          disabled={busy !== "" || !draft.connection.api_source_url}
+                          onClick={() => void refreshApiSpec()}
+                          type="button"
+                        >
+                          {busy === "refresh" ? "刷新中..." : "刷新源"}
+                        </button>
+                        <button
+                          className={primaryButton}
+                          disabled={
+                            busy !== "" ||
+                            (importMode === "text"
+                              ? !apiDocument.trim()
+                              : !apiSourceUrl.trim())
+                          }
+                          onClick={() => void importApiSpec()}
+                          type="button"
+                        >
+                          {busy === "import" ? "编译中..." : "保存并导入"}
+                        </button>
+                      </>
+                    )}
                   </div>
                 </div>
 
@@ -667,102 +856,191 @@ export default function ToolsetsPage() {
                     />
                   </label>
 
-                  <fieldset>
-                    <legend className="text-xs font-semibold text-slate-300">传输</legend>
-                    <div className="mt-2 grid grid-cols-3 gap-1 rounded-md bg-white/5 p-1">
-                      {([
-                        ["stdio", "Stdio"],
-                        ["streamable_http", "HTTP"],
-                        ["legacy_sse", "旧 SSE"],
-                      ] as Array<[Transport, string]>).map(([value, label]) => (
-                        <button
-                          className={`rounded px-2 py-2 text-xs font-semibold transition ${
-                            draft.connection.transport === value
-                              ? "bg-cyan-300 text-slate-950"
-                              : "text-slate-400 hover:bg-white/5 hover:text-white"
-                          }`}
-                          key={value}
-                          onClick={() => patchConnection({ transport: value })}
-                          type="button"
-                        >
-                          {label}
-                        </button>
-                      ))}
-                    </div>
-                  </fieldset>
-
-                  {draft.connection.transport === "stdio" ? (
+                  {draft.kind === "mcp" ? (
                     <>
-                      <label className="block text-xs font-semibold text-slate-300">
-                        已安装 MCP 项目（可选）
-                        <select
-                          className={`${inputClass} mt-1`}
-                          onChange={(event) => {
-                            const project = installedProjects.find(
-                              (item) => item.project_id === event.target.value,
-                            );
-                            patchConnection({
-                              installed_project_id: event.target.value,
-                            });
-                            if (project?.server_command?.length) {
-                              setCommandText(
-                                JSON.stringify(project.server_command, null, 2),
-                              );
-                            }
-                          }}
-                          value={draft.connection.installed_project_id}
-                        >
-                          <option className="bg-slate-950" value="">
-                            手动配置启动命令
-                          </option>
-                          {installedProjects.map((project) => (
-                            <option
-                              className="bg-slate-950"
-                              key={project.project_id}
-                              value={project.project_id}
+                      <fieldset>
+                        <legend className="text-xs font-semibold text-slate-300">传输</legend>
+                        <div className="mt-2 grid grid-cols-3 gap-1 rounded-md bg-white/5 p-1">
+                          {([
+                            ["stdio", "Stdio"],
+                            ["streamable_http", "HTTP"],
+                            ["legacy_sse", "旧 SSE"],
+                          ] as Array<[Transport, string]>).map(([value, label]) => (
+                            <button
+                              className={`rounded px-2 py-2 text-xs font-semibold transition ${
+                                draft.connection.transport === value
+                                  ? "bg-cyan-300 text-slate-950"
+                                  : "text-slate-400 hover:bg-white/5 hover:text-white"
+                              }`}
+                              key={value}
+                              onClick={() => patchConnection({ transport: value })}
+                              type="button"
                             >
-                              {project.project_id}
-                              {project.npm_package ? ` · ${project.npm_package}` : ""}
-                            </option>
+                              {label}
+                            </button>
                           ))}
-                        </select>
-                        <span className="mt-1 block font-normal leading-5 text-slate-500">
-                          选择 `/mcps` 已安装项目后，发布版本会固定解析后的 argv。
-                        </span>
-                      </label>
-                      <label className="block text-xs font-semibold text-slate-300">
-                        启动命令（argv JSON）
-                        <textarea
-                          className={`${inputClass} mt-1 min-h-24 resize-y font-mono text-xs`}
-                          onChange={(event) => setCommandText(event.target.value)}
-                          placeholder='["npx", "-y", "@modelcontextprotocol/server-everything"]'
-                          value={commandText}
-                        />
-                      </label>
-                      <label className="block text-xs font-semibold text-slate-300">
-                        MCP Sandbox 子目录（可选）
-                        <input
-                          className={`${inputClass} mt-1`}
-                          onChange={(event) =>
-                            patchConnection({ working_directory: event.target.value })
-                          }
-                          placeholder="project-a"
-                          value={draft.connection.working_directory}
-                        />
-                      </label>
+                        </div>
+                      </fieldset>
+                      {draft.connection.transport === "stdio" ? (
+                        <>
+                          <label className="block text-xs font-semibold text-slate-300">
+                            已安装 MCP 项目（可选）
+                            <select
+                              className={`${inputClass} mt-1`}
+                              onChange={(event) => {
+                                const project = installedProjects.find(
+                                  (item) => item.project_id === event.target.value,
+                                );
+                                patchConnection({ installed_project_id: event.target.value });
+                                if (project?.server_command?.length) {
+                                  setCommandText(JSON.stringify(project.server_command, null, 2));
+                                }
+                              }}
+                              value={draft.connection.installed_project_id}
+                            >
+                              <option className="bg-slate-950" value="">手动配置启动命令</option>
+                              {installedProjects.map((project) => (
+                                <option
+                                  className="bg-slate-950"
+                                  key={project.project_id}
+                                  value={project.project_id}
+                                >
+                                  {project.project_id}
+                                  {project.npm_package ? ` · ${project.npm_package}` : ""}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                          <label className="block text-xs font-semibold text-slate-300">
+                            启动命令（argv JSON）
+                            <textarea
+                              className={`${inputClass} mt-1 min-h-24 resize-y font-mono text-xs`}
+                              onChange={(event) => setCommandText(event.target.value)}
+                              value={commandText}
+                            />
+                          </label>
+                        </>
+                      ) : (
+                        <label className="block text-xs font-semibold text-slate-300">
+                          MCP URL
+                          <input
+                            className={`${inputClass} mt-1`}
+                            onChange={(event) => patchConnection({ url: event.target.value })}
+                            placeholder="https://mcp.example.com/mcp"
+                            type="url"
+                            value={draft.connection.url}
+                          />
+                        </label>
+                      )}
+                      <div className="grid gap-2 sm:grid-cols-2">
+                        <label className="flex items-center gap-2 rounded-md bg-white/[0.035] px-3 py-2 text-xs text-slate-300">
+                          <input
+                            checked={draft.connection.auto_reconnect}
+                            onChange={(event) => patchConnection({ auto_reconnect: event.target.checked })}
+                            type="checkbox"
+                          />
+                          自动重连
+                        </label>
+                        <label className="flex items-center gap-2 rounded-md bg-white/[0.035] px-3 py-2 text-xs text-slate-300">
+                          <input
+                            checked={draft.connection.auto_start}
+                            onChange={(event) => patchConnection({ auto_start: event.target.checked })}
+                            type="checkbox"
+                          />
+                          发布后自动恢复
+                        </label>
+                      </div>
+                      <BindingEditor
+                        bindings={draft.connection.headers}
+                        credentials={credentials}
+                        kind="headers"
+                        label="Headers"
+                        onAdd={() => addBinding("headers")}
+                        onRemove={(index) => removeBinding("headers", index)}
+                        onUpdate={(index, patch) => updateBinding("headers", index, patch)}
+                      />
+                      <BindingEditor
+                        bindings={draft.connection.environment}
+                        credentials={credentials}
+                        kind="environment"
+                        label="环境变量"
+                        onAdd={() => addBinding("environment")}
+                        onRemove={(index) => removeBinding("environment", index)}
+                        onUpdate={(index, patch) => updateBinding("environment", index, patch)}
+                      />
                     </>
                   ) : (
-                    <>
+                    <div className="space-y-4 border-t border-white/10 pt-4">
+                      <div className="grid grid-cols-2 gap-1 rounded-md bg-white/5 p-1">
+                        {(["text", "url"] as const).map((mode) => (
+                          <button
+                            className={`rounded px-2 py-2 text-xs font-semibold ${
+                              importMode === mode
+                                ? "bg-cyan-300 text-slate-950"
+                                : "text-slate-400 hover:bg-white/5"
+                            }`}
+                            key={mode}
+                            onClick={() => setImportMode(mode)}
+                            type="button"
+                          >
+                            {mode === "text" ? "文本 / 文件导入" : "受控 URL 导入"}
+                          </button>
+                        ))}
+                      </div>
+                      {importMode === "text" ? (
+                        <>
+                          <label className="block text-xs font-semibold text-slate-300">
+                            {draft.kind === "openapi" ? "OpenAPI JSON / YAML" : "OData Metadata XML"}
+                            <textarea
+                              className={`${inputClass} mt-1 min-h-40 resize-y font-mono text-xs`}
+                              onChange={(event) => setApiDocument(event.target.value)}
+                              placeholder="粘贴 API 文档，或从本地文件读取"
+                              value={apiDocument}
+                            />
+                          </label>
+                          <label className={`${secondaryButton} block cursor-pointer text-center`}>
+                            从文件读取
+                            <input
+                              accept=".json,.yaml,.yml,.xml,.edmx"
+                              className="sr-only"
+                              onChange={(event) => {
+                                const file = event.target.files?.[0];
+                                if (file) void file.text().then(setApiDocument);
+                              }}
+                              type="file"
+                            />
+                          </label>
+                        </>
+                      ) : (
+                        <label className="block text-xs font-semibold text-slate-300">
+                          文档 URL
+                          <input
+                            className={`${inputClass} mt-1`}
+                            onChange={(event) => setApiSourceUrl(event.target.value)}
+                            placeholder="https://api.example.com/openapi.json"
+                            type="url"
+                            value={apiSourceUrl}
+                          />
+                        </label>
+                      )}
                       <label className="block text-xs font-semibold text-slate-300">
-                        MCP URL
+                        {draft.kind === "openapi" ? "基础 URL（可覆盖 servers）" : "OData 服务根 URL"}
                         <input
                           className={`${inputClass} mt-1`}
-                          onChange={(event) => patchConnection({ url: event.target.value })}
-                          placeholder="https://mcp.example.com/mcp"
+                          onChange={(event) => {
+                            setApiBaseUrl(event.target.value);
+                            patchConnection({ api_base_url: event.target.value });
+                          }}
+                          placeholder="https://api.example.com/v1"
                           type="url"
-                          value={draft.connection.url}
+                          value={apiBaseUrl}
                         />
                       </label>
+                      <APIAuthEditor
+                        auth={draft.connection.api_auth}
+                        credentials={credentials}
+                        onChange={(api_auth) => patchConnection({ api_auth })}
+                      />
                       <label className="block text-xs font-semibold text-slate-300">
                         网络策略
                         <select
@@ -783,7 +1061,63 @@ export default function ToolsetsPage() {
                           </option>
                         </select>
                       </label>
-                    </>
+                      <div className="grid gap-3 sm:grid-cols-2">
+                        <label className="block text-xs font-semibold text-slate-300">
+                          响应上限（MB）
+                          <input
+                            className={`${inputClass} mt-1`}
+                            max={10}
+                            min={1}
+                            onChange={(event) =>
+                              patchConnection({
+                                response_limit_bytes:
+                                  Number(event.target.value) * 1024 * 1024,
+                              })
+                            }
+                            type="number"
+                            value={Math.max(
+                              1,
+                              Math.round(
+                                draft.connection.response_limit_bytes / 1024 / 1024,
+                              ),
+                            )}
+                          />
+                        </label>
+                        <label className="block text-xs font-semibold text-slate-300">
+                          最大重定向
+                          <input
+                            className={`${inputClass} mt-1`}
+                            max={5}
+                            min={0}
+                            onChange={(event) =>
+                              patchConnection({
+                                redirect_limit: Number(event.target.value),
+                              })
+                            }
+                            type="number"
+                            value={draft.connection.redirect_limit}
+                          />
+                        </label>
+                      </div>
+                      {draft.connection.api_spec_hash ? (
+                        <div className="rounded-md bg-white/[0.035] px-3 py-2 text-xs leading-5 text-slate-400">
+                          <p>
+                            已导入 {draft.connection.api_spec_version} ·{" "}
+                            {draft.connection.api_source_label || "manual"}
+                          </p>
+                          <p className="font-mono text-[10px] text-slate-500">
+                            {draft.connection.api_spec_hash.slice(0, 16)}
+                          </p>
+                        </div>
+                      ) : null}
+                      {draft.import_warnings?.length ? (
+                        <div className="rounded-md bg-amber-300/10 px-3 py-2 text-xs leading-5 text-amber-100">
+                          {draft.import_warnings.slice(0, 5).map((warning) => (
+                            <p key={warning}>{warning}</p>
+                          ))}
+                        </div>
+                      ) : null}
+                    </div>
                   )}
 
                   <div className="grid gap-3 sm:grid-cols-2">
@@ -813,47 +1147,6 @@ export default function ToolsetsPage() {
                     </label>
                   </div>
 
-                  <div className="grid gap-2 sm:grid-cols-2">
-                    <label className="flex items-center gap-2 rounded-md bg-white/[0.035] px-3 py-2 text-xs text-slate-300">
-                      <input
-                        checked={draft.connection.auto_reconnect}
-                        onChange={(event) =>
-                          patchConnection({ auto_reconnect: event.target.checked })
-                        }
-                        type="checkbox"
-                      />
-                      自动重连
-                    </label>
-                    <label className="flex items-center gap-2 rounded-md bg-white/[0.035] px-3 py-2 text-xs text-slate-300">
-                      <input
-                        checked={draft.connection.auto_start}
-                        onChange={(event) =>
-                          patchConnection({ auto_start: event.target.checked })
-                        }
-                        type="checkbox"
-                      />
-                      发布后自动恢复
-                    </label>
-                  </div>
-
-                  <BindingEditor
-                    bindings={draft.connection.headers}
-                    credentials={credentials}
-                    kind="headers"
-                    label="Headers"
-                    onAdd={() => addBinding("headers")}
-                    onRemove={(index) => removeBinding("headers", index)}
-                    onUpdate={(index, patch) => updateBinding("headers", index, patch)}
-                  />
-                  <BindingEditor
-                    bindings={draft.connection.environment}
-                    credentials={credentials}
-                    kind="environment"
-                    label="环境变量"
-                    onAdd={() => addBinding("environment")}
-                    onRemove={(index) => removeBinding("environment", index)}
-                    onUpdate={(index, patch) => updateBinding("environment", index, patch)}
-                  />
 
                   <details className="border-t border-white/10 pt-4">
                     <summary className="cursor-pointer text-xs font-semibold text-slate-300">
@@ -968,14 +1261,18 @@ export default function ToolsetsPage() {
                       {draft.tools.length} 个已发现，{draft.tools.filter((tool) => tool.enabled).length} 个已启用
                     </p>
                   </div>
-                  <span className="text-xs text-slate-500">Schema 仅在连接时刷新</span>
+                  <span className="text-xs text-slate-500">
+                    {draft.kind === "mcp" ? "Schema 在连接时刷新" : "Schema 在导入时编译"}
+                  </span>
                 </div>
 
                 <div className="mt-4 grid gap-4 lg:grid-cols-[210px_minmax(0,1fr)]">
                   <div className="divide-y divide-white/10 border-y border-white/10">
                     {!draft.tools.length ? (
                       <p className="px-2 py-10 text-center text-xs leading-5 text-slate-500">
-                        保存配置并连接 MCP Server 后，工具列表会显示在这里。
+                        {draft.kind === "mcp"
+                          ? "保存配置并连接 MCP Server 后，工具列表会显示在这里。"
+                          : "导入 OpenAPI 或 OData 文档后，可用操作会显示在这里。"}
                       </p>
                     ) : null}
                     {[...draft.tools]
@@ -998,6 +1295,7 @@ export default function ToolsetsPage() {
                               JSON.stringify(tool.default_arguments || {}, null, 2),
                             );
                             setToolResult("");
+                            setConfirmMutatingTest(false);
                           }}
                           type="button"
                         >
@@ -1028,6 +1326,27 @@ export default function ToolsetsPage() {
                           <p className="mt-1 truncate font-mono text-[11px] text-slate-500">
                             {activeToolDefinition.original_name}
                           </p>
+                          {draft.kind !== "mcp" ? (
+                            <div className="mt-2 flex flex-wrap gap-1.5 text-[10px] font-semibold">
+                              <span className="rounded bg-white/5 px-2 py-1 text-slate-300">
+                                {String(activeToolDefinition.execution.method || "API")}
+                              </span>
+                              <span
+                                className={`rounded px-2 py-1 ${
+                                  activeToolDefinition.read_only
+                                    ? "bg-emerald-300/10 text-emerald-100"
+                                    : "bg-amber-300/10 text-amber-100"
+                                }`}
+                              >
+                                {activeToolDefinition.read_only ? "只读" : "变更操作"}
+                              </span>
+                              {activeToolDefinition.requires_approval ? (
+                                <span className="rounded bg-rose-300/10 px-2 py-1 text-rose-100">
+                                  强制 HITL
+                                </span>
+                              ) : null}
+                            </div>
+                          ) : null}
                         </div>
                         <label className="flex items-center gap-2 text-xs font-semibold text-slate-300">
                           <input
@@ -1109,9 +1428,26 @@ export default function ToolsetsPage() {
                           value={toolArguments}
                         />
                       </label>
+                      {!activeToolDefinition.read_only ? (
+                        <label className="flex items-start gap-2 rounded-md bg-amber-300/10 px-3 py-2 text-xs leading-5 text-amber-100">
+                          <input
+                            checked={confirmMutatingTest}
+                            className="mt-1"
+                            onChange={(event) =>
+                              setConfirmMutatingTest(event.target.checked)
+                            }
+                            type="checkbox"
+                          />
+                          我确认此测试可能修改远程数据。Agent 正式调用时仍必须经过 HITL。
+                        </label>
+                      ) : null}
                       <button
                         className={`${primaryButton} w-full`}
-                        disabled={busy !== "" || draft.runtime_status !== "connected"}
+                        disabled={
+                          busy !== "" ||
+                          !["connected", "ready"].includes(draft.runtime_status) ||
+                          (!activeToolDefinition.read_only && !confirmMutatingTest)
+                        }
                         onClick={() => void testTool()}
                         type="button"
                       >
@@ -1148,7 +1484,7 @@ export default function ToolsetsPage() {
                       className={primaryButton}
                       disabled={
                         busy !== "" ||
-                        draft.runtime_status !== "connected" ||
+                        !["connected", "ready"].includes(draft.runtime_status) ||
                         !draft.tools.some((tool) => tool.enabled)
                       }
                       onClick={() => void publishToolset()}
@@ -1185,6 +1521,187 @@ export default function ToolsetsPage() {
         </div>
       </div>
     </PageContainer>
+  );
+}
+
+function APIAuthEditor({
+  auth,
+  credentials,
+  onChange,
+}: {
+  auth: APIAuthProfile;
+  credentials: CredentialSummary[];
+  onChange: (auth: APIAuthProfile) => void;
+}) {
+  const activeCredentials = credentials.filter((item) => item.status === "active");
+  const patch = (value: Partial<APIAuthProfile>) => onChange({ ...auth, ...value });
+
+  const credentialSelect = (
+    label: string,
+    value: string,
+    onValue: (credentialId: string) => void,
+  ) => (
+    <label className="block text-xs font-semibold text-slate-300">
+      {label}
+      <select
+        className={`${inputClass} mt-1`}
+        onChange={(event) => onValue(event.target.value)}
+        value={value}
+      >
+        <option className="bg-slate-950" value="">
+          选择加密凭据
+        </option>
+        {activeCredentials.map((credential) => (
+          <option
+            className="bg-slate-950"
+            key={credential.credential_id}
+            value={credential.credential_id}
+          >
+            {credential.name} · {credential.masked_value}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+
+  return (
+    <div className="space-y-3 rounded-md border border-white/10 bg-white/[0.025] p-3">
+      <div>
+        <p className="text-xs font-semibold text-slate-200">授权方式</p>
+        <p className="mt-1 text-[11px] leading-5 text-slate-500">
+          这里只保存凭据引用，API key、密码和客户端密钥不会写入 Toolset。
+        </p>
+      </div>
+      <select
+        className={inputClass}
+        onChange={(event) =>
+          patch({ auth_type: event.target.value as APIAuthType })
+        }
+        value={auth.auth_type}
+      >
+        <option className="bg-slate-950" value="none">
+          无
+        </option>
+        <option className="bg-slate-950" value="api_key">
+          API Key
+        </option>
+        <option className="bg-slate-950" value="bearer">
+          Bearer Token
+        </option>
+        <option className="bg-slate-950" value="basic">
+          Basic
+        </option>
+        <option className="bg-slate-950" value="oauth2_client_credentials">
+          OAuth2 Client Credentials
+        </option>
+      </select>
+
+      {auth.auth_type === "api_key" ? (
+        <>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <label className="block text-xs font-semibold text-slate-300">
+              参数名称
+              <input
+                className={`${inputClass} mt-1`}
+                onChange={(event) => patch({ api_key_name: event.target.value })}
+                placeholder="X-API-Key"
+                value={auth.api_key_name}
+              />
+            </label>
+            <label className="block text-xs font-semibold text-slate-300">
+              注入位置
+              <select
+                className={`${inputClass} mt-1`}
+                onChange={(event) =>
+                  patch({
+                    api_key_location: event.target
+                      .value as APIAuthProfile["api_key_location"],
+                  })
+                }
+                value={auth.api_key_location}
+              >
+                <option className="bg-slate-950" value="header">
+                  Header
+                </option>
+                <option className="bg-slate-950" value="query">
+                  Query
+                </option>
+              </select>
+            </label>
+          </div>
+          {credentialSelect("API Key 凭据", auth.credential_id, (credential_id) =>
+            patch({ credential_id }),
+          )}
+        </>
+      ) : null}
+
+      {auth.auth_type === "bearer"
+        ? credentialSelect(
+            "Bearer Token 凭据",
+            auth.credential_id,
+            (credential_id) => patch({ credential_id }),
+          )
+        : null}
+
+      {auth.auth_type === "basic" ? (
+        <div className="grid gap-3 sm:grid-cols-2">
+          {credentialSelect(
+            "用户名凭据",
+            auth.username_credential_id,
+            (username_credential_id) => patch({ username_credential_id }),
+          )}
+          {credentialSelect(
+            "密码凭据",
+            auth.password_credential_id,
+            (password_credential_id) => patch({ password_credential_id }),
+          )}
+        </div>
+      ) : null}
+
+      {auth.auth_type === "oauth2_client_credentials" ? (
+        <>
+          <label className="block text-xs font-semibold text-slate-300">
+            Token URL
+            <input
+              className={`${inputClass} mt-1`}
+              onChange={(event) => patch({ token_url: event.target.value })}
+              placeholder="https://auth.example.com/oauth/token"
+              type="url"
+              value={auth.token_url}
+            />
+          </label>
+          <div className="grid gap-3 sm:grid-cols-2">
+            {credentialSelect(
+              "Client ID 凭据",
+              auth.client_id_credential_id,
+              (client_id_credential_id) => patch({ client_id_credential_id }),
+            )}
+            {credentialSelect(
+              "Client Secret 凭据",
+              auth.client_secret_credential_id,
+              (client_secret_credential_id) =>
+                patch({ client_secret_credential_id }),
+            )}
+          </div>
+          <label className="block text-xs font-semibold text-slate-300">
+            Scopes
+            <input
+              className={`${inputClass} mt-1`}
+              onChange={(event) =>
+                patch({
+                  scopes: event.target.value
+                    .split(/[\s,]+/)
+                    .map((item) => item.trim())
+                    .filter(Boolean),
+                })
+              }
+              placeholder="read write"
+              value={auth.scopes.join(" ")}
+            />
+          </label>
+        </>
+      ) : null}
+    </div>
   );
 }
 

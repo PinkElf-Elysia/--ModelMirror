@@ -1,6 +1,8 @@
 from .api import configure_toolsets, get_toolset_service, router as toolsets_router
 from .credentials import CredentialStore
+from .http_executor import SafeAPIExecutor
 from .models import (
+    APIAuthProfile,
     CredentialRecord,
     MCPConnectionProfile,
     ToolDefinition,
@@ -9,7 +11,9 @@ from .models import (
 )
 from .service import (
     DraftMCPToolTestProvider,
+    DraftToolsetTestProvider,
     PublishedMCPToolsetProvider,
+    PublishedToolsetProvider,
     ToolsetService,
 )
 from .store import (
@@ -23,8 +27,12 @@ __all__ = [
     "CredentialRecord",
     "CredentialStore",
     "DraftMCPToolTestProvider",
+    "DraftToolsetTestProvider",
+    "APIAuthProfile",
     "MCPConnectionProfile",
     "PublishedMCPToolsetProvider",
+    "PublishedToolsetProvider",
+    "SafeAPIExecutor",
     "ToolDefinition",
     "ToolsetConflictError",
     "ToolsetDefinition",
