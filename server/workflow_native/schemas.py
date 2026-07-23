@@ -23,6 +23,7 @@ NativeNodeKind = Literal[
     "workflow_agent",
     "external_xpert",
     "knowledge_base",
+    "toolset_resource",
     "agent_task",
     "agent_handoff",
     "handoff_router",

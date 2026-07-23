@@ -173,6 +173,27 @@ except ModuleNotFoundError:
     from registry.tool_registry import ToolRegistry
 
 try:
+    from server.toolsets import (
+        CredentialStore,
+        DraftMCPToolTestProvider,
+        PublishedMCPToolsetProvider,
+        ToolsetService,
+        ToolsetStore,
+        configure_toolsets,
+        toolsets_router,
+    )
+except ModuleNotFoundError:
+    from toolsets import (
+        CredentialStore,
+        DraftMCPToolTestProvider,
+        PublishedMCPToolsetProvider,
+        ToolsetService,
+        ToolsetStore,
+        configure_toolsets,
+        toolsets_router,
+    )
+
+try:
     from server.xpert_runtime import (
         AgentTaskStore,
         AutomationCoordinator,
@@ -566,6 +587,7 @@ app.include_router(runtime_browser_router)
 app.include_router(runtime_client_tool_router)
 app.include_router(runtime_automation_router)
 app.include_router(runtime_authoring_router)
+app.include_router(toolsets_router)
 
 request_windows: dict[str, deque[float]] = defaultdict(deque)
 mcp_connect_windows: dict[str, deque[float]] = defaultdict(deque)
@@ -573,6 +595,17 @@ mcp_manager = MCPClientManager()
 mcp_installer = MCPInstaller()
 tool_registry = ToolRegistry()
 workflow_mcp_provider = MCPToolsetProvider(tool_registry, mcp_manager)
+toolset_store = ToolsetStore()
+toolset_credential_store = CredentialStore(toolset_store.storage_dir)
+toolset_service = ToolsetService(
+    toolset_store,
+    toolset_credential_store,
+    mcp_manager,
+    installed_project_resolver=mcp_installer.get_installed,
+)
+configure_toolsets(toolset_service)
+workflow_published_toolset_provider = PublishedMCPToolsetProvider(toolset_service)
+workflow_draft_toolset_test_provider = DraftMCPToolTestProvider(toolset_service)
 xpert_context_store = get_xpert_context_store()
 workflow_memory_provider = MemoryToolsetProvider(xpert_context_store)
 workflow_knowledge_provider = KnowledgeToolsetProvider(get_rag_service)
@@ -691,6 +724,16 @@ runtime_capabilities.register(
     workflow_knowledge_provider,
     description="Active knowledge retrieval and approval-gated write tools.",
 )
+runtime_capabilities.register(
+    "published_mcp_toolsets",
+    workflow_published_toolset_provider,
+    description="Fixed-version MCP Toolsets bound to workflow agents.",
+)
+runtime_capabilities.register(
+    "draft_mcp_toolset_test",
+    workflow_draft_toolset_test_provider,
+    description="Trusted management-plane MCP Toolset test calls.",
+)
 register_external_xpert_toolset_capability(
     runtime_capabilities,
     workflow_external_xpert_provider,
@@ -703,6 +746,28 @@ register_authoring_toolset_capabilities(
 )
 
 
+async def run_draft_toolset_test(call: RuntimeToolCall) -> RuntimeToolResult:
+    context = MiddlewareContext(
+        task_id=f"toolset-test-{uuid.uuid4().hex}",
+        metadata={
+            "run_type": "toolset_test",
+            "toolset_id": call.metadata.get("toolset_id"),
+        },
+    )
+    return await run_tool_with_runtime(
+        call,
+        runtime_capabilities,
+        workflow_mcp_pipeline,
+        context,
+        capability_name="draft_mcp_toolset_test",
+        policy=workflow_tool_policy,
+        audit_store=workflow_tool_audit_store,
+    )
+
+
+toolset_service.set_tool_test_runner(run_draft_toolset_test)
+
+
 async def validate_runtime_approval_decision(
     approval: RuntimeApprovalRequest,
     decision_payload: Any,
@@ -713,24 +778,34 @@ async def validate_runtime_approval_decision(
     if not isinstance(edited_arguments, dict):
         raise HTTPException(status_code=400, detail="编辑后的工具参数必须是 JSON 对象。")
     tool_name = str(approval.tool_name or "").strip()
-    matched_tool = None
-    for provider in (
-        workflow_mcp_provider,
-        workflow_memory_provider,
-        workflow_knowledge_provider,
-        workflow_datax_provider,
-        workflow_todo_provider,
-        workflow_sandbox_provider,
-        workflow_browser_provider,
-        workflow_xpert_authoring_provider,
-        workflow_skill_creator_provider,
-    ):
-        matched_tool = await provider.find_tool(tool_name)
-        if matched_tool is not None:
-            break
-    if matched_tool is None:
-        raise HTTPException(status_code=400, detail=f"工具已不可用：{tool_name}")
-    schema = matched_tool.input_schema
+    schema = approval.metadata.get("tool_input_schema")
+    if not isinstance(schema, dict):
+        matched_tool = None
+        toolset_resources = approval.metadata.get("toolset_resources")
+        if isinstance(toolset_resources, list):
+            matched_tool = await workflow_published_toolset_provider.find_tool(
+                tool_name,
+                toolset_resources,
+            )
+        for provider in (
+            workflow_mcp_provider,
+            workflow_memory_provider,
+            workflow_knowledge_provider,
+            workflow_datax_provider,
+            workflow_todo_provider,
+            workflow_sandbox_provider,
+            workflow_browser_provider,
+            workflow_xpert_authoring_provider,
+            workflow_skill_creator_provider,
+        ):
+            if matched_tool is not None:
+                break
+            matched_tool = await provider.find_tool(tool_name)
+            if matched_tool is not None:
+                break
+        if matched_tool is None:
+            raise HTTPException(status_code=400, detail=f"工具已不可用：{tool_name}")
+        schema = matched_tool.input_schema
     if isinstance(schema, dict) and schema:
         try:
             from jsonschema import Draft202012Validator
@@ -2315,7 +2390,7 @@ def workflow_topological_order(
         node.id
         for node in nodes
         if workflow_node_kind(node)
-        in {"external_xpert", "knowledge_base"}
+        in {"external_xpert", "knowledge_base", "toolset_resource"}
     )
     node_ids = all_node_ids - bound_resource_node_ids
     indegree = {node_id: 0 for node_id in node_ids}
@@ -3749,8 +3824,19 @@ async def _run_workflow_response(
             middleware_context: MiddlewareContext | None = None,
             middleware_specs: list[RuntimeMiddlewareSpec] | None = None,
         ):
-            matched_tool = await workflow_mcp_provider.find_tool(tool_name)
-            capability_name = "mcp_tools"
+            toolset_resources = (
+                middleware_context.metadata.get("toolset_resources")
+                if middleware_context is not None
+                else None
+            )
+            matched_tool = await workflow_published_toolset_provider.find_tool(
+                tool_name,
+                toolset_resources if isinstance(toolset_resources, list) else None,
+            )
+            capability_name = "published_mcp_toolsets"
+            if not matched_tool:
+                matched_tool = await workflow_mcp_provider.find_tool(tool_name)
+                capability_name = "mcp_tools"
             if not matched_tool:
                 matched_tool = await workflow_memory_provider.find_tool(tool_name)
                 capability_name = "memory_tools"
@@ -3805,6 +3891,11 @@ async def _run_workflow_response(
                 "allow_tools"
             ):
                 raise PermissionError("Xpert App tool access is disabled.")
+            if (
+                capability_name == "published_mcp_toolsets"
+                and runtime_run_type == "xpert_app"
+            ):
+                raise PermissionError("Xpert App bound Toolset access is disabled.")
             if capability_name == "memory_tools" and not app_capability_allowed(
                 "allow_xpert_memory"
             ):
@@ -3911,6 +4002,10 @@ async def _run_workflow_response(
                             )
                             or []
                         ),
+                        "toolset_resources": list(
+                            effective_context.metadata.get("toolset_resources") or []
+                        ),
+                        "tool_input_schema": dict(matched_tool.input_schema or {}),
                         "sandbox_config": effective_context.metadata.get("sandbox_config") or {},
                         "skills_config": effective_context.metadata.get("skills_config") or {},
                         "browser_config": effective_context.metadata.get("browser_config") or {},
@@ -3973,6 +4068,7 @@ async def _run_workflow_response(
             include_knowledge_read: bool = False,
             include_knowledge_write: bool = False,
             external_xpert_tools: list[dict[str, Any]] | None = None,
+            toolset_resources: list[dict[str, Any]] | None = None,
             include_datax: bool = False,
             include_datax_proposals: bool = False,
             include_todo: bool = False,
@@ -4037,6 +4133,23 @@ async def _run_workflow_response(
                         external_xpert_tools
                     )
                 )
+            if toolset_resources and runtime_run_type != "xpert_app":
+                bound_toolset_tools = (
+                    await workflow_published_toolset_provider.list_tools(
+                        toolset_resources
+                    )
+                )
+                conflicts = sorted(
+                    {str(tool.name) for tool in tools}.intersection(
+                        str(tool.name) for tool in bound_toolset_tools
+                    )
+                )
+                if conflicts:
+                    raise ValueError(
+                        "Bound Toolset names conflict with other Runtime tools: "
+                        + ", ".join(conflicts)
+                    )
+                tools.extend(bound_toolset_tools)
             datax_tools = await workflow_datax_provider.list_tools()
             if include_datax and app_capability_allowed("allow_datax_read"):
                 tools.extend(tool for tool in datax_tools if tool.name not in {
@@ -4120,6 +4233,7 @@ async def _run_workflow_response(
                         "memory": "memory_tools",
                         "knowledge": "knowledge_tools",
                         "external_xpert": "external_xpert_tools",
+                        "published_mcp_toolset": "published_mcp_toolsets",
                         "datax": "datax_tools",
                         "todo": "todo_tools",
                         "sandbox": "sandbox_tools",
@@ -4162,6 +4276,7 @@ async def _run_workflow_response(
             include_knowledge_write: bool = False,
             knowledge_base_ids: list[str] | None = None,
             external_xpert_tools: list[dict[str, Any]] | None = None,
+            toolset_resources: list[dict[str, Any]] | None = None,
             include_datax: bool = False,
             include_datax_proposals: bool = False,
             include_todo: bool = False,
@@ -4190,6 +4305,7 @@ async def _run_workflow_response(
                 include_knowledge_read=include_knowledge_read,
                 include_knowledge_write=include_knowledge_write,
                 external_xpert_tools=external_xpert_tools,
+                toolset_resources=toolset_resources,
                 include_datax=include_datax,
                 include_datax_proposals=include_datax_proposals,
                 include_todo=include_todo,
@@ -4444,6 +4560,7 @@ async def _run_workflow_response(
                     "knowledge_write_enabled": include_knowledge_write,
                     "knowledge_base_ids": list(knowledge_base_ids or []),
                     "external_xpert_tools": list(external_xpert_tools or []),
+                    "toolset_resources": list(toolset_resources or []),
                 }
                 if isinstance(approval_payload, dict):
                     resume_metadata["resolved_approval"] = approval_payload
@@ -4596,6 +4713,9 @@ async def _run_workflow_response(
                                 "knowledge_base_ids": list(knowledge_base_ids or []),
                                 "external_xpert_tools": list(
                                     external_xpert_tools or []
+                                ),
+                                "toolset_resources": list(
+                                    toolset_resources or []
                                 ),
                             },
                             pipeline=pipeline,
@@ -6253,6 +6373,73 @@ async def _run_workflow_response(
                                     "pinned_version": pinned_version,
                                 }
                             )
+                        toolset_resources: list[dict[str, Any]] = []
+                        for resource_node in bound_resource_nodes(
+                            nodes_by_id,
+                            payload.workflow.edges,
+                            node.id,
+                            "toolset",
+                        ):
+                            resource_data = (
+                                resource_node.data
+                                if isinstance(resource_node.data, dict)
+                                else {}
+                            )
+                            toolset_id = str(
+                                resource_data.get("toolsetId") or ""
+                            ).strip()
+                            toolset = toolset_store.get_toolset(toolset_id)
+                            version_policy = str(
+                                resource_data.get("versionPolicy")
+                                or "current_published"
+                            ).strip()
+                            pinned_version = (
+                                int(resource_data.get("pinnedVersion") or 0)
+                                if version_policy == "pinned"
+                                else int(toolset.published_version or 0)
+                            )
+                            if toolset.status != "published" or pinned_version < 1:
+                                raise ValueError(
+                                    f"Bound Toolset must be published: {toolset_id}"
+                                )
+                            snapshot = toolset_store.get_version(
+                                toolset.id,
+                                pinned_version,
+                            )
+                            toolset_resources.append(
+                                {
+                                    "node_id": resource_node.id,
+                                    "toolset_id": toolset.id,
+                                    "name": toolset.name,
+                                    "pinned_version": snapshot.version,
+                                    "schema_hash": snapshot.schema_hash,
+                                }
+                            )
+                        if toolset_resources:
+                            bound_tools = (
+                                await workflow_published_toolset_provider.list_tools(
+                                    toolset_resources
+                                )
+                            )
+                            bound_names = [tool.name for tool in bound_tools]
+                            if len(bound_names) != len(set(bound_names)):
+                                raise ValueError(
+                                    "Bound Toolsets expose conflicting tool names."
+                                )
+                            inline_names = {
+                                item.strip()
+                                for item in re.split(
+                                    r"[,\n]",
+                                    str(node.data.get("toolNames") or ""),
+                                )
+                                if item.strip()
+                            }
+                            conflict = sorted(inline_names.intersection(bound_names))
+                            if conflict:
+                                raise ValueError(
+                                    "Bound Toolset names conflict with inline MCP tools: "
+                                    + ", ".join(conflict)
+                                )
                         if knowledge_writer_spec is not None:
                             writer_kb_id = str(
                                 knowledge_writer_spec.config.get("knowledge_base_id") or ""
@@ -6271,10 +6458,11 @@ async def _run_workflow_response(
                             knowledge_read_enabled
                             or knowledge_write_enabled
                             or external_xpert_tools
+                            or toolset_resources
                         ):
                             if tool_mode != "mcp_tools":
                                 raise ValueError(
-                                    "Bound knowledge and external Xpert resources require Runtime tool mode."
+                                    "Bound knowledge, external Xpert, and Toolset resources require Runtime tool mode."
                                 )
                         if knowledge_read_enabled or knowledge_write_enabled:
                             if not 1 <= len(knowledge_base_ids) <= 5:
@@ -6443,6 +6631,7 @@ async def _run_workflow_response(
                                 "knowledge_write_enabled": knowledge_write_enabled,
                                 "knowledge_base_ids": knowledge_base_ids,
                                 "external_xpert_count": len(external_xpert_tools),
+                                "toolset_count": len(toolset_resources),
                             },
                         )
                         (
@@ -6459,6 +6648,7 @@ async def _run_workflow_response(
                         agent_context.metadata.update(
                             {
                                 "external_xpert_tools": external_xpert_tools,
+                                "toolset_resources": toolset_resources,
                                 "knowledge_resource_configs": knowledge_resource_configs,
                             }
                         )
@@ -6892,6 +7082,7 @@ async def _run_workflow_response(
                                         ),
                                         knowledge_base_ids=knowledge_base_ids,
                                         external_xpert_tools=external_xpert_tools,
+                                        toolset_resources=toolset_resources,
                                         include_datax=datax_enabled,
                                         include_datax_proposals=datax_allow_proposals,
                                         include_todo=todo_spec is not None,
@@ -6989,6 +7180,7 @@ async def _run_workflow_response(
                                             ),
                                             knowledge_base_ids=knowledge_base_ids,
                                             external_xpert_tools=external_xpert_tools,
+                                            toolset_resources=toolset_resources,
                                             include_datax=datax_enabled,
                                             include_datax_proposals=datax_allow_proposals,
                                             include_todo=todo_spec is not None,
@@ -10359,6 +10551,9 @@ async def team_chat(payload: TeamChatRequest, request: Request):
 async def start_mcp_ttl_cleanup() -> None:
     await asyncio.to_thread(datax_service.recover_import_jobs)
     mcp_manager.start_ttl_cleanup(on_cleanup=tool_registry.unregister_sessions)
+    toolset_warnings = await toolset_service.autostart()
+    for warning in toolset_warnings:
+        logger.warning("Toolset auto-start failed: %s", warning)
     get_pipeline_executor().start()
     get_evaluation_executor().start()
     get_handoff_executor().start()
@@ -10382,6 +10577,7 @@ async def shutdown_mcp_sessions() -> None:
         await client_tool_coordinator.stop()
     if automation_coordinator is not None:
         await automation_coordinator.stop()
+    await toolset_service.close()
     await mcp_manager.stop_ttl_cleanup()
     await mcp_manager.close_all()
     await tool_registry.clear()
@@ -10463,7 +10659,7 @@ async def list_workflow_node_registry():
 
 @app.get("/api/workflow/resource-options", response_model=dict[str, Any])
 async def list_workflow_resource_options(
-    kind: Literal["external_xpert", "knowledge_base"],
+    kind: Literal["external_xpert", "knowledge_base", "toolset"],
 ):
     if kind == "external_xpert":
         items = await asyncio.to_thread(
@@ -10484,6 +10680,30 @@ async def list_workflow_resource_options(
                     "published_version": item.published_version,
                 }
                 for item in items
+            ],
+        }
+    if kind == "toolset":
+        return {
+            "kind": kind,
+            "items": [
+                {
+                    "id": item.id,
+                    "name": item.name,
+                    "description": item.description,
+                    "status": item.status,
+                    "published_version": item.published_version,
+                    "tool_count": (
+                        len(
+                            toolset_store.get_version(
+                                item.id,
+                                int(item.published_version),
+                            ).tools
+                        )
+                        if item.published_version
+                        else 0
+                    ),
+                }
+                for item in toolset_store.list_toolsets()
             ],
         }
 

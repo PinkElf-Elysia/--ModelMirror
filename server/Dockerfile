@@ -23,6 +23,7 @@ COPY main.py .
 COPY data ./data
 COPY api ./api
 COPY mcp ./mcp
+COPY toolsets ./toolsets
 COPY registry ./registry
 COPY rag ./rag
 COPY datax ./datax

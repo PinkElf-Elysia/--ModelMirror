@@ -5,7 +5,19 @@
 
 ## 1. 概述
 
-MCP（Model Context Protocol）是一套让 AI 应用通过标准协议连接外部工具、资源和上下文的机制。模镜当前实现的是 **stdio MCP Server 原生集成**：后端负责启动 MCP Server 子进程、建立官方 SDK 的 `ClientSession`，前端负责连接、展示工具 schema、渲染动态参数表单并执行工具。
+MCP（Model Context Protocol）是一套让 AI 应用通过标准协议连接外部工具、资源和上下文的机制。模镜保留原 `/mcps` 即时连接入口，并新增 `/toolsets` 的版本化 MCP Runtime。后者支持 **Stdio、Streamable HTTP 与旧 SSE 兼容**：连接后发现工具 Schema，用户显式启停和配置工具，再发布不可变版本供 Workflow、Xpert、Goal 与 Handoff 绑定。
+
+### 1.1 版本化 MCP Toolset
+
+- 草稿包含连接类型、URL 或 argv、凭据引用、重连策略、超时、工具前缀和逐工具配置。
+- Stdio 可以直接填写 argv，也可以选择 `/mcps` 已安装项目；发布时会把解析后的 argv 固定进版本快照。
+- Streamable HTTP 是远程 MCP 的主路径；旧 SSE 仅用于兼容旧服务。
+- Headers 和环境变量只引用 `CredentialStore` ID。创建或轮换时明文只返回一次，定义、版本与普通 API 均不保存或返回明文。
+- 连接后新发现工具默认关闭。别名、描述覆盖、默认参数、顺序和启用状态都属于草稿。
+- 发布至少需要连接成功并启用一个工具。新工具不会自动进入旧版本，远端发生不兼容 Schema 漂移时旧版本调用会 fail-closed。
+- 管理侧测试调用也必须经过参数校验、Tool Policy 和 Audit。
+
+Agent 画布使用 `toolset_resource -> workflow_agent` 的 `toolset` 绑定边。该边不属于控制流，Xpert 发布会把 Toolset 固定到具体版本。旧 `mcp_tool` 和全局 Tool Registry 继续兼容。
 
 架构图：
 
@@ -325,7 +337,10 @@ python server/mcp/test_manager.py
 
 | 文件 | 说明 |
 | --- | --- |
-| `server/mcp/manager.py` | MCPClientManager，负责 stdio session 生命周期。 |
+| `server/mcp/manager.py` | MCPClientManager，负责 Stdio、Streamable HTTP 与旧 SSE session 生命周期。 |
+| `server/toolsets/` | Toolset/凭据 Store、版本发布、Schema 漂移与固定版本 Provider。 |
+| `client/src/pages/ToolsetsPage.tsx` | MCP Toolset 创建、连接、工具配置、测试和发布管理页。 |
+| `server/tests/test_toolset_*.py` | Toolset Store、API、连接、固定版本与安全回归。 |
 | `server/mcp/test_manager.py` | 外部 fetch server smoke 脚本。 |
 | `server/registry/tool_registry.py` | 内存级全局工具注册表。 |
 | `server/tests/mock_mcp_server.py` | 本地 mock MCP Server。 |

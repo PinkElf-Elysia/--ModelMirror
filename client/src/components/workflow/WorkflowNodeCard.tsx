@@ -121,6 +121,13 @@ const nodeMeta = {
     bg: "bg-teal-300/10",
     text: "text-teal-100",
   },
+  toolset_resource: {
+    icon: "TS",
+    label: "Toolset 资源",
+    border: "border-amber-300/40",
+    bg: "bg-amber-300/10",
+    text: "text-amber-100",
+  },
   agent_task: {
     icon: "▣",
     label: "Agent Task",
@@ -242,6 +249,13 @@ function outputName(data: WorkflowNode["data"]) {
   if (data.kind === "knowledge_base") {
     return `${data.knowledgeBaseId || "选择知识库"} · top ${data.topK ?? "5"}`;
   }
+  if (data.kind === "toolset_resource") {
+    const version =
+      data.versionPolicy === "pinned"
+        ? `v${data.pinnedVersion ?? "?"}`
+        : "current";
+    return `${data.toolsetId || "选择 Toolset"} -> ${version}`;
+  }
   if (data.kind === "agent_task") {
     return `${data.assignedAgent ?? "workflow-planner"} → ${data.outputVariable ?? "agent_task_id"}`;
   }
@@ -291,14 +305,14 @@ export default function WorkflowNodeCard({ data, selected }: NodeProps<WorkflowN
           <Handle
             className="!h-3 !w-3 !border-2 !border-surface-900 !bg-slate-200"
             position={Position.Left}
-            style={{ top: "38%" }}
+            style={{ top: "24%" }}
             type="target"
           />
           <Handle
             className="!h-3 !w-3 !border-2 !border-surface-900 !bg-indigo-300"
             id="middleware"
             position={Position.Left}
-            style={{ top: "72%" }}
+            style={{ top: "88%" }}
             title="绑定 Agent 中间件"
             type="target"
           />
@@ -306,7 +320,7 @@ export default function WorkflowNodeCard({ data, selected }: NodeProps<WorkflowN
             className="!h-3 !w-3 !border-2 !border-surface-900 !bg-blue-300"
             id="expert"
             position={Position.Left}
-            style={{ top: "52%" }}
+            style={{ top: "40%" }}
             title="绑定外部 Xpert"
             type="target"
           />
@@ -314,15 +328,25 @@ export default function WorkflowNodeCard({ data, selected }: NodeProps<WorkflowN
             className="!h-3 !w-3 !border-2 !border-surface-900 !bg-teal-300"
             id="knowledge"
             position={Position.Left}
-            style={{ top: "88%" }}
+            style={{ top: "56%" }}
             title="绑定知识库"
             type="target"
           />
-          <div className="pointer-events-none absolute -left-14 top-[66%] text-[10px] font-semibold text-indigo-200">
-            middleware
-          </div>
+          <Handle
+            className="!h-3 !w-3 !border-2 !border-surface-900 !bg-amber-300"
+            id="toolset"
+            position={Position.Left}
+            style={{ top: "72%" }}
+            title="绑定 Toolset"
+            type="target"
+          />
         </>
-      ) : !["input", "external_xpert", "knowledge_base"].includes(data.kind) ? (
+      ) : ![
+          "input",
+          "external_xpert",
+          "knowledge_base",
+          "toolset_resource",
+        ].includes(data.kind) ? (
         <Handle
           className="!h-3 !w-3 !border-2 !border-surface-900 !bg-slate-200"
           position={Position.Left}
@@ -413,6 +437,14 @@ export default function WorkflowNodeCard({ data, selected }: NodeProps<WorkflowN
           id="knowledge-binding"
           position={Position.Right}
           title="绑定到 workflow_agent 的 knowledge 入口"
+          type="source"
+        />
+      ) : data.kind === "toolset_resource" ? (
+        <Handle
+          className="!h-3 !w-3 !border-2 !border-surface-900 !bg-amber-300"
+          id="toolset-binding"
+          position={Position.Right}
+          title="绑定到 workflow_agent 的 toolset 入口"
           type="source"
         />
       ) : data.kind !== "output" ? (

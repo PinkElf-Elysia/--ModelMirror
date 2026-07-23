@@ -10,11 +10,13 @@ worker task. Public manager methods communicate with that task through an
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import os
 import re
 import shlex
 import shutil
+import socket
 import subprocess
 import time
 import uuid
@@ -24,8 +26,12 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Literal
 
 from mcp.client.session import ClientSession
+from mcp.client.sse import sse_client
 from mcp.client.stdio import StdioServerParameters, stdio_client
+from mcp.client.streamable_http import streamable_http_client
 from mcp.types import CallToolResult, Tool
+import httpx
+from urllib.parse import urlparse
 
 
 class MCPClientError(RuntimeError):
@@ -79,13 +85,21 @@ class SessionCommand:
 
 @dataclass(slots=True)
 class ManagedMCPSession:
-    """A live MCP stdio session controlled by an owner task."""
+    """A live MCP session controlled by an owner task."""
 
     session_id: str
     command: list[str]
     created_at: float
     created_monotonic_at: float
     last_used_at: float
+    transport: str = "stdio"
+    url: str = ""
+    headers: dict[str, str] = field(default_factory=dict)
+    environment: dict[str, str] = field(default_factory=dict)
+    network_policy: str = "public_only"
+    reconnect_attempts: int = 1
+    operation_timeout: float = 30.0
+    working_directory: str = ""
     queue: asyncio.Queue[SessionCommand] = field(default_factory=asyncio.Queue)
     task: asyncio.Task[None] | None = None
     tools_count: int = 0
@@ -123,10 +137,48 @@ class MCPClientManager:
 
         validate_server_command(server_command)
         managed = self._new_managed_session(server_command)
+        return await self._start_managed_session(managed)
+
+    async def connect_profile(
+        self,
+        *,
+        transport: str,
+        server_command: list[str] | None = None,
+        url: str = "",
+        headers: dict[str, str] | None = None,
+        environment: dict[str, str] | None = None,
+        network_policy: str = "public_only",
+        reconnect_attempts: int = 1,
+        operation_timeout: float | None = None,
+        working_directory: str = "",
+    ) -> str:
+        """Connect an MCP profile without exposing credentials in summaries."""
+
+        if transport not in {"stdio", "streamable_http", "legacy_sse"}:
+            raise ValueError(f"Unsupported MCP transport: {transport}")
+        command = list(server_command or [])
+        if transport == "stdio":
+            validate_server_command(command)
+        else:
+            await validate_remote_mcp_url(url, network_policy=network_policy)
+        managed = self._new_managed_session(
+            command,
+            transport=transport,
+            url=url,
+            headers=dict(headers or {}),
+            environment=dict(environment or {}),
+            network_policy=network_policy,
+            reconnect_attempts=reconnect_attempts,
+            operation_timeout=operation_timeout,
+            working_directory=working_directory,
+        )
+        return await self._start_managed_session(managed)
+
+    async def _start_managed_session(self, managed: ManagedMCPSession) -> str:
         ready: asyncio.Future[None] = asyncio.get_running_loop().create_future()
         managed.task = asyncio.create_task(self._session_worker(managed, ready))
         try:
-            await asyncio.wait_for(ready, timeout=self.operation_timeout)
+            await asyncio.wait_for(ready, timeout=managed.operation_timeout)
         except Exception:
             if managed.task:
                 managed.task.cancel()
@@ -196,7 +248,11 @@ class MCPClientManager:
         return [
             {
                 "session_id": managed.session_id,
-                "server_command": list(managed.command),
+                "server_command": (
+                    list(managed.command) if managed.transport == "stdio" else []
+                ),
+                "transport": managed.transport,
+                "url": sanitize_remote_url(managed.url),
                 "status": managed.status,
                 "created_at": managed.created_at,
                 "uptime_seconds": max(0, now_mono - managed.created_monotonic_at),
@@ -264,12 +320,31 @@ class MCPClientManager:
         *,
         session_id: str | None = None,
         restart_count: int = 0,
+        transport: str = "stdio",
+        url: str = "",
+        headers: dict[str, str] | None = None,
+        environment: dict[str, str] | None = None,
+        network_policy: str = "public_only",
+        reconnect_attempts: int = 1,
+        operation_timeout: float | None = None,
+        working_directory: str = "",
     ) -> ManagedMCPSession:
         now_epoch = time.time()
         now_mono = time.monotonic()
         return ManagedMCPSession(
             session_id=session_id or uuid.uuid4().hex,
             command=list(server_command),
+            transport=transport,
+            url=url,
+            headers=dict(headers or {}),
+            environment=dict(environment or {}),
+            network_policy=network_policy,
+            reconnect_attempts=max(0, min(5, reconnect_attempts)),
+            operation_timeout=max(
+                5.0,
+                min(float(operation_timeout or self.operation_timeout), 300.0),
+            ),
+            working_directory=str(working_directory or "").strip(),
             created_at=now_epoch,
             created_monotonic_at=now_mono,
             last_used_at=now_mono,
@@ -282,23 +357,79 @@ class MCPClientManager:
         ready: asyncio.Future[None],
     ) -> None:
         try:
-            command, *args = managed.command
-            params = StdioServerParameters(
-                command=command,
-                args=args,
-                env=self._child_env(),
-                cwd=str(self.sandbox_root),
-            )
             async with AsyncExitStack() as exit_stack:
-                read_stream, write_stream = await exit_stack.enter_async_context(
-                    stdio_client(params)
-                )
+                if managed.transport == "stdio":
+                    command, *args = managed.command
+                    params = StdioServerParameters(
+                        command=command,
+                        args=args,
+                        env=self._child_env(managed.environment),
+                        cwd=str(
+                            self._resolve_working_directory(
+                                managed.working_directory
+                            )
+                        ),
+                    )
+                    read_stream, write_stream = await exit_stack.enter_async_context(
+                        stdio_client(params)
+                    )
+                else:
+                    await validate_remote_mcp_url(
+                        managed.url,
+                        network_policy=managed.network_policy,
+                    )
+                    timeout = httpx.Timeout(
+                        connect=min(10.0, managed.operation_timeout),
+                        read=managed.operation_timeout,
+                        write=managed.operation_timeout,
+                        pool=min(10.0, managed.operation_timeout),
+                    )
+                    if managed.transport == "streamable_http":
+                        http_client = await exit_stack.enter_async_context(
+                            httpx.AsyncClient(
+                                headers=managed.headers,
+                                timeout=timeout,
+                                follow_redirects=False,
+                                trust_env=False,
+                            )
+                        )
+                        transport_result = await exit_stack.enter_async_context(
+                            streamable_http_client(
+                                managed.url,
+                                http_client=http_client,
+                            )
+                        )
+                        read_stream, write_stream = transport_result[:2]
+                    else:
+                        def safe_http_client_factory(
+                            *,
+                            headers: dict[str, str] | None = None,
+                            timeout: httpx.Timeout | None = None,
+                            auth: httpx.Auth | None = None,
+                        ) -> httpx.AsyncClient:
+                            return httpx.AsyncClient(
+                                headers=headers,
+                                timeout=timeout,
+                                auth=auth,
+                                follow_redirects=False,
+                                trust_env=False,
+                            )
+
+                        read_stream, write_stream = await exit_stack.enter_async_context(
+                            sse_client(
+                                managed.url,
+                                headers=managed.headers,
+                                timeout=min(10.0, managed.operation_timeout),
+                                sse_read_timeout=managed.operation_timeout,
+                                httpx_client_factory=safe_http_client_factory,
+                            )
+                        )
                 client_session = await exit_stack.enter_async_context(
                     ClientSession(read_stream, write_stream)
                 )
                 await asyncio.wait_for(
                     client_session.initialize(),
-                    timeout=self.operation_timeout,
+                    timeout=managed.operation_timeout,
                 )
                 managed.status = "connected"
                 if not ready.done():
@@ -317,7 +448,7 @@ class MCPClientManager:
                         if command_item.operation == "list_tools":
                             result = await asyncio.wait_for(
                                 client_session.list_tools(),
-                                timeout=self.operation_timeout,
+                                timeout=managed.operation_timeout,
                             )
                             tools = list(result.tools)
                             managed.tools_count = len(tools)
@@ -328,7 +459,7 @@ class MCPClientManager:
                                     command_item.tool_name or "",
                                     command_item.arguments or {},
                                 ),
-                                timeout=self.operation_timeout,
+                                timeout=managed.operation_timeout,
                             )
                             command_item.future.set_result(result)
                     except Exception as exc:
@@ -336,8 +467,9 @@ class MCPClientManager:
                             command_item.future.set_exception(exc)
         except FileNotFoundError as exc:
             managed.status = "error"
+            executable = managed.command[0] if managed.command else managed.transport
             friendly_error = MCPClientError(
-                f"MCP Server 启动失败：服务器缺少 `{managed.command[0]}` 命令；请确认后端容器已安装对应运行时。"
+                f"MCP Server 启动失败：运行时 `{executable}` 不可用。"
             )
             if not ready.done():
                 ready.set_exception(friendly_error)
@@ -374,14 +506,17 @@ class MCPClientManager:
                 arguments=arguments,
             )
         )
-        return await asyncio.wait_for(future, timeout=self.operation_timeout + 5)
+        return await asyncio.wait_for(
+            future,
+            timeout=managed.operation_timeout + 5,
+        )
 
     async def _restart_once(
         self,
         managed: ManagedMCPSession,
         original_error: Exception,
     ) -> ManagedMCPSession:
-        if managed.restart_count >= 1:
+        if managed.restart_count >= managed.reconnect_attempts:
             raise MCPClientError(
                 f"MCP session 已重启过一次，仍然失败：{original_error}"
             ) from original_error
@@ -393,10 +528,18 @@ class MCPClientManager:
             command,
             session_id=old_session_id,
             restart_count=managed.restart_count + 1,
+            transport=managed.transport,
+            url=managed.url,
+            headers=managed.headers,
+            environment=managed.environment,
+            network_policy=managed.network_policy,
+            reconnect_attempts=managed.reconnect_attempts,
+            operation_timeout=managed.operation_timeout,
+            working_directory=managed.working_directory,
         )
         ready: asyncio.Future[None] = asyncio.get_running_loop().create_future()
         restarted.task = asyncio.create_task(self._session_worker(restarted, ready))
-        await asyncio.wait_for(ready, timeout=self.operation_timeout)
+        await asyncio.wait_for(ready, timeout=restarted.operation_timeout)
         async with self._lock:
             self._sessions[old_session_id] = restarted
         return restarted
@@ -437,7 +580,7 @@ class MCPClientManager:
                     # cleanup fails. The next sweep can retry stale resources.
                     pass
 
-    def _child_env(self) -> dict[str, str]:
+    def _child_env(self, extra: dict[str, str] | None = None) -> dict[str, str]:
         allowed_keys = {
             "PATH",
             "SystemRoot",
@@ -453,8 +596,100 @@ class MCPClientManager:
             "NPM_CONFIG_PREFIX",
         }
         env = {key: value for key, value in os.environ.items() if key in allowed_keys}
+        for key, value in (extra or {}).items():
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,127}", key):
+                raise MCPClientError(f"Invalid MCP environment variable name: {key}")
+            env[key] = str(value)
         env.setdefault("NO_COLOR", "1")
         return env
+
+    def _resolve_working_directory(self, relative_path: str) -> Path:
+        clean = str(relative_path or "").strip()
+        if not clean:
+            return self.sandbox_root
+        candidate = (self.sandbox_root / clean).resolve()
+        sandbox_root = self.sandbox_root.resolve()
+        try:
+            candidate.relative_to(sandbox_root)
+        except ValueError as exc:
+            raise MCPClientError(
+                "MCP working directory must stay inside the MCP sandbox."
+            ) from exc
+        candidate.mkdir(parents=True, exist_ok=True)
+        return candidate
+
+
+BLOCKED_REMOTE_HOSTS = {
+    "localhost",
+    "host.docker.internal",
+    "server",
+    "new-api",
+    "sandbox",
+    "browser",
+    "169.254.169.254",
+}
+
+
+def sanitize_remote_url(url: str) -> str:
+    if not url:
+        return ""
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    port = f":{parsed.port}" if parsed.port else ""
+    return f"{parsed.scheme}://{host}{port}{parsed.path or '/'}"
+
+
+async def validate_remote_mcp_url(
+    url: str,
+    *,
+    network_policy: str = "public_only",
+) -> None:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("Remote MCP URL must use http or https.")
+    if parsed.username or parsed.password:
+        raise ValueError("Remote MCP URL credentials are not allowed.")
+    if network_policy == "trusted_private":
+        return
+    if network_policy != "public_only":
+        raise ValueError("Invalid MCP network policy.")
+    hostname = parsed.hostname.rstrip(".").lower()
+    if (
+        hostname in BLOCKED_REMOTE_HOSTS
+        or hostname.endswith(".local")
+        or hostname.endswith(".internal")
+    ):
+        raise ValueError("Remote MCP URL points to a blocked host.")
+
+    def resolve() -> list[str]:
+        return sorted(
+            {
+                item[4][0]
+                for item in socket.getaddrinfo(
+                    hostname,
+                    parsed.port or (443 if parsed.scheme == "https" else 80),
+                    type=socket.SOCK_STREAM,
+                )
+            }
+        )
+
+    try:
+        addresses = await asyncio.to_thread(resolve)
+    except socket.gaierror as exc:
+        raise ValueError("Remote MCP host could not be resolved.") from exc
+    if not addresses:
+        raise ValueError("Remote MCP host could not be resolved.")
+    for address in addresses:
+        ip = ipaddress.ip_address(address)
+        if (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_reserved
+            or ip.is_multicast
+            or ip.is_unspecified
+        ):
+            raise ValueError("Remote MCP URL resolved to a blocked address.")
 
 
 class MCPInstaller:
@@ -545,6 +780,31 @@ class MCPInstaller:
             except Exception:
                 continue
         return records
+
+    def get_installed(self, project_id: str) -> dict[str, Any] | None:
+        """Return one installed project record without exposing storage paths."""
+
+        safe_project_id = self._safe_project_id(project_id)
+        installed_file = self.installed_root / safe_project_id / "installed.json"
+        if not installed_file.is_file():
+            return None
+        try:
+            data = json.loads(installed_file.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+        if not isinstance(data, dict):
+            return None
+        return {
+            "project_id": str(data.get("project_id") or safe_project_id),
+            "server_command": [
+                str(part)
+                for part in list(data.get("server_command") or [])
+                if isinstance(part, str)
+            ],
+            "install_type": str(data.get("install_type") or ""),
+            "npm_package": str(data.get("npm_package") or ""),
+            "installed_at": data.get("installed_at"),
+        }
 
     def _safe_project_id(self, project_id: str) -> str:
         safe = project_id.strip()

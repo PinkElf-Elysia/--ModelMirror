@@ -135,6 +135,7 @@ def _deployment_preflight(version: XpertVersion, policy: XpertAppPolicy) -> dict
     has_datax_runtime = False
     has_datax_write = False
     has_external_xpert = False
+    has_toolset_resource = False
     datax_project_ids: set[str] = set()
     datax_model_ids: set[str] = set()
     contract_forbidden_middleware: set[str] = set()
@@ -166,6 +167,9 @@ def _deployment_preflight(version: XpertVersion, policy: XpertAppPolicy) -> dict
             has_tool_call = True
         if kind == "external_xpert":
             has_external_xpert = True
+            has_tool_call = True
+        if kind == "toolset_resource":
+            has_toolset_resource = True
             has_tool_call = True
         if kind == "knowledge_base":
             has_knowledge = True
@@ -288,6 +292,15 @@ def _deployment_preflight(version: XpertVersion, policy: XpertAppPolicy) -> dict
             {
                 "code": "app_external_xpert_forbidden",
                 "message": "Public Xpert Apps cannot deploy external Xpert collaborators.",
+            }
+        )
+    if has_toolset_resource:
+        issues.append(
+            {
+                "code": "app_toolset_resource_forbidden",
+                "message": (
+                    "Public Xpert Apps cannot deploy bound MCP Toolset resources yet."
+                ),
             }
         )
     if has_dynamic_knowledge_read and not policy.allow_knowledge_read:

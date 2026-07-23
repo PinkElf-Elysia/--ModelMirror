@@ -75,6 +75,9 @@ def build_human_in_the_loop_middleware(
                     "middleware_priority": spec.priority,
                     "iteration": iteration,
                     "capability": request.metadata.get("capability"),
+                    "tool_input_schema": dict(
+                        request.metadata.get("tool_input_schema") or {}
+                    ),
                 },
             )
         except Exception as exc:

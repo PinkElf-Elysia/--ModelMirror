@@ -54,6 +54,8 @@ NODE_KIND_ALIASES = {
     "external-xpert": "external_xpert",
     "knowledge_base": "knowledge_base",
     "knowledge-base": "knowledge_base",
+    "toolset_resource": "toolset_resource",
+    "toolset-resource": "toolset_resource",
     "agent_task": "agent_task",
     "agent-task": "agent_task",
     "agent_handoff": "agent_handoff",
@@ -98,6 +100,7 @@ SUPPORTED_NODE_KINDS = {
     "workflow_agent",
     "external_xpert",
     "knowledge_base",
+    "toolset_resource",
     "agent_task",
     "agent_handoff",
     "handoff_router",
@@ -1119,6 +1122,42 @@ def validate_node_configuration(
                     node_id=node.id,
                 )
             )
+
+    if kind == "toolset_resource":
+        if not str(data.get("toolsetId") or "").strip():
+            issues.append(
+                ValidationIssue(
+                    code="missing_toolset_resource_id",
+                    message="Toolset resource needs data.toolsetId.",
+                    node_id=node.id,
+                )
+            )
+        version_policy = str(
+            data.get("versionPolicy") or "current_published"
+        ).strip()
+        if version_policy not in {"current_published", "pinned"}:
+            issues.append(
+                ValidationIssue(
+                    code="invalid_toolset_version_policy",
+                    message=(
+                        "Toolset versionPolicy must be current_published or pinned."
+                    ),
+                    node_id=node.id,
+                )
+            )
+        if version_policy == "pinned":
+            try:
+                pinned_version = int(data.get("pinnedVersion"))
+            except (TypeError, ValueError):
+                pinned_version = 0
+            if pinned_version < 1:
+                issues.append(
+                    ValidationIssue(
+                        code="invalid_toolset_pinned_version",
+                        message="Pinned Toolset resources require pinnedVersion >= 1.",
+                        node_id=node.id,
+                    )
+                )
 
     if kind == "agent_task":
         task_title = str(data.get("taskTitle") or "").strip()
@@ -2441,11 +2480,13 @@ def validate_edges(
                 "middleware": "runtime_middleware",
                 "expert": "external_xpert",
                 "knowledge": "knowledge_base",
+                "toolset": "toolset_resource",
             }.get(target_handle)
             expected_source_handle = {
                 "middleware": "middleware-binding",
                 "expert": "expert-binding",
                 "knowledge": "knowledge-binding",
+                "toolset": "toolset-binding",
             }.get(target_handle)
             if (
                 expected_source_kind is None
@@ -2469,6 +2510,7 @@ def validate_edges(
                 "middleware-binding",
                 "expert-binding",
                 "knowledge-binding",
+                "toolset-binding",
             }:
                 issues.append(
                     ValidationIssue(
@@ -2517,15 +2559,15 @@ def validate_edges(
             )
 
     for node_id, kind in kinds_by_id.items():
-        if kind not in {"external_xpert", "knowledge_base"}:
+        if kind not in {"external_xpert", "knowledge_base", "toolset_resource"}:
             continue
         if node_id not in bindings_by_source:
             issues.append(
                 ValidationIssue(
                     code="missing_resource_binding",
                     message=(
-                        "External Xpert and Knowledge Base nodes must bind to exactly "
-                        "one workflow_agent."
+                        "External Xpert, Knowledge Base, and Toolset nodes must bind "
+                        "to exactly one workflow_agent."
                     ),
                     node_id=node_id,
                 )
@@ -2560,7 +2602,11 @@ def validate_edges(
         expert_tool_names_by_agent[edge.target].add(tool_name)
 
     for edge in valid_edges:
-        if str(edge.targetHandle or "").strip() not in {"expert", "knowledge"}:
+        if str(edge.targetHandle or "").strip() not in {
+            "expert",
+            "knowledge",
+            "toolset",
+        }:
             continue
         target = nodes_by_id.get(edge.target)
         if (
@@ -2571,7 +2617,7 @@ def validate_edges(
                 ValidationIssue(
                     code="resource_binding_requires_runtime_tool_mode",
                     message=(
-                        "Bound External Xpert and Knowledge resources require "
+                        "Bound External Xpert, Knowledge, and Toolset resources require "
                         "workflow_agent toolMode=mcp_tools."
                     ),
                     node_id=target.id,

@@ -109,6 +109,42 @@ def _prepare_published_resource_snapshot(
     for node in workflow.nodes:
         data = node.data if isinstance(node.data, dict) else {}
         kind = str(data.get("kind") or node.type or "")
+        if kind == "toolset_resource":
+            reference = str(data.get("toolsetId") or "").strip()
+            try:
+                try:
+                    from server.toolsets import get_toolset_service
+                except ModuleNotFoundError:
+                    from toolsets import get_toolset_service
+
+                toolset_service = get_toolset_service()
+                toolset = toolset_service.store.get_toolset(reference)
+                policy = str(
+                    data.get("versionPolicy") or "current_published"
+                ).strip()
+                version_number = (
+                    int(data.get("pinnedVersion") or 0)
+                    if policy == "pinned"
+                    else int(toolset.published_version or 0)
+                )
+                if toolset.status != "published" or version_number < 1:
+                    raise ValueError(
+                        f"Toolset must be published before Xpert publish: {reference}."
+                    )
+                toolset_service.store.get_version(toolset.id, version_number)
+                data["toolsetId"] = toolset.id
+                data["versionPolicy"] = "pinned"
+                data["pinnedVersion"] = version_number
+                node.data = data
+            except Exception as exc:
+                issues.append(
+                    ValidationIssue(
+                        code="xpert_toolset_resource_invalid",
+                        message=str(exc),
+                        node_id=node.id,
+                    )
+                )
+            continue
         if kind == "knowledge_base":
             kb_id = str(data.get("knowledgeBaseId") or "").strip()
             if not kb_id:
@@ -168,6 +204,58 @@ def _prepare_published_resource_snapshot(
                     node_id=node.id,
                 )
             )
+
+    nodes_by_id = {node.id: node for node in workflow.nodes}
+    names_by_agent: dict[str, set[str]] = {}
+    for edge in workflow.edges:
+        if str(edge.targetHandle or "") != "toolset":
+            continue
+        resource = nodes_by_id.get(edge.source)
+        agent = nodes_by_id.get(edge.target)
+        if resource is None or agent is None:
+            continue
+        resource_data = resource.data if isinstance(resource.data, dict) else {}
+        try:
+            try:
+                from server.toolsets import get_toolset_service
+            except ModuleNotFoundError:
+                from toolsets import get_toolset_service
+
+            toolset_service = get_toolset_service()
+            toolset_id = str(resource_data.get("toolsetId") or "")
+            version_number = int(resource_data.get("pinnedVersion") or 0)
+            snapshot = toolset_service.store.get_version(toolset_id, version_number)
+            prefix = snapshot.connection.tool_prefix
+            bound_names = {
+                f"{prefix}_{tool.exposed_name}" if prefix else tool.exposed_name
+                for tool in snapshot.tools
+            }
+            existing = names_by_agent.setdefault(edge.target, set())
+            duplicates = sorted(existing.intersection(bound_names))
+            inline_names = {
+                item.strip()
+                for item in re.split(
+                    r"[,\n]+",
+                    str(agent.data.get("toolNames") or ""),
+                )
+                if item.strip()
+            }
+            inline_conflicts = sorted(inline_names.intersection(bound_names))
+            if duplicates or inline_conflicts:
+                conflict_names = sorted(set(duplicates + inline_conflicts))
+                issues.append(
+                    ValidationIssue(
+                        code="xpert_toolset_name_conflict",
+                        message=(
+                            "Bound Toolset names conflict for this workflow_agent: "
+                            + ", ".join(conflict_names)
+                        ),
+                        node_id=resource.id,
+                    )
+                )
+            existing.update(bound_names)
+        except Exception:
+            continue
 
     def walk_dependencies(
         owner_id: str,
