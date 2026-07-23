@@ -26,6 +26,14 @@ except ModuleNotFoundError:  # Docker copies server packages directly under /app
     )
 
 from .credentials import CredentialStore
+from .api_compiler import (
+    CompiledAPISpec,
+    compare_toolsets,
+    compile_odata,
+    compile_openapi,
+    parse_openapi_text,
+)
+from .http_executor import SafeAPIExecutor
 from .models import (
     MCPConnectionProfile,
     ToolDefinition,
@@ -60,11 +68,13 @@ class ToolsetService:
         credentials: CredentialStore,
         mcp_manager: MCPClientManager,
         installed_project_resolver: InstalledProjectResolver | None = None,
+        api_executor: SafeAPIExecutor | None = None,
     ) -> None:
         self.store = store
         self.credentials = credentials
         self.mcp_manager = mcp_manager
         self.installed_project_resolver = installed_project_resolver
+        self.api_executor = api_executor or SafeAPIExecutor(credentials)
         self._draft_sessions: dict[str, str] = {}
         self._version_sessions: dict[tuple[str, int], str] = {}
         self._version_warnings: dict[tuple[str, int], list[str]] = {}
@@ -78,6 +88,16 @@ class ToolsetService:
         lock = self._locks.setdefault(toolset_id, asyncio.Lock())
         async with lock:
             item = self.store.get_toolset(toolset_id)
+            if item.kind != "mcp":
+                if not item.tools or not item.connection.api_base_url:
+                    raise ToolsetValidationError(
+                        "Import an API specification before validating this Toolset."
+                    )
+                return self.store.set_runtime_state(
+                    toolset_id,
+                    status="ready",
+                    session_id=None,
+                )
             existing = self._draft_sessions.pop(toolset_id, None)
             if existing:
                 await self._safe_disconnect(existing)
@@ -109,14 +129,88 @@ class ToolsetService:
                 raise
 
     async def disconnect(self, toolset_id: str) -> ToolsetDefinition:
-        self.store.get_toolset(toolset_id)
+        item = self.store.get_toolset(toolset_id)
         session_id = self._draft_sessions.pop(toolset_id, None)
         if session_id:
             await self._safe_disconnect(session_id)
         return self.store.set_runtime_state(
             toolset_id,
-            status="disconnected",
+            status="disconnected" if item.kind == "mcp" else "ready",
             session_id=None,
+        )
+
+    async def import_spec(
+        self,
+        toolset_id: str,
+        *,
+        document_text: str,
+        base_url: str = "",
+        source_url: str = "",
+        source_label: str = "",
+    ) -> ToolsetDefinition:
+        item = self.store.get_toolset(toolset_id)
+        if item.kind == "mcp":
+            raise ToolsetValidationError("MCP Toolsets do not import API specifications.")
+        compiled = self._compile_api_document(
+            item.kind,
+            document_text,
+            base_url=base_url or item.connection.api_base_url,
+        )
+        drift = compare_toolsets(item.tools, compiled.tools) if item.tools else {
+            "breaking": [],
+            "warnings": [],
+            "added": [tool.original_name for tool in compiled.tools],
+            "removed": [],
+            "compatible": True,
+        }
+        connection = item.connection.model_copy(deep=True)
+        connection.api_base_url = compiled.base_url
+        connection.api_source_url = str(source_url or "").strip()[:2048]
+        connection.api_source_label = str(source_label or source_url or "manual").strip()[:300]
+        connection.api_spec_version = compiled.source_version
+        connection.api_spec_hash = compiled.source_hash
+        return self.store.replace_discovered_tools(
+            toolset_id,
+            tools=compiled.tools,
+            runtime_status="ready",
+            import_warnings=[*compiled.warnings, *drift.get("warnings", [])],
+            drift_report=drift,
+            connection=connection,
+        )
+
+    async def import_spec_from_url(
+        self,
+        toolset_id: str,
+        *,
+        url: str,
+        base_url: str = "",
+    ) -> ToolsetDefinition:
+        item = self.store.get_toolset(toolset_id)
+        if item.kind == "mcp":
+            raise ToolsetValidationError("MCP Toolsets do not import API specifications.")
+        document = await self.api_executor.fetch_text(
+            url,
+            network_policy=item.connection.network_policy,
+            timeout_seconds=item.connection.timeout_seconds,
+        )
+        return await self.import_spec(
+            toolset_id,
+            document_text=document,
+            base_url=base_url,
+            source_url=url,
+            source_label=url,
+        )
+
+    async def refresh_spec(self, toolset_id: str) -> ToolsetDefinition:
+        item = self.store.get_toolset(toolset_id)
+        if not item.connection.api_source_url:
+            raise ToolsetValidationError(
+                "Only URL-imported API Toolsets can be refreshed automatically."
+            )
+        return await self.import_spec_from_url(
+            toolset_id,
+            url=item.connection.api_source_url,
+            base_url=item.connection.api_base_url,
         )
 
     async def publish(
@@ -127,7 +221,13 @@ class ToolsetService:
         release_notes: str = "",
     ) -> ToolsetVersion:
         item = self.store.get_toolset(toolset_id)
-        connection = self._resolve_installed_project(item.connection)
+        connection = (
+            self._resolve_installed_project(item.connection)
+            if item.kind == "mcp"
+            else item.connection
+        )
+        if item.kind != "mcp":
+            await self._validate_api_publish(item)
         return self.store.publish(
             toolset_id,
             revision=expected_revision,
@@ -140,13 +240,19 @@ class ToolsetService:
         toolset_id: str,
         raw_name: str,
         arguments: dict[str, Any],
+        *,
+        confirm_mutating: bool = False,
     ) -> RuntimeToolResult:
         item = self.store.get_toolset(toolset_id)
         tool = next((row for row in item.tools if row.raw_name == raw_name), None)
         if tool is None:
             raise ToolsetNotFoundError(f"Tool not found: {raw_name}")
+        if not tool.read_only and not confirm_mutating:
+            raise ToolsetValidationError(
+                "Mutating API operation tests require explicit confirmation."
+            )
         session_id = self._draft_sessions.get(toolset_id)
-        if not session_id:
+        if item.kind == "mcp" and not session_id:
             raise ToolsetValidationError("Connect the Toolset before testing a tool.")
         merged = {**deepcopy(tool.default_arguments), **dict(arguments)}
         _validate_arguments(tool, merged)
@@ -158,17 +264,24 @@ class ToolsetService:
                 "toolset_id": toolset_id,
                 "toolset_raw_name": raw_name,
                 "toolset_session_id": session_id,
+                "toolset_kind": item.kind,
             },
         )
         if self._tool_test_runner is not None:
             return await self._tool_test_runner(call)
-        result = await self.mcp_manager.call_tool(session_id, raw_name, merged)
-        return _normalize_result(result, toolset_id=toolset_id, version=None)
+        if item.kind == "mcp":
+            result = await self.mcp_manager.call_tool(session_id, raw_name, merged)
+            return _normalize_result(result, toolset_id=toolset_id, version=None)
+        return await self.api_executor.execute(item.connection, tool, merged)
 
     async def autostart(self) -> list[str]:
         warnings: list[str] = []
         for item in self.store.list_toolsets(status="published"):
-            if not item.connection.auto_start or item.published_version is None:
+            if (
+                item.kind != "mcp"
+                or not item.connection.auto_start
+                or item.published_version is None
+            ):
                 continue
             try:
                 await self.ensure_version_session(item.id, item.published_version)
@@ -187,6 +300,8 @@ class ToolsetService:
             await self._safe_disconnect(session_id)
 
     async def ensure_version_session(self, toolset_id: str, version: int) -> str:
+        if self.store.get_version(toolset_id, version).kind != "mcp":
+            raise ToolsetValidationError("API Toolsets do not use MCP sessions.")
         key = (toolset_id, version)
         existing = self._version_sessions.get(key)
         if existing:
@@ -253,12 +368,24 @@ class ToolsetService:
         merged = {**deepcopy(tool.default_arguments), **dict(arguments)}
         try:
             _validate_arguments(tool, merged)
-            session_id = await self.ensure_version_session(toolset_id, version)
-            result = await self.mcp_manager.call_tool(
-                session_id,
-                tool.raw_name,
-                merged,
-            )
+            if snapshot.kind == "mcp":
+                session_id = await self.ensure_version_session(toolset_id, version)
+                result = await self.mcp_manager.call_tool(
+                    session_id,
+                    tool.raw_name,
+                    merged,
+                )
+                normalized = _normalize_result(
+                    result,
+                    toolset_id=toolset_id,
+                    version=version,
+                )
+            else:
+                normalized = await self.api_executor.execute(
+                    snapshot.connection,
+                    tool,
+                    merged,
+                )
         except RuntimeToolError:
             raise
         except Exception as exc:
@@ -267,15 +394,80 @@ class ToolsetService:
                 str(exc)[:500],
                 code="toolset_call_failed",
             ) from exc
-        normalized = _normalize_result(
-            result,
-            toolset_id=toolset_id,
-            version=version,
-        )
+        normalized.metadata["toolset_id"] = toolset_id
+        normalized.metadata["toolset_version"] = version
         warnings = self._version_warnings.get((toolset_id, version), [])
         if warnings:
             normalized.metadata["schema_warnings"] = list(warnings)
         return normalized
+
+    @staticmethod
+    def _compile_api_document(
+        kind: str,
+        document_text: str,
+        *,
+        base_url: str,
+    ) -> CompiledAPISpec:
+        if kind == "openapi":
+            return compile_openapi(
+                parse_openapi_text(document_text),
+                base_url_override=base_url,
+            )
+        if kind == "odata":
+            return compile_odata(document_text, base_url=base_url)
+        raise ToolsetValidationError(f"Unsupported API Toolset kind: {kind}")
+
+    async def _validate_api_publish(self, item: ToolsetDefinition) -> None:
+        connection = item.connection
+        await self.api_executor.url_validator(
+            connection.api_base_url,
+            connection.network_policy,
+        )
+        auth = connection.api_auth
+        credential_ids: list[str] = []
+        if auth.auth_type in {"api_key", "bearer"}:
+            credential_ids.append(auth.credential_id)
+        elif auth.auth_type == "basic":
+            credential_ids.extend(
+                [auth.username_credential_id, auth.password_credential_id]
+            )
+        elif auth.auth_type == "oauth2_client_credentials":
+            if not auth.token_url:
+                raise ToolsetValidationError(
+                    "OAuth2 client credentials requires a token URL."
+                )
+            await self.api_executor.url_validator(
+                auth.token_url,
+                connection.network_policy,
+            )
+            credential_ids.extend(
+                [
+                    auth.client_id_credential_id,
+                    auth.client_secret_credential_id,
+                ]
+            )
+        if auth.auth_type == "api_key" and not auth.api_key_name:
+            raise ToolsetValidationError("API key authentication requires a key name.")
+        for credential_id in credential_ids:
+            if not credential_id:
+                raise ToolsetValidationError(
+                    f"{auth.auth_type} authentication has incomplete credential references."
+                )
+            credential = self.credentials.get_public(credential_id)
+            if credential.status != "active":
+                raise ToolsetValidationError(
+                    f"Credential is unavailable: {credential_id}."
+                )
+        unsafe = [
+            tool.exposed_name
+            for tool in item.tools
+            if tool.enabled and not tool.read_only and not tool.requires_approval
+        ]
+        if unsafe:
+            raise ToolsetValidationError(
+                "Mutating API operations must require approval: "
+                + ", ".join(sorted(unsafe))
+            )
 
     async def _connect_profile(self, profile: Any) -> str:
         profile = self._resolve_installed_project(profile)
@@ -345,7 +537,8 @@ class ToolsetService:
             pass
 
 
-class PublishedMCPToolsetProvider:
+class PublishedToolsetProvider:
+    # Keep the provider key stable for existing runtime capability mappings.
     provider_name = "published_mcp_toolset"
 
     def __init__(self, service: ToolsetService) -> None:
@@ -378,6 +571,9 @@ class PublishedMCPToolsetProvider:
                             "toolset_version": version,
                             "toolset_raw_name": tool.raw_name,
                             "toolset_exposed_name": tool.exposed_name,
+                            "toolset_kind": snapshot.kind,
+                            "requires_approval": tool.requires_approval,
+                            "read_only": tool.read_only,
                         },
                     )
                 )
@@ -411,7 +607,10 @@ class PublishedMCPToolsetProvider:
         )
 
 
-class DraftMCPToolTestProvider:
+PublishedMCPToolsetProvider = PublishedToolsetProvider
+
+
+class DraftToolsetTestProvider:
     """Scoped provider used only by the trusted Toolset management test action."""
 
     def __init__(self, service: ToolsetService) -> None:
@@ -427,13 +626,35 @@ class DraftMCPToolTestProvider:
         session_id = str(call.metadata.get("toolset_session_id") or "")
         raw_name = str(call.metadata.get("toolset_raw_name") or "")
         toolset_id = str(call.metadata.get("toolset_id") or "")
-        if not session_id or not raw_name or not toolset_id:
+        toolset_kind = str(call.metadata.get("toolset_kind") or "mcp")
+        if (
+            not raw_name
+            or not toolset_id
+            or (toolset_kind == "mcp" and not session_id)
+        ):
             raise RuntimeToolError(
                 call.tool_name,
                 "Draft Toolset test metadata is incomplete.",
                 code="toolset_scope_denied",
             )
         try:
+            if toolset_kind != "mcp":
+                item = self.service.store.get_toolset(toolset_id)
+                tool = next(
+                    (
+                        candidate
+                        for candidate in item.tools
+                        if candidate.original_name == raw_name
+                    ),
+                    None,
+                )
+                if tool is None:
+                    raise ToolsetValidationError(f"Tool not found: {raw_name}")
+                return await self.service.api_executor.execute(
+                    item.connection,
+                    tool,
+                    call.arguments,
+                )
             result = await self.service.mcp_manager.call_tool(
                 session_id,
                 raw_name,
@@ -446,6 +667,9 @@ class DraftMCPToolTestProvider:
                 code="toolset_test_failed",
             ) from exc
         return _normalize_result(result, toolset_id=toolset_id, version=None)
+
+
+DraftMCPToolTestProvider = DraftToolsetTestProvider
 
 
 def _normalize_tool(tool: Any) -> ToolDefinition:

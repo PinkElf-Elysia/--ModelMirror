@@ -14,6 +14,7 @@ from .models import (
     MCPConnectionProfile,
     ToolDefinition,
     ToolsetDefinition,
+    ToolsetKind,
     ToolsetVersion,
 )
 
@@ -78,6 +79,7 @@ class ToolsetStore:
         self,
         *,
         name: str,
+        kind: ToolsetKind = "mcp",
         description: str = "",
         tags: list[str] | None = None,
         privacy_policy: str = "",
@@ -87,6 +89,7 @@ class ToolsetStore:
         now = time.time()
         item = ToolsetDefinition(
             id=f"toolset_{uuid.uuid4().hex}",
+            kind=kind,
             name=self._required_text(name, "name", 160),
             description=str(description or "").strip()[:4000],
             tags=self._clean_tags(tags),
@@ -123,6 +126,8 @@ class ToolsetStore:
             "disclaimer",
             "connection",
             "status",
+            "import_warnings",
+            "drift_report",
         }
         unknown = set(patch) - allowed
         if unknown:
@@ -147,6 +152,16 @@ class ToolsetStore:
                 item.connection = MCPConnectionProfile.model_validate(
                     patch["connection"] or {}
                 )
+            if "import_warnings" in patch:
+                item.import_warnings = [
+                    str(value or "").strip()[:500]
+                    for value in list(patch["import_warnings"] or [])[:100]
+                    if str(value or "").strip()
+                ]
+            if "drift_report" in patch:
+                if not isinstance(patch["drift_report"], dict):
+                    raise ToolsetValidationError("drift_report must be an object.")
+                item.drift_report = dict(patch["drift_report"])
             if "status" in patch:
                 status = str(patch["status"] or "").strip()
                 if status not in {"draft", "published", "archived"}:
@@ -164,6 +179,10 @@ class ToolsetStore:
         toolset_id: str,
         *,
         tools: list[dict[str, Any] | ToolDefinition],
+        runtime_status: str = "connected",
+        import_warnings: list[str] | None = None,
+        drift_report: dict[str, Any] | None = None,
+        connection: MCPConnectionProfile | None = None,
     ) -> ToolsetDefinition:
         now = time.time()
         with self._lock:
@@ -197,8 +216,16 @@ class ToolsetStore:
                 candidate.discovered_at = now
                 discovered.append(candidate)
             item.tools = discovered
-            item.runtime_status = "connected"
+            if connection is not None:
+                item.connection = connection.model_copy(deep=True)
+            item.runtime_status = runtime_status
             item.runtime_error = ""
+            item.import_warnings = [
+                str(value or "").strip()[:500]
+                for value in list(import_warnings or [])[:100]
+                if str(value or "").strip()
+            ]
+            item.drift_report = dict(drift_report or {})
             item.revision += 1
             item.updated_at = now
             self._write_unlocked(items)
@@ -212,7 +239,14 @@ class ToolsetStore:
         revision: int,
         patch: dict[str, Any],
     ) -> ToolsetDefinition:
-        allowed = {"alias", "description", "default_arguments", "enabled", "order"}
+        allowed = {
+            "alias",
+            "description",
+            "default_arguments",
+            "enabled",
+            "order",
+            "requires_approval",
+        }
         unknown = set(patch) - allowed
         if unknown:
             raise ToolsetValidationError(
@@ -243,6 +277,12 @@ class ToolsetStore:
                 tool.enabled = bool(patch["enabled"])
             if "order" in patch:
                 tool.order = max(0, min(int(patch["order"]), 10_000))
+            if "requires_approval" in patch:
+                if not tool.read_only and not bool(patch["requires_approval"]):
+                    raise ToolsetValidationError(
+                        "Mutating API operations must require approval."
+                    )
+                tool.requires_approval = bool(patch["requires_approval"])
             self._ensure_unique_runtime_names(item.tools)
             item.revision += 1
             item.updated_at = time.time()
@@ -279,8 +319,13 @@ class ToolsetStore:
             items = self._read_unlocked()
             item = self._find_unlocked(items, toolset_id)
             self._check_revision(item, revision)
-            if item.runtime_status != "connected":
-                raise ToolsetValidationError("Toolset must be connected before publish.")
+            expected_runtime_status = "connected" if item.kind == "mcp" else "ready"
+            if item.runtime_status != expected_runtime_status:
+                raise ToolsetValidationError(
+                    "MCP Toolset must be connected before publish."
+                    if item.kind == "mcp"
+                    else "API Toolset must be imported successfully before publish."
+                )
             enabled = sorted(
                 (tool.model_copy(deep=True) for tool in item.tools if tool.enabled),
                 key=lambda tool: (tool.order, tool.original_name),
@@ -306,6 +351,7 @@ class ToolsetStore:
             version = ToolsetVersion(
                 version=next_version,
                 draft_revision=item.revision,
+                kind=item.kind,
                 connection=version_connection,
                 tools=enabled,
                 schema_hash=hashlib.sha256(canonical.encode("utf-8")).hexdigest(),

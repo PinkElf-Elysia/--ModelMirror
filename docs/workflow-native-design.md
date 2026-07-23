@@ -1,6 +1,6 @@
 # workflow-native 自研工作流设计
 
-> 2026-07-23 MCP Toolset Runtime：`toolset_resource` 已成为真实资源节点，通过 `toolset-binding -> toolset` 绑定单个 `workflow_agent`。节点引用可发布的 MCP Toolset；Xpert 发布时固定具体版本，运行时只暴露版本中启用的工具，并复用 Tool Policy、HITL、Audit 与 checkpoint。绑定边不进入控制流和变量可达性，公开 App 暂时禁止此资源。
+> 2026-07-23 Toolset Runtime：`toolset_resource` 已成为真实资源节点，通过 `toolset-binding -> toolset` 绑定单个 `workflow_agent`。节点引用可发布的 MCP、OpenAPI 或 OData Toolset；Xpert 发布时固定具体版本，运行时只暴露版本中启用的工具，并复用 Tool Policy、HITL、Audit 与 checkpoint。绑定边不进入控制流和变量可达性，公开 App 暂时禁止此资源。
 
 > 2026-07-22 Resource Nodes：新增 `external_xpert` 与 `knowledge_base`。资源节点通过 `sourceHandle="expert-binding" -> targetHandle="expert"` 或 `sourceHandle="knowledge-binding" -> targetHandle="knowledge"` 绑定单个 `workflow_agent`，不参与控制流、变量可达性或节点调度。发布 Xpert 时外部专家解析为不可变版本；知识库继续读取活动索引。同步专家调用与异步 Handoff 是两套明确语义。
 
@@ -53,13 +53,14 @@
 | --- | --- | --- |
 | `external_xpert` | `expert-binding -> expert` | 调用发布时固定版本的外部 Xpert；复用 classic runner，不通过 HTTP 回环 |
 | `knowledge_base` | `knowledge-binding -> knowledge` | 向目标 Agent 暴露限定知识库的 `knowledge_search/get/cite`；使用活动 Retrieval Profile |
-| `toolset_resource` | `toolset-binding -> toolset` | 调用发布时固定的 MCP Toolset 版本；工具 Schema、别名、默认参数和白名单来自不可变快照 |
+| `toolset_resource` | `toolset-binding -> toolset` | 调用发布时固定的 MCP/OpenAPI/OData Toolset 版本；工具 Schema、别名、默认参数和白名单来自不可变快照 |
 | `runtime_middleware` | `middleware-binding -> middleware` | 编译目标 Agent 的 middleware pipeline |
 
 共同约束：
 
 - 同一资源节点只能绑定一个 `workflow_agent`，不得同时连接控制流边。
 - 绑定 Agent 必须启用 Runtime 工具模式；Tool Policy、HITL、Audit 和 checkpoint 继续生效。
+- OpenAPI/OData 写操作必须由目标 Agent 绑定的 HITL 中间件按工具名或 `*` 覆盖；测试、Xpert 发布和运行时均会重复检查。
 - 资源节点不进入拓扑排序、变量声明、可达性检查和节点执行队列。
 - `external_xpert` 最大嵌套深度为 4，禁止自身调用和协作循环；公开 App 第一版禁止该资源。
 - `knowledge_base` 第一版只读。写入仍通过 Knowledge Proposal/Inbox、候选版本、Evaluation Gate 和 Promote。

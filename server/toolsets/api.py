@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 
 from .credentials import (
@@ -51,6 +51,7 @@ def _error(exc: Exception) -> HTTPException:
 
 
 class ToolsetCreateRequest(BaseModel):
+    kind: Literal["mcp", "openapi", "odata"] = "mcp"
     name: str = Field(min_length=1, max_length=160)
     description: str = Field(default="", max_length=2000)
     tags: list[str] = Field(default_factory=list, max_length=20)
@@ -71,11 +72,20 @@ class ToolPatchRequest(BaseModel):
 
 class ToolTestRequest(BaseModel):
     arguments: dict[str, Any] = Field(default_factory=dict)
+    confirm_mutating: bool = False
 
 
 class PublishRequest(BaseModel):
     revision: int = Field(ge=1)
     release_notes: str = Field(default="", max_length=2000)
+
+
+class APISpecImportRequest(BaseModel):
+    source_type: Literal["text", "url"] = "text"
+    document: str = Field(default="", max_length=5 * 1024 * 1024)
+    source_url: str = Field(default="", max_length=2048)
+    base_url: str = Field(default="", max_length=2048)
+    source_label: str = Field(default="", max_length=300)
 
 
 class CredentialCreateRequest(BaseModel):
@@ -105,6 +115,7 @@ async def create_toolset(request: ToolsetCreateRequest) -> dict[str, Any]:
     try:
         item = get_toolset_service().store.create_toolset(
             name=request.name,
+            kind=request.kind,
             description=request.description,
             tags=request.tags,
             privacy_policy=request.privacy_policy,
@@ -131,7 +142,7 @@ async def list_toolset_resources() -> dict[str, Any]:
         "summary": {
             "toolset_count": len(items),
             "connected_count": sum(
-                item.runtime_status == "connected" for item in items
+                item.runtime_status in {"connected", "ready"} for item in items
             ),
             "published_count": sum(item.status == "published" for item in items),
             "enabled_tool_count": sum(
@@ -141,11 +152,13 @@ async def list_toolset_resources() -> dict[str, Any]:
         "toolsets": [
             {
                 "id": item.id,
-                "kind": "mcp",
+                "kind": item.kind,
                 "title": item.name,
                 "description": item.description,
                 "status": item.runtime_status,
-                "transport": item.connection.transport,
+                "transport": (
+                    item.connection.transport if item.kind == "mcp" else item.kind
+                ),
                 "published_version": item.published_version,
                 "tool_count": sum(tool.enabled for tool in item.tools),
                 "tags": list(item.tags),
@@ -158,6 +171,111 @@ async def list_toolset_resources() -> dict[str, Any]:
         ],
         "warnings": [],
     }
+
+
+@router.get("/api/toolsets/api-capabilities")
+async def get_api_toolset_capabilities() -> dict[str, Any]:
+    return {
+        "version": "modelmirror-api-toolsets-v1",
+        "formats": {
+            "openapi": ["3.0", "3.1"],
+            "odata": ["4.0"],
+        },
+        "imports": ["text", "file", "url"],
+        "auth_types": [
+            "none",
+            "api_key",
+            "bearer",
+            "basic",
+            "oauth2_client_credentials",
+        ],
+        "network_policies": ["public_only", "trusted_private"],
+        "limits": {
+            "document_bytes": 5 * 1024 * 1024,
+            "response_bytes": 10 * 1024 * 1024,
+            "redirects": 5,
+        },
+        "deferred": [
+            "remote_refs",
+            "multipart_upload",
+            "oauth_browser_flows",
+            "odata_batch",
+        ],
+    }
+
+
+@router.post("/api/toolsets/{toolset_id}/import")
+async def import_api_toolset(
+    toolset_id: str,
+    request: APISpecImportRequest,
+) -> dict[str, Any]:
+    try:
+        service = get_toolset_service()
+        if request.source_type == "url":
+            item = await service.import_spec_from_url(
+                toolset_id,
+                url=request.source_url,
+                base_url=request.base_url,
+            )
+        else:
+            item = await service.import_spec(
+                toolset_id,
+                document_text=request.document,
+                base_url=request.base_url,
+                source_label=request.source_label or "pasted document",
+            )
+        return item.model_dump(mode="json")
+    except Exception as exc:
+        raise _error(exc) from exc
+
+
+@router.post("/api/toolsets/{toolset_id}/import-file")
+async def import_api_toolset_file(
+    toolset_id: str,
+    file: UploadFile = File(...),
+    base_url: str = Form(default=""),
+) -> dict[str, Any]:
+    try:
+        payload = await file.read(5 * 1024 * 1024 + 1)
+        if len(payload) > 5 * 1024 * 1024:
+            raise ValueError("API specification file exceeds 5 MB.")
+        try:
+            document = payload.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError("API specification file must be UTF-8 text.") from exc
+        item = await get_toolset_service().import_spec(
+            toolset_id,
+            document_text=document,
+            base_url=base_url,
+            source_label=file.filename or "uploaded document",
+        )
+        return item.model_dump(mode="json")
+    except Exception as exc:
+        raise _error(exc) from exc
+
+
+@router.post("/api/toolsets/{toolset_id}/refresh")
+async def refresh_api_toolset(toolset_id: str) -> dict[str, Any]:
+    try:
+        item = await get_toolset_service().refresh_spec(toolset_id)
+        return item.model_dump(mode="json")
+    except Exception as exc:
+        raise _error(exc) from exc
+
+
+@router.get("/api/toolsets/{toolset_id}/drift")
+async def get_api_toolset_drift(toolset_id: str) -> dict[str, Any]:
+    try:
+        item = get_toolset_service().store.get_toolset(toolset_id)
+        return {
+            "toolset_id": item.id,
+            "revision": item.revision,
+            "spec_hash": item.connection.api_spec_hash,
+            "report": dict(item.drift_report),
+            "warnings": list(item.import_warnings),
+        }
+    except Exception as exc:
+        raise _error(exc) from exc
 
 
 @router.get("/api/toolsets/{toolset_id}")
@@ -247,6 +365,7 @@ async def test_toolset_tool(
             toolset_id,
             tool_name,
             request.arguments,
+            confirm_mutating=request.confirm_mutating,
         )
         return {
             "output": result.output,

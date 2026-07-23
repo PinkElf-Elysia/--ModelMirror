@@ -3937,6 +3937,33 @@ async def _run_workflow_response(
                 raise PermissionError("Xpert App authoring tools are disabled.")
             if not matched_tool:
                 raise ValueError(f"MCP 工具未注册：{tool_name}")
+            if (
+                capability_name == "published_mcp_toolsets"
+                and bool(matched_tool.metadata.get("requires_approval"))
+            ):
+                hitl_spec = (
+                    middleware_spec(middleware_specs, "human_in_the_loop")
+                    if middleware_specs is not None
+                    else None
+                )
+                hitl_rules = {
+                    value.strip()
+                    for value in re.split(
+                        r"[,\n]+",
+                        str(
+                            (hitl_spec.config if hitl_spec else {}).get(
+                                "interrupt_on_tools"
+                            )
+                            or ""
+                        ),
+                    )
+                    if value.strip()
+                }
+                if "*" not in hitl_rules and tool_name not in hitl_rules:
+                    raise RuntimeMiddlewareFatalError(
+                        "Mutating API Toolset operations require "
+                        "human_in_the_loop approval coverage."
+                    )
             run_context = task_state.get("runtime_metadata") or {}
             todo_scope_type, todo_scope_id = runtime_todo_scope(node.id)
             effective_context = middleware_context or MiddlewareContext(
@@ -4006,6 +4033,12 @@ async def _run_workflow_response(
                             effective_context.metadata.get("toolset_resources") or []
                         ),
                         "tool_input_schema": dict(matched_tool.input_schema or {}),
+                        "tool_requires_approval": bool(
+                            matched_tool.metadata.get("requires_approval")
+                        ),
+                        "tool_read_only": bool(
+                            matched_tool.metadata.get("read_only", True)
+                        ),
                         "sandbox_config": effective_context.metadata.get("sandbox_config") or {},
                         "skills_config": effective_context.metadata.get("skills_config") or {},
                         "browser_config": effective_context.metadata.get("browser_config") or {},
@@ -10688,6 +10721,7 @@ async def list_workflow_resource_options(
             "items": [
                 {
                     "id": item.id,
+                    "kind": item.kind,
                     "name": item.name,
                     "description": item.description,
                     "status": item.status,

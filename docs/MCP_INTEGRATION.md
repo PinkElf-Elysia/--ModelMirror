@@ -7,6 +7,8 @@
 
 MCP（Model Context Protocol）是一套让 AI 应用通过标准协议连接外部工具、资源和上下文的机制。模镜保留原 `/mcps` 即时连接入口，并新增 `/toolsets` 的版本化 MCP Runtime。后者支持 **Stdio、Streamable HTTP 与旧 SSE 兼容**：连接后发现工具 Schema，用户显式启停和配置工具，再发布不可变版本供 Workflow、Xpert、Goal 与 Handoff 绑定。
 
+`/toolsets` 现也承载同一版本模型下的 API Toolset。OpenAPI 3.0/3.1 与 OData v4 文档被编译为受控工具 Schema，并通过独立安全 HTTP 执行器调用；这不是 MCP transport，也不会改变 `/mcps` 的连接与安装职责。
+
 ### 1.1 版本化 MCP Toolset
 
 - 草稿包含连接类型、URL 或 argv、凭据引用、重连策略、超时、工具前缀和逐工具配置。
@@ -18,6 +20,17 @@ MCP（Model Context Protocol）是一套让 AI 应用通过标准协议连接外
 - 管理侧测试调用也必须经过参数校验、Tool Policy 和 Audit。
 
 Agent 画布使用 `toolset_resource -> workflow_agent` 的 `toolset` 绑定边。该边不属于控制流，Xpert 发布会把 Toolset 固定到具体版本。旧 `mcp_tool` 和全局 Tool Registry 继续兼容。
+
+### 1.2 API Toolset
+
+- OpenAPI 支持 JSON/YAML 文本、UTF-8 文件和受控 URL 导入；只解析本地 `$ref`，不远程抓取引用。
+- OData 支持 v4 CSDL metadata，EntitySet 查询由字段枚举、过滤操作、排序、分页和键值 DSL 编译，不允许模型直接提交 `$filter` 或任意 URL。
+- none、API Key、Bearer、Basic 和 OAuth2 client credentials 共用 `CredentialStore`；凭据明文不进入 Toolset 定义或版本。
+- 默认网络策略只允许公网 HTTP/HTTPS，逐次 DNS 校验并阻断回环、私网、link-local、reserved、云元数据、URL credentials 和跨域重定向。
+- 新导入操作默认关闭。草稿 refresh 只生成漂移报告，不改变旧版本；写操作默认 `requires_approval=true`。
+- 管理测试的写操作需要显式确认，发布 Xpert 还必须绑定覆盖该工具的 HITL 中间件。
+
+当前不支持远程 `$ref`、multipart、浏览器 OAuth flow、OData `$batch` 或任意 HTTP 脚本。公共 Xpert App 继续禁止 `toolset_resource`。
 
 架构图：
 

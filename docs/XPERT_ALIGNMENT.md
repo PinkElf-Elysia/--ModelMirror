@@ -1,11 +1,24 @@
 # Xpert 对齐总纲
 
+## 2026-07-23 增量：XPERT-TOOLSET-API-02B
+
+Toolset Runtime 已从 MCP 扩展到可发布的 API Toolset：
+
+- OpenAPI 3.0/3.1 支持 JSON、YAML、文件和受控 URL 导入，按 operation 编译参数 JSON Schema、HTTP 方法、路径与请求体。
+- OData v4 支持 CSDL metadata 导入，首批编译 EntitySet 的受控查询、按键读取和创建操作，以及可安全表达的 Action/Function。
+- API Key、Bearer、Basic 与 OAuth2 client credentials 全部只引用加密 Credential ID；定义、版本和普通 API 不保存明文。
+- HTTP 执行器默认阻断回环、私网、云元数据、URL credentials 和跨域重定向，限制超时、重定向与响应大小，不接受任意 URL 或任意请求模板。
+- 写操作在管理测试中要求显式二次确认；发布 Xpert 时要求目标 Agent 的 `human_in_the_loop` 覆盖所有变更工具，运行时再次 fail-closed 检查。
+- OpenAPI/OData 草稿导入与刷新不会改变已发布 Toolset 或已发布 Xpert；远端移除操作、新增必填参数或改变方法/路径会记录 breaking drift。
+
+当前明确延期：远程 `$ref`、multipart 上传、浏览器 OAuth flow、OData `$batch`、通用 API 脚本与公共 App Toolset。下一轮进入 `XPERT-TOOLSET-SEMANTICS-02C`，补内置 Provider 和工具级敏感、终点、记忆、并发与递归预算。
+
 ## 2026-07-23 增量：XPERT-TOOLSET-MCP-02A
 
 Toolset 收尾路线已从“命名白名单打包”修正为完整运行闭环：
 
 1. `XPERT-TOOLSET-MCP-02A`：本轮已实现 MCP Toolset 草稿、加密凭据、Stdio / Streamable HTTP / 旧 SSE 连接、工具发现与 Schema 配置、受策略约束的测试调用、不可变版本发布和 Agent 资源绑定。
-2. `XPERT-TOOLSET-API-02B`：下一轮实现 OpenAPI 3.x 与 OData v4 导入、鉴权和受控 HTTP 执行。
+2. `XPERT-TOOLSET-API-02B`：已实现 OpenAPI 3.x 与 OData v4 导入、加密鉴权、受控 HTTP 执行、Schema 漂移与写操作 HITL 门禁。
 3. `XPERT-TOOLSET-SEMANTICS-02C`：随后补内置 Provider、工具敏感/终点/记忆语义、并行调用、并发和递归预算。
 4. `XPERT-AGENT-FEATURES-02D`：最后收口开场白、问题建议、标题/摘要、文件与记忆能力和显式音频模型。
 
@@ -260,7 +273,7 @@ EvoAgentX 曾只作为 `goal -> sub_tasks -> inferred edges` 的历史参考。X
 | RunRegistry / Trace | 部分实现 | workflow/xpert/chat/goal/agent_task/agent_handoff run、checkpoint、workflow/chat/Xpert/Goal 观测与 `/runtime` 运维总览 | 内存态，可观测索引，不是调度器；Goal 重启恢复会创建 recovery run | 为文件、记忆与知识执行提供护栏 |
 | Workflow Agent | 部分实现 | `workflow_agent` 节点、模型执行、Runtime Toolset、文件理解、结构化输出、类型化记忆召回/候选写回、失败重试、备用模型与异常策略 | 轻量 JSON 决策，不是 function calling；并行工具调用仍未接入 | 基于真实任务反馈收敛 Agent 执行契约 |
 | Chat Toolset | 部分实现 | `/api/chat` 可选 MCP 工具模式，chat run 与 checkpoint | 默认关闭，不改变普通聊天；无自动 handoff | 补工具偏好、安全提示和观测 UI |
-| Toolset / MCP | 部分实现 | `/toolsets` 支持 MCP Toolset 草稿、加密凭据、三种传输、发现/启停/别名/默认参数/测试、不可变发布版本和 `toolset_resource` Agent 绑定；固定版本调用继续经过 policy/HITL/audit | API Toolset、内置 Provider、工具级敏感/终点/记忆语义和受限并行调用尚未实现；公开 App 暂禁 Toolset 资源 | `XPERT-TOOLSET-API-02B` |
+| Toolset / MCP / API | 部分实现 | `/toolsets` 支持 MCP、OpenAPI 3.x 与 OData v4 Toolset；具备加密凭据、受控导入和 HTTP 执行、工具 Schema/启停/别名/默认参数/测试、漂移诊断、不可变发布版本和 `toolset_resource` Agent 绑定；固定版本调用继续经过 policy/HITL/audit | 内置 Provider、工具级终点/记忆语义和受限并行调用尚未实现；远程 ref、multipart、OData batch 与公共 App Toolset 暂缓 | `XPERT-TOOLSET-SEMANTICS-02C` |
 | Plugin / Skill | 部分实现 | `/skills`、安装运行时、Workspace Skill 草稿、审批后显式安装、Sandbox staging 与显式 Skill Plugin Hooks | Agent 只能提案；草稿安装不会覆盖既有 Skill；Hook 仅支持离线 manifest，不提供组织权限 | 基于真实 Skill 草稿与 Hook 使用反馈收敛协议 |
 | Knowledge Pipeline | 已实现 | FileAsset/Artifact/Chunk/CitationAnchor、结构感知 Processor、General/QA/Summary、可执行 Graph、逐文档/逐视觉页恢复、图片与扫描 PDF 的 OCR/VLM、版本化 ingestion job、递归与父子分块、向量/FTS5 双索引、混合检索、Rerank、离线评估、Promotion Gate、Knowledge Toolset、审批写入、预览、激活/回滚 | 成熟 RAG 基础闭环完成；仍为本地单进程 worker，旧上传保留 legacy index；评估标签需人工维护；图片向量、版面坐标与 GraphRAG 暂缓 | 真实使用反馈与技术债审计 |
 | Prompt / Slash Command | 下一步 | 仅有提示词资源页雏形和聊天 prompt 使用 | 尚无版本化 Prompt Profile、Agent 绑定和 slash command | `XPERT-PLUGIN-PROMPT-03` 后冻结 Xpert 对齐 |

@@ -6,13 +6,35 @@ from pydantic import BaseModel, Field
 
 
 ToolsetStatus = Literal["draft", "published", "archived"]
+ToolsetKind = Literal["mcp", "openapi", "odata"]
 MCPTransport = Literal["stdio", "streamable_http", "legacy_sse"]
 MCPNetworkPolicy = Literal["public_only", "trusted_private"]
+APIAuthType = Literal[
+    "none",
+    "api_key",
+    "bearer",
+    "basic",
+    "oauth2_client_credentials",
+]
+APIKeyLocation = Literal["header", "query"]
 
 
 class SecretBinding(BaseModel):
     name: str = Field(min_length=1, max_length=128)
     credential_id: str = Field(min_length=1, max_length=160)
+
+
+class APIAuthProfile(BaseModel):
+    auth_type: APIAuthType = "none"
+    credential_id: str = Field(default="", max_length=160)
+    api_key_name: str = Field(default="", max_length=160)
+    api_key_location: APIKeyLocation = "header"
+    username_credential_id: str = Field(default="", max_length=160)
+    password_credential_id: str = Field(default="", max_length=160)
+    client_id_credential_id: str = Field(default="", max_length=160)
+    client_secret_credential_id: str = Field(default="", max_length=160)
+    token_url: str = Field(default="", max_length=2048)
+    scopes: list[str] = Field(default_factory=list, max_length=40)
 
 
 class MCPConnectionProfile(BaseModel):
@@ -33,6 +55,18 @@ class MCPConnectionProfile(BaseModel):
     )
     network_policy: MCPNetworkPolicy = "public_only"
     timeout_seconds: int = Field(default=30, ge=5, le=300)
+    api_base_url: str = Field(default="", max_length=2048)
+    api_source_url: str = Field(default="", max_length=2048)
+    api_source_label: str = Field(default="", max_length=300)
+    api_spec_version: str = Field(default="", max_length=80)
+    api_spec_hash: str = Field(default="", max_length=128)
+    api_auth: APIAuthProfile = Field(default_factory=APIAuthProfile)
+    response_limit_bytes: int = Field(
+        default=2 * 1024 * 1024,
+        ge=1024,
+        le=10 * 1024 * 1024,
+    )
+    redirect_limit: int = Field(default=3, ge=0, le=5)
 
 
 class ToolDefinition(BaseModel):
@@ -45,6 +79,11 @@ class ToolDefinition(BaseModel):
     order: int = Field(default=0, ge=0, le=10_000)
     schema_hash: str = Field(default="", max_length=128)
     discovered_at: float = 0.0
+    execution: dict[str, Any] = Field(default_factory=dict)
+    read_only: bool = True
+    requires_approval: bool = False
+    compatibility: Literal["compatible", "warning", "breaking"] = "compatible"
+    compatibility_message: str = Field(default="", max_length=1000)
 
     @property
     def raw_name(self) -> str:
@@ -62,6 +101,7 @@ class ToolDefinition(BaseModel):
 class ToolsetVersion(BaseModel):
     version: int = Field(ge=1)
     draft_revision: int = Field(ge=1)
+    kind: ToolsetKind = "mcp"
     connection: MCPConnectionProfile
     tools: list[ToolDefinition] = Field(default_factory=list)
     schema_hash: str
@@ -71,6 +111,7 @@ class ToolsetVersion(BaseModel):
 
 class ToolsetDefinition(BaseModel):
     id: str
+    kind: ToolsetKind = "mcp"
     name: str = Field(min_length=1, max_length=160)
     description: str = Field(default="", max_length=4000)
     tags: list[str] = Field(default_factory=list, max_length=30)
@@ -85,6 +126,8 @@ class ToolsetDefinition(BaseModel):
     runtime_status: str = "disconnected"
     runtime_session_id: str | None = None
     runtime_error: str = ""
+    import_warnings: list[str] = Field(default_factory=list, max_length=100)
+    drift_report: dict[str, Any] = Field(default_factory=dict)
     created_at: float
     updated_at: float
 
