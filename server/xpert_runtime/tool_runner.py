@@ -5,6 +5,7 @@ import logging
 from typing import Any
 
 from .capabilities import CapabilityRegistry
+from .execution_budget import execution_operation
 from .middleware import MiddlewarePipeline
 from .models import MiddlewareContext, ToolCallRequest, ToolCallResponse
 from .interrupts import RuntimeInterrupt, RuntimeMiddlewareFatalError
@@ -93,13 +94,14 @@ async def run_tool_with_runtime(
                 },
             )
         try:
-            inner_result = await provider.call_tool(
-                RuntimeToolCall(
-                    tool_name=req.tool_name,
-                    arguments=dict(req.arguments or {}),
-                    metadata=dict(req.metadata or {}),
+            async with execution_operation("tool_call"):
+                inner_result = await provider.call_tool(
+                    RuntimeToolCall(
+                        tool_name=req.tool_name,
+                        arguments=dict(req.arguments or {}),
+                        metadata=dict(req.metadata or {}),
+                    )
                 )
-            )
         except Exception as exc:
             await _safe_record_failed(audit_store, audit_record_id, error=str(exc))
             raise

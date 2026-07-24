@@ -66,10 +66,15 @@ def test_xpert_store_persists_unique_slugs_and_immutable_versions(
         release_notes="First stable release",
         expected_revision=created.draft_revision,
     )
+    assert version_one.agent_config is not None
+    assert version_one.agent_config.max_concurrency == 4
+    assert version_one.agent_config.recursion_limit == 1000
     original_role_prompt = _workflow_agent_data(version_one.workflow)["rolePrompt"]
 
     next_draft = reloaded.draft.model_copy(deep=True)
     _workflow_agent_data(next_draft.workflow)["rolePrompt"] = "A changed draft prompt."
+    next_draft.agent_config.max_concurrency = 7
+    next_draft.agent_config.recursion_limit = 240
     updated = xpert_store.update_xpert(
         created.id,
         {"draft": next_draft.model_dump(mode="json")},
@@ -85,6 +90,10 @@ def test_xpert_store_persists_unique_slugs_and_immutable_versions(
     assert xpert_store.get_version(created.id, 1).workflow == version_one.workflow
     assert _workflow_agent_data(version_one.workflow)["rolePrompt"] == original_role_prompt
     assert _workflow_agent_data(version_two.workflow)["rolePrompt"] == "A changed draft prompt."
+    assert version_two.agent_config is not None
+    assert version_two.agent_config.max_concurrency == 7
+    assert version_two.agent_config.recursion_limit == 240
+    assert version_one.agent_config.max_concurrency == 4
 
 
 def test_xpert_publish_revision_conflict_is_rejected(xpert_store: XpertStore) -> None:

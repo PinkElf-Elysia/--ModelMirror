@@ -25,6 +25,10 @@ export interface XpertDraft {
   input_variable: string;
   history_variable: string;
   output_variable: string;
+  agent_config: {
+    max_concurrency: number;
+    recursion_limit: number;
+  };
 }
 
 export interface XpertVersion {
@@ -34,6 +38,10 @@ export interface XpertVersion {
   input_variable: string;
   history_variable: string;
   output_variable: string;
+  agent_config?: {
+    max_concurrency: number;
+    recursion_limit: number;
+  } | null;
   release_notes: string;
   checksum: string;
   published_at: number;

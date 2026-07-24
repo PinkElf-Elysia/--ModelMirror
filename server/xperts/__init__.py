@@ -28,6 +28,7 @@ from .context import (
     XpertMemoryRecord,
 )
 from .models import (
+    XpertAgentConfig,
     XpertDefinition,
     XpertDraft,
     XpertRunRequest,
@@ -45,6 +46,7 @@ from .validation import validate_xpert_definition
 
 __all__ = [
     "XpertDefinition",
+    "XpertAgentConfig",
     "XpertDraft",
     "XpertConflictError",
     "XpertContextError",

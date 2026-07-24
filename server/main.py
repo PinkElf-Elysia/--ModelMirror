@@ -422,6 +422,21 @@ except ModuleNotFoundError:
         workflow_node_registry,
     )
 
+try:
+    from server.xpert_runtime.execution_budget import (
+        XpertExecutionBudget,
+        charge_execution_step,
+        execution_operation,
+        use_execution_budget,
+    )
+except ModuleNotFoundError:
+    from xpert_runtime.execution_budget import (
+        XpertExecutionBudget,
+        charge_execution_step,
+        execution_operation,
+        use_execution_budget,
+    )
+
 load_dotenv()
 
 
@@ -1588,7 +1603,9 @@ async def collect_chat_completion_text(
         max_tokens=max_tokens,
     )
 
-    async with httpx.AsyncClient(**llm_client_kwargs()) as client:
+    async with execution_operation("model_call"), httpx.AsyncClient(
+        **llm_client_kwargs()
+    ) as client:
         response = await client.post(
             url,
             headers=llm_gateway_headers(key),
@@ -2565,7 +2582,9 @@ async def stream_workflow_llm_messages(
     )
     current_model_id = model_id
 
-    async with httpx.AsyncClient(**llm_client_kwargs()) as client:
+    async with execution_operation("model_call"), httpx.AsyncClient(
+        **llm_client_kwargs()
+    ) as client:
         async def open_stream(candidate_model_id: str) -> httpx.Response:
             return await client.send(
                 client.build_request(
@@ -2867,6 +2886,11 @@ async def prepare_published_xpert_run(
             "xpert_version": version.version,
             "xpert_draft_revision": version.draft_revision,
             "xpert_checksum": version.checksum,
+            "xpert_agent_config": (
+                version.agent_config.model_dump(mode="json")
+                if version.agent_config is not None
+                else None
+            ),
             "handoff_depth": handoff_depth,
             "conversation_id": conversation_id,
             "conversation_messages": (
@@ -3213,6 +3237,22 @@ async def _run_workflow_response(
         if resume_execution is not None
         else sorted(start_node_ids, key=lambda node_id: order_index[node_id])
     )
+    execution_budget: XpertExecutionBudget | None = None
+    raw_agent_config = run_metadata.get("xpert_agent_config")
+    if runtime_run_type in {"xpert", "xpert_app"} and isinstance(
+        raw_agent_config, dict
+    ):
+        restored_budget = resume_state.get("execution_budget")
+        restored_steps = (
+            int(restored_budget.get("steps_used") or 0)
+            if isinstance(restored_budget, dict)
+            else 0
+        )
+        execution_budget = XpertExecutionBudget(
+            max_concurrency=int(raw_agent_config.get("max_concurrency") or 4),
+            recursion_limit=int(raw_agent_config.get("recursion_limit") or 1000),
+            steps_used=restored_steps,
+        )
     task_state: dict[str, Any] = {
         "task_id": task_id,
         "run_id": workflow_run.run_id,
@@ -3237,6 +3277,7 @@ async def _run_workflow_response(
         "runtime_event_store": RuntimeEventStore(),
         "tool_audit_store": InMemoryToolAuditStore(),
         "runtime_metadata": run_metadata,
+        "execution_budget": execution_budget,
         "middleware_binding_edges": [
             edge
             for edge in payload.workflow.edges
@@ -3273,7 +3314,7 @@ async def _run_workflow_response(
             runtime_metadata=run_metadata,
         )
 
-    async def workflow_stream():
+    async def workflow_stream_body():
         variables: dict[str, str] = task_state["variables"]
         queue: deque[str] = task_state["queue"]
         queued: set[str] = task_state["queued"]
@@ -5354,6 +5395,7 @@ async def _run_workflow_response(
 
                 if node_id in executed:
                     continue
+                await charge_execution_step("workflow_node")
 
                 yield sse_payload(
                     {
@@ -9054,6 +9096,16 @@ async def _run_workflow_response(
                         if isinstance(spec, RuntimeMiddlewareSpec)
                     ],
                 },
+                "execution_budget": (
+                    {
+                        "steps_used": task_state["execution_budget"].steps_used,
+                    }
+                    if isinstance(
+                        task_state.get("execution_budget"),
+                        XpertExecutionBudget,
+                    )
+                    else None
+                ),
             }
             if interrupt.wait_kind == "client_tool":
                 client_request = client_tool_store.require_request(interrupt.wait_id)
@@ -9206,6 +9258,11 @@ async def _run_workflow_response(
             durable_execution = workflow_execution_store.get(task_id)
             if durable_execution is None or durable_execution.status != "waiting":
                 task_state["completed_at"] = time.monotonic()
+
+    async def workflow_stream():
+        with use_execution_budget(task_state.get("execution_budget")):
+            async for event in workflow_stream_body():
+                yield event
 
     return StreamingResponse(
         workflow_stream(),
@@ -11035,6 +11092,9 @@ async def team_chat(payload: TeamChatRequest, request: Request):
 async def start_mcp_ttl_cleanup() -> None:
     await asyncio.to_thread(datax_service.recover_import_jobs)
     mcp_manager.start_ttl_cleanup(on_cleanup=tool_registry.unregister_sessions)
+    builtin_warnings = await toolset_service.ensure_builtin_toolsets()
+    for warning in builtin_warnings:
+        logger.warning("Builtin Provider Toolset initialization failed: %s", warning)
     toolset_warnings = await toolset_service.autostart()
     for warning in toolset_warnings:
         logger.warning("Toolset auto-start failed: %s", warning)

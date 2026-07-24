@@ -13,6 +13,11 @@ except ModuleNotFoundError:
 XpertStatus = Literal["draft", "published", "archived"]
 
 
+class XpertAgentConfig(BaseModel):
+    max_concurrency: int = Field(default=4, ge=1, le=100)
+    recursion_limit: int = Field(default=1000, ge=100, le=10_000)
+
+
 class XpertDraft(BaseModel):
     workflow: NativeWorkflowDefinition
     input_variable: str = Field(default="user_input", min_length=1, max_length=128)
@@ -22,6 +27,7 @@ class XpertDraft(BaseModel):
         max_length=128,
     )
     output_variable: str = Field(default="agent_output", min_length=1, max_length=128)
+    agent_config: XpertAgentConfig = Field(default_factory=XpertAgentConfig)
 
 
 class XpertVersion(BaseModel):
@@ -31,6 +37,8 @@ class XpertVersion(BaseModel):
     input_variable: str
     history_variable: str
     output_variable: str
+    # Legacy versions intentionally keep the old unlimited runtime behavior.
+    agent_config: XpertAgentConfig | None = None
     release_notes: str = ""
     checksum: str
     published_at: float

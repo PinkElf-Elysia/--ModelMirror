@@ -135,6 +135,10 @@ interface BuiltinProvider {
   credential_kind: CredentialKind | null;
   instance_creatable: boolean;
   runtime_binding?: string;
+  singleton?: boolean;
+  default_toolset_id?: string | null;
+  configuration_status?: "ready" | "credential_required" | "unavailable";
+  published_version?: number | null;
   tools: ToolDefinition[];
 }
 
@@ -245,7 +249,12 @@ export default function ToolsetsPage() {
   const [draft, setDraft] = useState<ToolsetDefinition | null>(null);
   const [commandText, setCommandText] = useState("[]");
   const [newKind, setNewKind] = useState<ToolsetKind>("mcp");
-  const [kindFilter, setKindFilter] = useState<"all" | "mcp" | "api" | "provider">("all");
+  const [kindFilter, setKindFilter] = useState<
+    "all" | "mcp" | "api" | "provider"
+  >(() => {
+    const tab = new URLSearchParams(window.location.search).get("tab");
+    return tab === "mcp" || tab === "api" || tab === "provider" ? tab : "all";
+  });
   const [selectedProviderId, setSelectedProviderId] = useState("tavily");
   const [providerCredentialId, setProviderCredentialId] = useState("");
   const [newName, setNewName] = useState("");
@@ -377,7 +386,7 @@ export default function ToolsetsPage() {
 
   async function createToolset(event: FormEvent) {
     event.preventDefault();
-    if (!newName.trim()) return;
+    if (kindFilter !== "provider" && !newName.trim()) return;
     setBusy("create");
     try {
       if (kindFilter === "provider") {
@@ -387,10 +396,11 @@ export default function ToolsetsPage() {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-              name: newName.trim(),
-              description: newDescription.trim(),
+              name: newName.trim() || selectedProvider?.title || selectedProviderId,
+              description:
+                newDescription.trim() || selectedProvider?.description || "",
               credential_id: providerCredentialId,
-              tags: ["builtin-provider"],
+              tags: ["builtin-provider", "default-provider"],
             }),
           },
         );
@@ -789,6 +799,15 @@ export default function ToolsetsPage() {
                       此 Provider 复用当前 Runtime 的持久化作用域，不需要额外凭据。
                     </p>
                   )}
+                  <div className="rounded-md border border-white/10 bg-white/[0.035] px-3 py-2 text-[11px] leading-5 text-slate-300">
+                    {selectedProvider?.default_toolset_id
+                      ? `默认 Toolset · ${
+                          selectedProvider.configuration_status === "ready"
+                            ? "已就绪"
+                            : "待配置"
+                        }`
+                      : "正在初始化默认 Provider Toolset"}
+                  </div>
                 </div>
               ) : (
                 <div className="mt-3 grid grid-cols-3 gap-1 rounded-md bg-white/5 p-1">
@@ -818,7 +837,11 @@ export default function ToolsetsPage() {
                   className={`${inputClass} mt-1`}
                   maxLength={160}
                   onChange={(event) => setNewName(event.target.value)}
-                  placeholder="研究工具集"
+                  placeholder={
+                    kindFilter === "provider"
+                      ? selectedProvider?.title || "默认 Provider"
+                      : "研究工具集"
+                  }
                   value={newName}
                 />
               </label>
@@ -836,12 +859,18 @@ export default function ToolsetsPage() {
                 className={`${primaryButton} mt-3 w-full`}
                 disabled={
                   busy === "create" ||
-                  !newName.trim() ||
-                  (kindFilter === "provider" && !providerCredentialId)
+                  (kindFilter !== "provider" && !newName.trim()) ||
+                  (kindFilter === "provider" &&
+                    Boolean(selectedProvider?.credential_required) &&
+                    !providerCredentialId)
                 }
                 type="submit"
               >
-                {busy === "create" ? "创建中..." : "创建草稿"}
+                {busy === "create"
+                  ? "配置中..."
+                  : kindFilter === "provider"
+                    ? "配置并打开默认 Toolset"
+                    : "创建草稿"}
               </button>
             </form>
 
