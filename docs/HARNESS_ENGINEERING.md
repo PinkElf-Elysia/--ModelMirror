@@ -1,158 +1,228 @@
 # Harness Engineering 开发规范
 
-Harness Engineering 是模镜的工程治理方法：先建立护栏，再开发功能，让每次变更都可理解、可测试、可回退。
+Harness Engineering 是模镜的工程交付系统。它由三部分组成：
 
-最后更新日期：2026-07-13
+- **轨道**：仓库事实、需求边界、架构与接口契约、任务卡。
+- **护栏**：安全红线、受保护路径、依赖策略、兼容规则和停止条件。
+- **仪表盘与刹车**：测试、构建、日志、Diff Review、回退与人工验收。
+
+目标不是增加文档数量，而是让每次变更都可证实、可审查、可验证、可恢复。
+
+最后更新日期：2026-07-23
 维护人：模镜团队
 
-## 1. Harness Checklist
+## 1. 事实优先
 
-每个任务开工前回答：
+所有任务先区分四类信息：
 
-| 问题 | 必填 |
-| --- | --- |
-| 本次影响哪些路由或 API？ | 是 |
-| 是否触碰 `/api/chat`、`/workflow`、`/rag` 等主路径？ | 是 |
-| 最小验收命令是什么？ | 是 |
-| 失败如何回退？ | 是 |
-| 是否新增依赖？ | 是 |
-| 是否涉及密钥、子进程、文件系统或网络？ | 是 |
-| 是否需要更新文档？ | 是 |
-
-## 2. 变更分级
-
-### Level 0 - 文档或样式
-
-验证：
-
-```bash
-cd client
-npm.cmd run build
-```
-
-### Level 1 - 前端功能
-
-验证：
-
-- 前端 build。
-- 至少一个本地页面访问验证。
-- loading / error / empty / disabled 状态可见。
-
-### Level 2 - 后端 API
-
-验证：
-
-```bash
-python -m py_compile server/main.py
-```
-
-并补充 curl 样例、错误路径和密钥泄露检查。
-
-### Level 3 - MCP / 工作流 / RAG / Xpert App / 图片生成链路
-
-最高风险。必须有隔离、超时、测试替身或真实冒烟。
-
-## 3. 主路径保护
-
-| 入口 | 实现 | 规则 |
+| 标签 | 定义 | 可以用于实施 |
 | --- | --- | --- |
-| `/api/chat` | OpenAI 兼容 SSE 代理 | 不得破坏文本流式追加、多模态输入或图片输出。 |
-| `/chat/:modelId` | ChatPage | 不得破坏用户上传图片和 Lightbox。 |
-| `/workflow` | 经典自研工作流 | 不得无测试改动运行器主链路。 |
-| `/workflow-native` | 实验线 | 新节点必须同步类型、校验、测试和文档。 |
-| `/rag` | 本地 RAG | 不得提交上传文件、向量库或临时存储。 |
-| `/settings` | newAPI iframe | 不得在前端硬编码密钥。 |
-| `/apps/:appSlug` | 未列出 Xpert App | 分享 token 只经 URL fragment 与请求 header 传递。 |
-| `/api/v1/xpert-apps/*/chat/completions` | OpenAI 兼容 App API | 固定部署版本，只公开最终输出，密钥只存哈希。 |
+| 已证实事实 | 有当前代码、配置、测试、命令输出或用户确认作为证据 | 是 |
+| 合理推断 | 由事实推导，但缺少直接运行或产品证据 | 需显式标注 |
+| 建议方案 | 尚未实施的技术或产品选择 | 经确认后 |
+| 待确认 | 缺少负责人决定或可靠证据 | 否 |
 
-## 4. Xpert App/API Harness
+禁止虚构功能、接口、数据表、测试结果、部署方式或产品需求。目标客户、用户故事、商业目标、SLA、组织权限与合规要求在没有明确输入时必须标记为“待确认”。
 
-App/API 属于公开边界，修改 `server/xperts/app_*`、App 页面或 classic runner 的 App 分支时必须验证：
+当前仓库事实入口见 [REPOSITORY_FACTS.md](./REPOSITORY_FACTS.md)。发现文档与代码冲突时，以当前代码和可重复命令为事实，并登记文档债务。
 
-- XpertVersion 固定，草稿和新发布版本不会静默改变线上行为。
-- token/key 原值不落盘、不进入日志、checkpoint、错误响应或 Git diff。
-- 工具、Handoff、记忆默认关闭；工具策略未加载时默认拒绝。
-- JSON 与 SSE 均只返回最终回答，SSE 以 `[DONE]` 结束。
-- 无效、过期、撤销凭据返回 401；RPM、日配额和并发超限返回 429 与 `Retry-After`。
-- 停用、部署 v2、回滚 v1 和容器重启后行为符合部署记录。
+## 2. 开工前任务契约
 
-最小验证：
+每次任务使用 [task-card.md](./templates/task-card.md) 声明：
+
+1. 单一可验收目标。
+2. 事实证据和未知项。
+3. 允许修改与禁止修改的路径。
+4. 公共 API、持久化数据、依赖和安全影响。
+5. Given / When / Then 验收标准。
+6. 最小验证、完整回归和人工验收。
+7. 失败回退与停止条件。
+
+默认单批最多修改 5 个文件。超过时必须说明无法安全拆分的原因。文件数不是绩效指标；目的是让每一批能独立审查和回退。
+
+## 3. 标准执行门
+
+### Gate 0：保护现场
+
+执行并记录：
 
 ```bash
-python -m pytest server/tests/test_xpert_app_api.py -q
-python -m pytest server/tests/test_xpert_publish.py server/tests/test_xpert_runtime_toolset.py -q
-cd client && npm.cmd run build
+git status --short --branch
+git diff --stat
+git ls-files --others --exclude-standard
 ```
 
-## 5. `/api/chat` 图片输出 Harness
+不得清理、覆盖或回滚不属于本任务的改动。需要隔离时使用独立分支或 worktree。
 
-修改以下文件时必须运行本节验收：
+### Gate 1：调查仓库
 
-- `server/main.py`
-- `client/src/utils/fetchChatStream.ts`
-- `client/src/utils/extractImages.ts`
-- `client/src/pages/ChatPage.tsx`
+至少确认：
 
-必须保持：
+- 前端路由、后端路由和真实执行入口。
+- 相关模型、Store、配置、测试和持久化目录。
+- 依赖锁定位置、Docker 服务和环境变量来源。
+- 相邻能力的兼容契约。
+- 文档是否与代码一致。
 
-- `onDelta(text: string)` 签名不变。
-- 纯文本模型仍按文本流式追加。
-- 图片生成模型输出能进入图片卡片和 Lightbox。
-- `data:image/...` 不依赖 ReactMarkdown 协议白名单，必须由 `extractImages` 提取。
-- 用户上传图片 `message.images` 逻辑不变。
+调查结论必须附路径或命令证据，不以记忆代替检查。
 
-最小验证：
+### Gate 2：差距与优先级
+
+把差距分成：
+
+- **P0**：泄密、数据损坏、权限绕过、主路径不可用、不可恢复执行。
+- **P1**：核心功能闭环缺失、兼容回归、关键测试或回退缺失。
+- **P2**：可维护性、文档、体验与效率改进。
+
+P0/P1 未处理时，不用纯目录化、样式打磨或观测增强替代核心修复。
+
+### Gate 3：小批实施
+
+- 保持公共协议兼容，除非任务明确批准破坏性变化。
+- 先修改模型和校验，再接执行，再接 UI，最后更新文档。
+- 持久化写入使用原子替换、revision 或不可变版本。
+- 外部请求、工具、文件与子进程必须有作用域、超时、限额和失败策略。
+- 任何安全中间件异常不得 fail-open 执行敏感动作。
+
+### Gate 4：验证
+
+验证结果只允许四种状态：
+
+- `通过`：命令实际执行并成功。
+- `失败`：命令实际执行但失败，必须附错误摘要。
+- `未运行`：没有执行，必须说明原因和剩余风险。
+- `不适用`：与本次变更无关，必须说明判断依据。
+
+不得写“应该通过”“预计正常”或伪造命令输出。
+
+### Gate 5：Diff Review
+
+提交前检查：
+
+```bash
+git diff --check
+git diff --stat
+git diff
+git status --short
+git diff --cached --name-only
+```
+
+Review 必须回答：
+
+- 是否只改了任务声明范围？
+- 是否覆盖用户已有改动？
+- 是否出现真实密钥、路径、正文、运行存储或构建产物？
+- 是否新增未说明的接口、依赖、数据迁移或行为变化？
+- 错误、空态、取消、超时、重试和重启恢复是否有定义？
+- 测试是否覆盖正常路径和至少一个失败路径？
+
+### Gate 6：交付与回退
+
+PR 必须包含变更摘要、事实依据、影响范围、真实验证证据、未完成项、风险和回退步骤。高风险变更在人工验收前不得描述为生产就绪。
+
+## 4. 风险分级与最低验证
+
+| 级别 | 示例 | 最低要求 |
+| --- | --- | --- |
+| L0 | 纯文档、无行为变化 | 链接/命令核对、`git diff --check`、敏感扫描 |
+| L1 | 前端页面与交互 | `npm.cmd run build`、错误/空态/禁用态、目标页面人工检查 |
+| L2 | 后端 API、Store、校验 | `py_compile`、目标测试、错误路径、重启或持久化检查 |
+| L3 | Chat、Workflow、RAG、Xpert、Toolset、公开 App | 重点测试、全量后端测试、前端构建、Docker 重建与跨入口人工验收 |
+| L4 | 密钥、迁移、公开访问、隔离边界 | L3 + 威胁检查、失败关闭、回滚演练、明确人工批准 |
+
+## 5. 仓库基线命令
+
+前端：
 
 ```bash
 cd client
 npm.cmd run build
 ```
 
-```bash
-python -m py_compile server/main.py
-```
-
-真实图片模型冒烟：
+后端语法：
 
 ```bash
-curl -N -X POST http://localhost:8000/api/chat ^
-  -H "Content-Type: application/json" ^
-  -d "{\"model_id\":\"recraft/recraft-v3\",\"messages\":[{\"role\":\"user\",\"content\":\"画一只猫\"}]}"
+python -m py_compile server/main.py server/rag/*.py server/xpert_runtime/*.py server/workflow_native/*.py server/xperts/*.py
 ```
 
-预期：
+全量后端测试：
 
-- 响应包含 `image_url` 或 `data:image/...`。
-- `/chat/recraft%2Frecraft-v3` 中出现至少一张可点击图片。
-- 点击图片进入 Lightbox。
+```bash
+python -m pytest server/tests/ -q
+```
 
-## 6. 文档 Harness
+Docker：
 
-新增或修改功能时同步更新：
+```bash
+docker compose -p modelmirror config
+docker compose -p modelmirror up -d --build --force-recreate
+docker ps
+curl http://localhost:8000/api/health
+curl http://localhost:5173/models
+```
 
-- 根 `README.md`
-- `docs/README.md`
-- 相关模块文档，例如 `docs/FRONTEND.md`、`docs/BACKEND.md`
-- `docs/GLOSSARY.md`（新术语）
-- `AGENTS.md`（新 harness 或红线）
+目标测试由任务卡按改动模块补充。仓库当前没有 GitHub Actions 工作流，也没有独立前端 lint/test 脚本；不得把本地构建表述为 CI、lint 或前端单元测试通过。
 
-文档必须：
+## 6. 安全与受保护数据
 
-- 简体中文。
-- UTF-8 编码。
-- 代码块标注语言。
-- 与当前代码一致，不写虚构接口。
-- 尾部或头部包含最后更新日期和维护人。
+禁止提交或输出：
 
-## 7. 回退模板
+- `.env`、API key、token、credential 主密钥和原始分享密钥。
+- `server/*/storage/`、RAG 上传、索引、DuckDB、浏览器状态、Sandbox 工作区。
+- prompt 全文、工具完整输出、附件正文、Cookie、表单值和本地绝对路径。
+- `node_modules/`、`client/dist/`、扩展 ZIP、日志、截图产物和 APK。
 
-高风险 PR 描述中写明：
+新增依赖必须记录固定版本、用途、许可证、供应链与镜像影响。优先使用现有依赖和标准库。
+
+## 7. 停止条件
+
+出现以下情况立即停止扩大改动：
+
+- 需要猜测目标客户、用户故事、权限模型、SLA 或数据保留策略。
+- 发现与用户改动冲突，无法安全合并。
+- 需要明文密钥、破坏性删除、Git 历史重写或未批准迁移。
+- 关键验证失败且无法归因。
+- 任务范围、公共接口或风险等级发生实质变化。
+- 无法提供独立回退方式。
+
+停止不等于放弃：保留现场，记录已证实事实、阻塞条件和用户需要决定的最小问题。
+
+## 8. 产品与需求文档边界
+
+可以从代码反向整理现状，但必须注明“现状事实”，不能把现状包装成产品战略。以下板块当前由产品负责人补充：
+
+- 目标客户与用户角色。
+- 用户故事、业务流程和优先级。
+- 商业目标与成功指标。
+- 组织权限、租户、审计和合规要求。
+- SLA、数据保留与灾备目标。
+
+工程团队可以提供技术选项、风险和成本，不代替产品决策。
+
+## 9. 回退模板
 
 ```markdown
 ## 回退方案
 
-1. 回滚提交 `<commit>`。
-2. 重新构建前后端。
-3. 确认 `/api/health`、`/models`、`/chat/:modelId` 可访问。
-4. 若涉及环境变量，恢复上一版 `.env`。
+1. 回滚本 PR 的提交，保留用户持久化目录。
+2. 恢复上一版环境变量和镜像，不打印密钥。
+3. 如有新版本数据，只回切活动指针，不原地修改不可变快照。
+4. 重新构建受影响服务。
+5. 验证 `/api/health`、主入口和任务卡列出的回归路径。
+6. 记录回退原因、数据影响和后续修复条件。
 ```
+
+## 10. 完成报告
+
+交付报告固定包含：
+
+1. 目标与结论。
+2. 已证实事实。
+3. 变更文件。
+4. 公共接口与数据影响。
+5. 验证状态表。
+6. 安全与敏感信息检查。
+7. 人工验收结果。
+8. 未运行项与剩余风险。
+9. 回退方式。
+10. 待确认的产品问题。
