@@ -27,11 +27,19 @@ from .context import (
     XpertFileAsset,
     XpertMemoryRecord,
 )
+from .features import (
+    deterministic_memory_reply,
+    gateway_audio_endpoint,
+    parse_conversation_enrichment,
+    validate_selected_files,
+)
 from .models import (
     XpertAgentConfig,
     XpertDefinition,
     XpertDraft,
+    XpertFeatureConfig,
     XpertRunRequest,
+    XpertSpeechRequest,
     XpertStatus,
     XpertVersion,
 )
@@ -48,6 +56,7 @@ __all__ = [
     "XpertDefinition",
     "XpertAgentConfig",
     "XpertDraft",
+    "XpertFeatureConfig",
     "XpertConflictError",
     "XpertContextError",
     "XpertContextConflictError",
@@ -57,6 +66,7 @@ __all__ = [
     "XpertConversation",
     "XpertNotFoundError",
     "XpertRunRequest",
+    "XpertSpeechRequest",
     "XpertStatus",
     "XpertStore",
     "XpertStoreError",
@@ -65,6 +75,10 @@ __all__ = [
     "XpertFileAsset",
     "XpertMemoryRecord",
     "MemoryWriteCandidate",
+    "deterministic_memory_reply",
+    "gateway_audio_endpoint",
+    "parse_conversation_enrichment",
+    "validate_selected_files",
     "XpertAppAccessGrant",
     "XpertAppDefinition",
     "XpertAppStore",

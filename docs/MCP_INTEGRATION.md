@@ -3,6 +3,12 @@
 最后更新日期：2026-07-23
 维护人：模镜团队
 
+## 0. 产品入口与预算层级
+
+- `/mcps` 明确提供进入 `/toolsets` 的入口：前者负责 MCP 项目发现与即时连接，后者负责 MCP/API/内置 Provider 的草稿、凭据、工具语义、测试和不可变发布。
+- Tavily 与 Todos 作为稳定的内置默认 Toolset 存在。Todos 无需凭据即可直接绑定；Tavily 配置凭据时更新同一 Provider 实例，不重复生成不可发现的资源。
+- `XpertAgentConfig.max_concurrency` 与 `recursion_limit` 是整个 Xpert 执行树的全局预算；Toolset 的并行安全、`maxToolConcurrency`、`maxToolCalls`、`maxToolDepth` 和 `maxIterations` 是局部工具调用护栏。局部配置不能突破全局预算。
+
 ## 1. 概述
 
 MCP（Model Context Protocol）是一套让 AI 应用通过标准协议连接外部工具、资源和上下文的机制。模镜保留原 `/mcps` 即时连接入口，并新增 `/toolsets` 的版本化 MCP Runtime。后者支持 **Stdio、Streamable HTTP 与旧 SSE 兼容**：连接后发现工具 Schema，用户显式启停和配置工具，再发布不可变版本供 Workflow、Xpert、Goal 与 Handoff 绑定。

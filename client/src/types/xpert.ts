@@ -6,6 +6,50 @@ import {
 
 export type XpertStatus = "draft" | "published" | "archived";
 
+export interface XpertFeatureConfig {
+  opening: {
+    enabled: boolean;
+    message: string;
+    questions: string[];
+  };
+  generated_questions: {
+    enabled: boolean;
+    model_id: string;
+    count: number;
+  };
+  conversation_title: {
+    enabled: boolean;
+    model_id: string;
+  };
+  conversation_summary: {
+    enabled: boolean;
+    model_id: string;
+    max_context_chars: number;
+    trigger_ratio: number;
+    keep_recent_messages: number;
+    max_summary_chars: number;
+  };
+  memory_reply: {
+    enabled: boolean;
+    min_confidence: number;
+  };
+  file_upload: {
+    enabled: boolean;
+    max_files_per_run: number;
+    allowed_extensions: string[];
+  };
+  text_to_speech: {
+    enabled: boolean;
+    model_id: string;
+    voice: string;
+    max_text_chars: number;
+  };
+  speech_to_text: {
+    enabled: boolean;
+    model_id: string;
+  };
+}
+
 export interface XpertWorkflowDefinition {
   id: string;
   title: string;
@@ -29,6 +73,7 @@ export interface XpertDraft {
     max_concurrency: number;
     recursion_limit: number;
   };
+  features: XpertFeatureConfig;
 }
 
 export interface XpertVersion {
@@ -42,6 +87,7 @@ export interface XpertVersion {
     max_concurrency: number;
     recursion_limit: number;
   } | null;
+  features?: XpertFeatureConfig | null;
   release_notes: string;
   checksum: string;
   published_at: number;
@@ -104,6 +150,7 @@ export interface XpertConversationMessage {
   message_id?: string;
   role: "user" | "assistant";
   content: string;
+  suggestions?: string[];
   version?: number | null;
   created_at?: number;
 }

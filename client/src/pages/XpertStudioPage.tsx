@@ -4,8 +4,10 @@ import PageContainer from "../components/PageContainer";
 import WorkflowEditor from "../components/workflow/WorkflowEditor";
 import XpertAppDeploymentPanel from "../components/xpert/XpertAppDeploymentPanel";
 import AuthoringProposalPanel from "../components/authoring/AuthoringProposalPanel";
+import XpertFeatureSettings from "../components/xpert/XpertFeatureSettings";
 import {
   type XpertDefinition,
+  type XpertFeatureConfig,
   type XpertValidationResult,
 } from "../types/xpert";
 import { type WorkflowDefinition } from "../types/workflow";
@@ -41,6 +43,7 @@ export default function XpertStudioPage() {
   const [starters, setStarters] = useState("");
   const [maxConcurrency, setMaxConcurrency] = useState(4);
   const [recursionLimit, setRecursionLimit] = useState(1000);
+  const [features, setFeatures] = useState<XpertFeatureConfig | null>(null);
   const [releaseNotes, setReleaseNotes] = useState("");
   const [validation, setValidation] = useState<XpertValidationResult | null>(null);
   const [loading, setLoading] = useState(true);
@@ -61,6 +64,7 @@ export default function XpertStudioPage() {
         setStarters(data.starters.join("\n"));
         setMaxConcurrency(data.draft.agent_config?.max_concurrency ?? 4);
         setRecursionLimit(data.draft.agent_config?.recursion_limit ?? 1000);
+        setFeatures(data.draft.features);
         document.title = `模镜 - ${data.name} Studio`;
       })
       .catch((caught) => {
@@ -79,17 +83,27 @@ export default function XpertStudioPage() {
     setBusy("metadata");
     setError("");
     try {
+      const nextStarters = starters.split("\n").map((item) => item.trim()).filter(Boolean);
       const updated = await updateXpert(xpert.id, {
         name: name.trim(),
         description: description.trim(),
         tags: splitTags(tags),
-        starters: starters.split("\n").map((item) => item.trim()).filter(Boolean),
+        starters: nextStarters,
         draft: {
           ...xpert.draft,
           agent_config: {
             max_concurrency: maxConcurrency,
             recursion_limit: recursionLimit,
           },
+          features: features
+            ? {
+                ...features,
+                opening: {
+                  ...features.opening,
+                  questions: nextStarters,
+                },
+              }
+            : xpert.draft.features,
         },
       });
       setXpert(updated);
@@ -263,6 +277,16 @@ export default function XpertStudioPage() {
           </p>
         ) : null}
       </header>
+
+      {features ? (
+        <XpertFeatureSettings
+          onChange={(next) => {
+            setFeatures(next);
+            setStarters(next.opening.questions.join("\n"));
+          }}
+          value={features}
+        />
+      ) : null}
 
       <section className="mb-5 grid gap-4 xl:grid-cols-[minmax(0,1fr)_380px]">
         <div className="rounded-lg border border-white/10 bg-white/[0.035] p-4">

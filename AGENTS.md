@@ -411,6 +411,17 @@ Office 自动化是高风险客户端副作用路径。修改 `server/xpert_runt
 - 内置 Provider 必须复用现有 Store 与执行器。Todo 不得创建第二套 Todo Store；Knowledge、Memory 和 Data X 不得复制已有 Provider 逻辑。
 - 公共 App Toolset 必须固定已发布版本，要求 `allow_tools`、Tool Policy，以及全部工具显式 `public_app_allowed`、只读、非敏感、非 conversation memory。凭据只在服务端解析。
 - 修改 Toolset Runtime 至少运行 `test_toolset_semantics.py`、`test_toolset_store.py`、`test_toolset_service.py`、`test_toolset_api.py`、`test_toolset_api_compiler.py`、`test_toolset_api_runtime.py`、`test_workflow_toolset_resource.py`、MCP/Toolset/Workflow/Xpert/App 回归和前端生产构建。
+
+### Xpert 版本化会话功能
+
+- 开场白、问题建议、会话标题/摘要、记忆回复、文件策略和 TTS/STT 必须固定进不可变 `XpertVersion.features`。草稿更新不得改变已发布版本的聊天行为。
+- 会话摘要必须复用 `context_compression`，保留原消息，并只持久化派生摘要、revision 和覆盖边界；不得把完整消息正文写入 checkpoint。
+- 文件能力关闭时，历史附件仍可查看，但不得注入 Xpert、Goal 或知识候选。扩展名和每轮文件数必须在前后端双重校验。
+- TTS/STT 只能使用模型注册表中显式选择的 speech/transcription 模型和既有 LLM Gateway/OpenRouter 兼容配置；不得在前端或源码硬编码供应商密钥。
+- 记忆直答必须满足明确的高置信阈值和作用域检查；不确定时继续走原模型执行，不得静默返回模糊记忆。
+- `XpertAgentConfig.max_concurrency` 与 `recursion_limit` 约束整个 Xpert 执行树。节点级 `maxToolConcurrency`、`maxToolCalls`、`maxToolDepth` 和 `maxIterations` 只能收紧局部工具循环。
+- 修改这些能力至少运行 `test_xpert_agent_features.py`、`test_xpert_publish.py`、`test_xpert_context.py`、`test_xpert_file_memory.py`、workflow agent、Toolset/App 回归和前端生产构建。
+
 - EvoAgentX 只允许选择性移植已锁定 commit 且许可证审计通过的 MIT 文件；必须保留版权和 NOTICE，并在 `docs/EVOAGENTX_ALIGNMENT.md` 记录来源。
 - EvoAgentX optimizer 或 planner 只能产生候选 Xpert 草稿与评估报告，不得静默发布、覆盖人工草稿或修改不可变线上版本。
 

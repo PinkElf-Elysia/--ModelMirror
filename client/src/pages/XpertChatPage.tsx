@@ -22,6 +22,7 @@ import {
   archiveXpertFile,
   createXpertConversation,
   createXpertMemory,
+  getXpertAudioCapabilities,
   getXpert,
   getXpertConversation,
   listXpertConversations,
@@ -29,7 +30,10 @@ import {
   listXpertMemories,
   listXpertMemoryCandidates,
   listXperts,
+  synthesizeXpertSpeech,
+  transcribeXpertAudio,
   uploadXpertFile,
+  type XpertAudioCapabilities,
 } from "../utils/xpertApi";
 
 interface XpertRunEvent {
@@ -50,6 +54,8 @@ interface XpertRunEvent {
   request_type?: "tool_call" | "final_output" | "manual_input";
   tool_name?: string;
   sequence?: number;
+  suggestions?: string[];
+  conversation_title?: string;
 }
 
 interface RuntimeRunSummary {
@@ -196,7 +202,11 @@ export default function XpertChatPage() {
   const [knowledgeTargetId, setKnowledgeTargetId] = useState("");
   const [knowledgeProposals, setKnowledgeProposals] = useState<KnowledgeWriteProposalSummary[]>([]);
   const [promotingFiles, setPromotingFiles] = useState(false);
+  const [audioCapabilities, setAudioCapabilities] = useState<XpertAudioCapabilities | null>(null);
+  const [transcribing, setTranscribing] = useState(false);
+  const [speakingMessageId, setSpeakingMessageId] = useState("");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const audioInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -270,6 +280,48 @@ export default function XpertChatPage() {
     () => [...(xpert?.versions ?? [])].sort((a, b) => b.version - a.version),
     [xpert],
   );
+  const activeVersion = useMemo(
+    () => publishedVersions.find((item) => item.version === version) ?? null,
+    [publishedVersions, version],
+  );
+  const versionFeatures = activeVersion?.features ?? null;
+  const openingQuestions = versionFeatures
+    ? (versionFeatures.opening.enabled ? versionFeatures.opening.questions : [])
+    : (xpert?.starters ?? []);
+  const openingMessage = versionFeatures?.opening.enabled
+    ? versionFeatures.opening.message
+    : "";
+  const fileUploadEnabled = versionFeatures?.file_upload.enabled ?? true;
+  const maxFilesPerRun = versionFeatures?.file_upload.max_files_per_run ?? 5;
+  const allowedFileExtensions = (
+    versionFeatures?.file_upload.allowed_extensions ?? [".txt", ".md", ".markdown", ".pdf"]
+  ).map((item) => item.startsWith(".") ? item.toLowerCase() : `.${item.toLowerCase()}`);
+  const fileAccept = allowedFileExtensions.join(",");
+
+  useEffect(() => {
+    if (!xpert?.id || !version) {
+      setAudioCapabilities(null);
+      return;
+    }
+    let cancelled = false;
+    setAudioCapabilities(null);
+    getXpertAudioCapabilities(xpert.id, version)
+      .then((payload) => {
+        if (!cancelled) setAudioCapabilities(payload);
+      })
+      .catch(() => {
+        if (!cancelled) setAudioCapabilities(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [xpert?.id, version]);
+
+  useEffect(() => {
+    setSelectedFileIds((current) => (
+      fileUploadEnabled ? current.slice(0, maxFilesPerRun) : []
+    ));
+  }, [fileUploadEnabled, maxFilesPerRun]);
 
   async function selectConversation(
     nextConversationId: string,
@@ -290,7 +342,9 @@ export default function XpertChatPage() {
     setMessages(conversation.messages ?? []);
     setSummaryRevision(conversation.summary_revision ?? 0);
     setFiles(filePayload.items);
-    setSelectedFileIds(filePayload.items.slice(0, 5).map((item) => item.asset_id));
+    setSelectedFileIds(
+      filePayload.items.slice(0, maxFilesPerRun).map((item) => item.asset_id),
+    );
     setMemories(memoryPayload.items);
     setMemoryCandidates(candidatePayload.items);
     setTodos(todoItems);
@@ -364,12 +418,29 @@ export default function XpertChatPage() {
 
   async function handleFileUpload(file: File) {
     if (!xpert || !conversationId) return;
+    if (!fileUploadEnabled) {
+      setError("当前发布版本未启用会话文件。");
+      return;
+    }
+    if (selectedFileIds.length >= maxFilesPerRun) {
+      setError(`当前发布版本每次最多选择 ${maxFilesPerRun} 个文件。`);
+      return;
+    }
+    const extension = file.name.includes(".")
+      ? `.${file.name.split(".").pop()?.toLowerCase()}`
+      : "";
+    if (!allowedFileExtensions.includes(extension)) {
+      setError(`当前发布版本仅允许：${allowedFileExtensions.join(", ")}`);
+      return;
+    }
     setUploading(true);
     setError("");
     try {
       const uploaded = await uploadXpertFile(xpert.id, conversationId, file);
       await refreshContext();
-      setSelectedFileIds((current) => [...current, uploaded.asset_id].slice(-5));
+      setSelectedFileIds((current) => (
+        [...current, uploaded.asset_id].slice(-maxFilesPerRun)
+      ));
       setShowContext(true);
       setShowTrace(false);
     } catch (caught) {
@@ -377,6 +448,46 @@ export default function XpertChatPage() {
     } finally {
       setUploading(false);
       if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  }
+
+  async function handleAudioTranscription(file: File) {
+    if (!xpert || !version || !audioCapabilities?.speech_to_text.enabled) return;
+    setTranscribing(true);
+    setError("");
+    try {
+      const payload = await transcribeXpertAudio(xpert.id, version, file);
+      setInput((current) => [current.trim(), payload.text.trim()].filter(Boolean).join("\n"));
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "语音转写失败");
+    } finally {
+      setTranscribing(false);
+      if (audioInputRef.current) audioInputRef.current.value = "";
+    }
+  }
+
+  async function speakMessage(message: XpertConversationMessage, index: number) {
+    if (!xpert || !version || !audioCapabilities?.text_to_speech.enabled) return;
+    const messageId = message.message_id || `assistant-${index}`;
+    setSpeakingMessageId(messageId);
+    setError("");
+    try {
+      const blob = await synthesizeXpertSpeech(xpert.id, version, message.content);
+      const url = URL.createObjectURL(blob);
+      const audio = new Audio(url);
+      audio.addEventListener("ended", () => {
+        URL.revokeObjectURL(url);
+        setSpeakingMessageId("");
+      }, { once: true });
+      audio.addEventListener("error", () => {
+        URL.revokeObjectURL(url);
+        setSpeakingMessageId("");
+        setError("语音播放失败");
+      }, { once: true });
+      await audio.play();
+    } catch (caught) {
+      setSpeakingMessageId("");
+      setError(caught instanceof Error ? caught.message : "语音合成失败");
     }
   }
 
@@ -563,7 +674,7 @@ export default function XpertChatPage() {
           messages: history,
           version,
           conversation_id: conversationId,
-          file_asset_ids: selectedFileIds,
+          file_asset_ids: fileUploadEnabled ? selectedFileIds : [],
         }),
       });
       if (!response.ok) throw new Error(await responseError(response));
@@ -577,6 +688,8 @@ export default function XpertChatPage() {
       let nextTaskId = "";
       let approvalPending = false;
       let clientToolPending = false;
+      let finalSuggestions: string[] = [];
+      let finalConversationTitle = "";
 
       const processBlock = (block: string) => {
         for (const line of block.split(/\r?\n/)) {
@@ -595,6 +708,8 @@ export default function XpertChatPage() {
           }
           if (event.event === "workflow_end") {
             finalOutput = event.final_output || "";
+            finalSuggestions = Array.isArray(event.suggestions) ? event.suggestions : [];
+            finalConversationTitle = event.conversation_title || "";
           }
           if (event.event === "runtime_approval_pending") {
             approvalPending = true;
@@ -621,8 +736,19 @@ export default function XpertChatPage() {
       if (!approvalPending && !clientToolPending) {
         setMessages((current) => [
           ...current,
-          { role: "assistant", content: finalOutput || "运行完成，但没有返回文本输出。" },
+          {
+            role: "assistant",
+            content: finalOutput || "运行完成，但没有返回文本输出。",
+            suggestions: finalSuggestions,
+          },
         ]);
+        if (finalConversationTitle) {
+          setConversations((current) => current.map((item) => (
+            item.conversation_id === conversationId
+              ? { ...item, title: finalConversationTitle }
+              : item
+          )));
+        }
       }
       if (nextRunId) await loadTrace(nextRunId, nextTaskId);
       window.setTimeout(() => void refreshContext(), 800);
@@ -652,6 +778,8 @@ export default function XpertChatPage() {
       let approvalPending = false;
       let clientToolPending = false;
       let nextRunId = runId;
+      let finalSuggestions: string[] = [];
+      let finalConversationTitle = "";
       setEvents([]);
 
       const processBlock = (block: string) => {
@@ -665,7 +793,11 @@ export default function XpertChatPage() {
             nextRunId = event.run_id;
             setRunId(event.run_id);
           }
-          if (event.event === "workflow_end") finalOutput = event.final_output || "";
+          if (event.event === "workflow_end") {
+            finalOutput = event.final_output || "";
+            finalSuggestions = Array.isArray(event.suggestions) ? event.suggestions : [];
+            finalConversationTitle = event.conversation_title || "";
+          }
           if (event.event === "runtime_approval_pending") approvalPending = true;
           if (event.event === "client_tool_waiting") clientToolPending = true;
           if (event.event === "error") throw new Error(event.message || "Xpert 恢复执行失败");
@@ -685,7 +817,17 @@ export default function XpertChatPage() {
       }
       if (buffer.trim()) processBlock(buffer);
       if (!approvalPending && !clientToolPending && finalOutput) {
-        setMessages((current) => [...current, { role: "assistant", content: finalOutput }]);
+        setMessages((current) => [
+          ...current,
+          { role: "assistant", content: finalOutput, suggestions: finalSuggestions },
+        ]);
+        if (finalConversationTitle) {
+          setConversations((current) => current.map((item) => (
+            item.conversation_id === conversationId
+              ? { ...item, title: finalConversationTitle }
+              : item
+          )));
+        }
       }
       if (nextRunId) await loadTrace(nextRunId, taskId);
       window.setTimeout(() => void refreshContext(), 800);
@@ -698,7 +840,7 @@ export default function XpertChatPage() {
 
   function openGoalComposer() {
     const lastUserMessage = [...messages].reverse().find((message) => message.role === "user");
-    const objective = lastUserMessage?.content || input.trim() || xpert?.starters[0] || "";
+    const objective = lastUserMessage?.content || input.trim() || openingQuestions[0] || "";
     setGoalTitle(objective ? `长期目标：${objective.slice(0, 36)}` : `长期目标：${xpert?.name ?? "Xpert"}`);
     setGoalObjective(objective);
     setPlannerXpertId(xpert?.id ?? publishedXperts[0]?.id ?? "");
@@ -716,7 +858,7 @@ export default function XpertChatPage() {
         planner_xpert_id: plannerXpertId,
         source_xpert_id: xpert.id,
         source_conversation_id: conversationId,
-        file_asset_ids: selectedFileIds,
+        file_asset_ids: fileUploadEnabled ? selectedFileIds : [],
         messages: messages.slice(-20),
         max_parallel: 2,
       });
@@ -833,10 +975,12 @@ export default function XpertChatPage() {
             {messages.length === 0 ? (
               <div className="mx-auto max-w-2xl py-10 text-center">
                 <h2 className="text-xl font-semibold text-white">开始与 {xpert.name} 协作</h2>
-                <p className="mt-2 text-sm leading-6 text-slate-400">{xpert.description || "这个 Xpert 将运行已发布的工作流版本。"}</p>
-                {xpert.starters.length > 0 ? (
+                <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-slate-400">
+                  {openingMessage || xpert.description || "这个 Xpert 将运行已发布的工作流版本。"}
+                </p>
+                {openingQuestions.length > 0 ? (
                   <div className="mt-6 grid gap-2 sm:grid-cols-2">
-                    {xpert.starters.map((starter) => (
+                    {openingQuestions.map((starter) => (
                       <button className="rounded-lg border border-white/10 bg-white/[0.04] p-3 text-left text-sm leading-5 text-slate-300 transition hover:border-hire-300/35 hover:bg-hire-300/10 hover:text-hire-100" key={starter} onClick={() => void sendMessage(starter)} type="button">{starter}</button>
                     ))}
                   </div>
@@ -849,13 +993,41 @@ export default function XpertChatPage() {
                     <p className="text-[10px] font-semibold uppercase text-slate-500">{roleCopy(message.role)}</p>
                     {message.role === "assistant" ? <DataXResultCard content={message.content} /> : null}
                     <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-slate-100">{message.content}</p>
-                    <button
-                      className="mt-2 text-[10px] font-semibold text-cyan-200/75 transition hover:text-cyan-100"
-                      onClick={() => void rememberMessage(message)}
-                      type="button"
-                    >
-                      {"\u8bb0\u4f4f\u8fd9\u6761"}
-                    </button>
+                    <div className="mt-2 flex flex-wrap items-center gap-3">
+                      <button
+                        className="text-[10px] font-semibold text-cyan-200/75 transition hover:text-cyan-100"
+                        onClick={() => void rememberMessage(message)}
+                        type="button"
+                      >
+                        {"\u8bb0\u4f4f\u8fd9\u6761"}
+                      </button>
+                      {message.role === "assistant" && audioCapabilities?.text_to_speech.enabled ? (
+                        <button
+                          className="text-[10px] font-semibold text-violet-200/75 transition hover:text-violet-100 disabled:opacity-50"
+                          disabled={Boolean(speakingMessageId)}
+                          onClick={() => void speakMessage(message, index)}
+                          type="button"
+                        >
+                          {speakingMessageId === (message.message_id || `assistant-${index}`)
+                            ? "生成语音中..."
+                            : "播放"}
+                        </button>
+                      ) : null}
+                    </div>
+                    {message.role === "assistant" && message.suggestions?.length ? (
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        {message.suggestions.map((suggestion) => (
+                          <button
+                            className="rounded-md border border-white/10 bg-white/[0.035] px-2.5 py-1.5 text-left text-[11px] text-slate-300 transition hover:border-hire-300/30 hover:text-hire-100"
+                            key={suggestion}
+                            onClick={() => void sendMessage(suggestion)}
+                            type="button"
+                          >
+                            {suggestion}
+                          </button>
+                        ))}
+                      </div>
+                    ) : null}
                   </article>
                 ))}
                 {running ? (
@@ -919,7 +1091,7 @@ export default function XpertChatPage() {
             ) : null}
             <div className="flex items-end gap-2">
               <input
-                accept=".txt,.md,.markdown,.pdf"
+                accept={fileAccept}
                 className="hidden"
                 onChange={(event) => {
                   const file = event.target.files?.[0];
@@ -928,14 +1100,38 @@ export default function XpertChatPage() {
                 ref={fileInputRef}
                 type="file"
               />
-              <button
-                className="h-12 rounded-lg border border-white/10 bg-white/[0.04] px-3 text-xs font-semibold text-slate-300 hover:bg-white/[0.08] disabled:opacity-50"
-                disabled={running || uploading || !conversationId}
-                onClick={() => fileInputRef.current?.click()}
-                type="button"
-              >
-                {uploading ? "\u4e0a\u4f20\u4e2d..." : "\u9644\u4ef6"}
-              </button>
+              {fileUploadEnabled ? (
+                <button
+                  className="h-12 rounded-lg border border-white/10 bg-white/[0.04] px-3 text-xs font-semibold text-slate-300 hover:bg-white/[0.08] disabled:opacity-50"
+                  disabled={running || uploading || !conversationId || selectedFileIds.length >= maxFilesPerRun}
+                  onClick={() => fileInputRef.current?.click()}
+                  title={`允许 ${allowedFileExtensions.join(", ")}，每次最多 ${maxFilesPerRun} 个`}
+                  type="button"
+                >
+                  {uploading ? "\u4e0a\u4f20\u4e2d..." : "\u9644\u4ef6"}
+                </button>
+              ) : null}
+              <input
+                accept="audio/*"
+                className="hidden"
+                onChange={(event) => {
+                  const file = event.target.files?.[0];
+                  if (file) void handleAudioTranscription(file);
+                }}
+                ref={audioInputRef}
+                type="file"
+              />
+              {audioCapabilities?.speech_to_text.enabled ? (
+                <button
+                  className="h-12 rounded-lg border border-violet-300/20 bg-violet-300/[0.07] px-3 text-xs font-semibold text-violet-100 hover:bg-violet-300/[0.12] disabled:opacity-50"
+                  disabled={running || transcribing || !audioCapabilities.gateway_configured}
+                  onClick={() => audioInputRef.current?.click()}
+                  title={audioCapabilities.gateway_configured ? "上传音频并转写" : "模型网关尚未配置"}
+                  type="button"
+                >
+                  {transcribing ? "转写中..." : "语音"}
+                </button>
+              ) : null}
               <textarea className="min-h-12 flex-1 resize-none rounded-lg border border-white/10 bg-white/[0.055] px-3 py-3 text-sm leading-6 text-white outline-none focus:border-hire-300/60" disabled={running} onChange={(event) => setInput(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void sendMessage(); } }} placeholder="输入任务，Enter 发送，Shift+Enter 换行" rows={2} value={input} />
               <button className="h-12 rounded-lg bg-hire-300 px-5 text-sm font-semibold text-ink-950 transition hover:bg-hire-200 disabled:cursor-not-allowed disabled:opacity-50" disabled={running || !input.trim()} onClick={() => void sendMessage()} type="button">{running ? "执行中" : "发送"}</button>
             </div>
@@ -975,18 +1171,25 @@ export default function XpertChatPage() {
               <section>
                 <div className="flex items-center justify-between">
                   <h3 className="text-xs font-semibold text-white">{"\u4f1a\u8bdd\u9644\u4ef6"}</h3>
-                  <span className="text-[10px] text-slate-500">{files.length} / 20</span>
+                  <span className="text-[10px] text-slate-500">
+                    {selectedFileIds.length} / {maxFilesPerRun} 本次选择
+                  </span>
                 </div>
-                <p className="mt-1 text-[10px] leading-4 text-slate-500">{"\u6bcf\u6b21\u6700\u591a\u9009\u62e9 5 \u4e2a\u6587\u4ef6\u8fdb\u5165 Xpert \u4e0a\u4e0b\u6587\u3002"}</p>
+                <p className="mt-1 text-[10px] leading-4 text-slate-500">
+                  {fileUploadEnabled
+                    ? `当前版本每次最多选择 ${maxFilesPerRun} 个文件；允许 ${allowedFileExtensions.join(", ")}。`
+                    : "当前发布版本未启用文件能力。"}
+                </p>
                 <div className="mt-2 space-y-2">
                   {files.length ? files.map((file) => (
                     <div className="flex items-start gap-2 rounded-lg border border-white/10 bg-white/[0.035] p-2.5" key={file.asset_id}>
                       <input
                         checked={selectedFileIds.includes(file.asset_id)}
                         className="mt-1"
+                        disabled={!fileUploadEnabled}
                         onChange={(event) => setSelectedFileIds((current) => {
                           if (!event.target.checked) return current.filter((item) => item !== file.asset_id);
-                          if (current.includes(file.asset_id) || current.length >= 5) return current;
+                          if (current.includes(file.asset_id) || current.length >= maxFilesPerRun) return current;
                           return [...current, file.asset_id];
                         })}
                         type="checkbox"
@@ -1020,7 +1223,7 @@ export default function XpertChatPage() {
                     </select>
                     <button
                       className="inline-flex shrink-0 items-center gap-1.5 rounded-md bg-hire-300 px-2.5 py-1.5 text-[11px] font-semibold text-ink-950 transition hover:bg-hire-200 disabled:cursor-not-allowed disabled:opacity-50"
-                      disabled={promotingFiles || selectedFileIds.length === 0 || !knowledgeTargetId}
+                      disabled={!fileUploadEnabled || promotingFiles || selectedFileIds.length === 0 || !knowledgeTargetId}
                       onClick={() => void promoteSelectedFilesToKnowledge()}
                       type="button"
                     >

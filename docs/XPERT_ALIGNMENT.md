@@ -1,5 +1,19 @@
 # Xpert 对齐总纲
 
+## 2026-07-23 增量：XPERT-AGENT-FEATURES-02D
+
+Toolset 收尾路线的 Agent Features 已进入真实执行闭环：
+
+- Xpert 草稿与不可变发布版本现固定开场白、starter questions、问题建议、会话标题、会话摘要、记忆回复、文件上传和 TTS/STT 配置；草稿修改不影响既有发布版本。
+- Xpert Chat 按当前发布版本展示开场白与建议问题，模型回答后可生成下一轮问题建议，并在首轮回答后生成会话标题。生成失败均 fail-soft，不影响主回答。
+- 会话摘要复用 `context_compression`，只对输出 Agent 编译隐式中间件；原消息不被改写，摘要 revision 和覆盖边界继续持久化。
+- 文件能力按版本限制开关、扩展名与单轮数量。附件仍属于会话，关闭文件能力时不会注入运行或 Goal，也不能误触候选知识构建。
+- 高置信记忆回复只使用当前 Xpert/会话允许访问的受限记忆；命中不足时继续正常模型执行，不把低置信结果伪装成回答。
+- TTS/STT 显式选择模型注册表中的 speech/transcription 模型，通过现有 OpenAI 兼容网关调用；不硬编码供应商 SDK，网关未配置时返回可操作错误。
+- `XpertAgentConfig.max_concurrency` 与 `recursion_limit` 是整个 Xpert 执行树的全局预算；`maxToolConcurrency`、`maxToolCalls`、`maxToolDepth` 和 `maxIterations` 仍是单个 Agent 工具循环的局部护栏。
+
+下一轮进入 `XPERT-PLUGIN-PROMPT-03`，完成可信本地插件清单与版本化 Prompt Profile 后冻结剩余 Xpert 对齐，转入 EvoAgentX 审计。企业 Provider 治理、远程市场和任意 Code Toolset 继续延期。
+
 ## 2026-07-23 增量：XPERT-TOOLSET-SEMANTICS-02C
 
 Toolset 已从“可连接、可发布”推进到真实影响 Agent 行为的统一工具语义：
@@ -283,9 +297,9 @@ EvoAgentX 曾只作为 `goal -> sub_tasks -> inferred edges` 的历史参考。X
 | Agent Task | 部分实现 | AgentTask API、MetaAgent 任务工作台、workflow `agent_task` 节点、可选文件持久化、Goal 步骤派发 | 单进程文件 Store，不是分布式任务队列 | 为文件与记忆任务补安全上下文 |
 | Handoff | 部分实现 | Handoff API、workflow `agent_handoff`、`handoff_router`、人工 Inbox、目标 Xpert 自动执行、同步结果回传、重试、死信与 Goal 协作 | 仅显式 `xpert:` 目标自动执行；单进程 lease，不做分布式调度 | 扩展文件与记忆上下文传递 |
 | RunRegistry / Trace | 部分实现 | workflow/xpert/chat/goal/agent_task/agent_handoff run、checkpoint、workflow/chat/Xpert/Goal 观测与 `/runtime` 运维总览 | 内存态，可观测索引，不是调度器；Goal 重启恢复会创建 recovery run | 为文件、记忆与知识执行提供护栏 |
-| Workflow Agent | 部分实现 | `workflow_agent` 节点、模型执行、Runtime Toolset、文件理解、结构化输出、类型化记忆召回/候选写回、失败重试、备用模型、异常策略、有界并行工具调用和调用/嵌套预算 | 轻量 JSON 决策，不是 function calling；并行仅允许安全只读工具 | `XPERT-AGENT-FEATURES-02D` |
+| Workflow Agent | 部分实现 | `workflow_agent` 节点、模型执行、Runtime Toolset、文件理解、结构化输出、类型化记忆召回/候选写回、失败重试、备用模型、异常策略、有界并行工具调用、全局执行预算和版本化会话功能 | 轻量 JSON 决策，不是 function calling；并行仅允许安全只读工具；音频依赖兼容网关 | `XPERT-PLUGIN-PROMPT-03` |
 | Chat Toolset | 部分实现 | `/api/chat` 可选 MCP 工具模式，chat run 与 checkpoint | 默认关闭，不改变普通聊天；无自动 handoff | 补工具偏好、安全提示和观测 UI |
-| Toolset / MCP / API | 部分实现 | `/toolsets` 支持 MCP、OpenAPI 3.x、OData v4、Tavily 与 Todo；具备加密凭据、受控执行、工具 Schema/语义/测试、漂移诊断、不可变发布、Agent 绑定、有界并行、Tool Memory 和受控 App 只读开放 | 远程 ref、multipart、OData batch、任意 Code Toolset、企业 Provider 治理和浏览器 OAuth 暂缓 | `XPERT-AGENT-FEATURES-02D` |
+| Toolset / MCP / API | 部分实现 | `/toolsets` 支持 MCP、OpenAPI 3.x、OData v4、Tavily 与 Todo；具备加密凭据、受控执行、工具 Schema/语义/测试、漂移诊断、不可变发布、Agent 绑定、有界并行、Tool Memory 和受控 App 只读开放 | 远程 ref、multipart、OData batch、任意 Code Toolset、企业 Provider 治理和浏览器 OAuth 暂缓 | 完成 Prompt/Plugin 收尾后冻结 |
 | Plugin / Skill | 部分实现 | `/skills`、安装运行时、Workspace Skill 草稿、审批后显式安装、Sandbox staging 与显式 Skill Plugin Hooks | Agent 只能提案；草稿安装不会覆盖既有 Skill；Hook 仅支持离线 manifest，不提供组织权限 | 基于真实 Skill 草稿与 Hook 使用反馈收敛协议 |
 | Knowledge Pipeline | 已实现 | FileAsset/Artifact/Chunk/CitationAnchor、结构感知 Processor、General/QA/Summary、可执行 Graph、逐文档/逐视觉页恢复、图片与扫描 PDF 的 OCR/VLM、版本化 ingestion job、递归与父子分块、向量/FTS5 双索引、混合检索、Rerank、离线评估、Promotion Gate、Knowledge Toolset、审批写入、预览、激活/回滚 | 成熟 RAG 基础闭环完成；仍为本地单进程 worker，旧上传保留 legacy index；评估标签需人工维护；图片向量、版面坐标与 GraphRAG 暂缓 | 真实使用反馈与技术债审计 |
 | Prompt / Slash Command | 下一步 | 仅有提示词资源页雏形和聊天 prompt 使用 | 尚无版本化 Prompt Profile、Agent 绑定和 slash command | `XPERT-PLUGIN-PROMPT-03` 后冻结 Xpert 对齐 |
