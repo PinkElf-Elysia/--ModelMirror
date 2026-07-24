@@ -1016,6 +1016,31 @@ def validate_node_configuration(
                     )
                 )
 
+        tool_budget_fields = (
+            ("maxToolConcurrency", 1, 8),
+            ("maxToolCalls", 1, 50),
+            ("maxToolDepth", 1, 4),
+        )
+        for field_name, minimum, maximum in tool_budget_fields:
+            raw_value = str(data.get(field_name) or "").strip()
+            if not raw_value:
+                continue
+            try:
+                parsed_value = int(raw_value)
+            except ValueError:
+                parsed_value = minimum - 1
+            if parsed_value < minimum or parsed_value > maximum:
+                issues.append(
+                    ValidationIssue(
+                        code=f"invalid_workflow_agent_{field_name}",
+                        message=(
+                            f"Workflow agent {field_name} must be between "
+                            f"{minimum} and {maximum}."
+                        ),
+                        node_id=node.id,
+                    )
+                )
+
         output_variable = str(data.get("outputVariable") or "").strip()
         if not output_variable:
             issues.append(

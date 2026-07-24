@@ -295,6 +295,9 @@ function createNodeData(
       disableOutput: "false",
       enableFileUnderstanding: "false",
       parallelToolCalls: "false",
+      maxToolConcurrency: "2",
+      maxToolCalls: "12",
+      maxToolDepth: "4",
       retryOnFailure: "false",
       fallbackModelId: "",
       exceptionHandling: "none",
@@ -325,6 +328,9 @@ function createNodeData(
       disableOutput: "false",
       enableFileUnderstanding: "false",
       parallelToolCalls: "false",
+      maxToolConcurrency: "2",
+      maxToolCalls: "12",
+      maxToolDepth: "4",
       retryOnFailure: "false",
       fallbackModelId: "",
       exceptionHandling: "none",
@@ -982,7 +988,7 @@ function AgentStudioPanel({
           />
           <ConfigSwitch
             checked={workflowBooleanValue(data.parallelToolCalls)}
-            description="为后续并行工具调度预留。"
+            description="仅并行执行只读、可并行且无需审批的工具。"
             label="并行工具调用"
             onChange={(checked) =>
               setStringBoolean("parallelToolCalls", checked)
@@ -1222,6 +1228,49 @@ function AgentStudioPanel({
                 value={data.maxIterations ?? "5"}
               />
             </Field>
+            {isWorkflowAgent ? (
+              <div className="grid gap-3 sm:grid-cols-3">
+                <Field label="最大并发">
+                  <input
+                    className={textInputClass()}
+                    inputMode="numeric"
+                    max={8}
+                    min={1}
+                    onChange={(event) =>
+                      update({ maxToolConcurrency: event.target.value })
+                    }
+                    type="number"
+                    value={data.maxToolConcurrency ?? "2"}
+                  />
+                </Field>
+                <Field label="总调用预算">
+                  <input
+                    className={textInputClass()}
+                    inputMode="numeric"
+                    max={50}
+                    min={1}
+                    onChange={(event) =>
+                      update({ maxToolCalls: event.target.value })
+                    }
+                    type="number"
+                    value={data.maxToolCalls ?? "12"}
+                  />
+                </Field>
+                <Field label="嵌套深度">
+                  <input
+                    className={textInputClass()}
+                    inputMode="numeric"
+                    max={4}
+                    min={1}
+                    onChange={(event) =>
+                      update({ maxToolDepth: event.target.value })
+                    }
+                    type="number"
+                    value={data.maxToolDepth ?? "4"}
+                  />
+                </Field>
+              </div>
+            ) : null}
           </>
         ) : (
           <p className="rounded-lg border border-dashed border-white/15 bg-white/[0.035] px-3 py-3 text-xs leading-5 text-slate-400">

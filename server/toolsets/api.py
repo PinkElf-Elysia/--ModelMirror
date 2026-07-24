@@ -51,7 +51,7 @@ def _error(exc: Exception) -> HTTPException:
 
 
 class ToolsetCreateRequest(BaseModel):
-    kind: Literal["mcp", "openapi", "odata"] = "mcp"
+    kind: Literal["mcp", "openapi", "odata", "builtin"] = "mcp"
     name: str = Field(min_length=1, max_length=160)
     description: str = Field(default="", max_length=2000)
     tags: list[str] = Field(default_factory=list, max_length=20)
@@ -98,6 +98,13 @@ class CredentialRotateRequest(BaseModel):
     value: str = Field(min_length=1, max_length=20_000)
 
 
+class ProviderInstanceCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+    description: str = Field(default="", max_length=2000)
+    credential_id: str = Field(default="", max_length=160)
+    tags: list[str] = Field(default_factory=list, max_length=20)
+
+
 @router.get("/api/toolsets")
 async def list_toolsets(status: str | None = None) -> dict[str, Any]:
     service = get_toolset_service()
@@ -108,6 +115,49 @@ async def list_toolsets(status: str | None = None) -> dict[str, Any]:
             for item in service.store.list_toolsets(status=status)
         ],
     }
+
+
+@router.get("/api/toolsets/providers")
+async def list_builtin_toolset_providers() -> dict[str, Any]:
+    return {
+        "version": "modelmirror-builtin-tool-providers-v1",
+        "providers": get_toolset_service().builtin_providers.list_providers(),
+    }
+
+
+@router.post(
+    "/api/toolsets/providers/{provider_id}/instances",
+    status_code=201,
+)
+async def create_builtin_provider_instance(
+    provider_id: str,
+    request: ProviderInstanceCreateRequest,
+) -> dict[str, Any]:
+    try:
+        service = get_toolset_service()
+        provider = service.builtin_providers.get_provider(provider_id)
+        if not provider.get("instance_creatable"):
+            raise ToolsetValidationError(
+                "This builtin Provider is available through its existing Runtime binding."
+            )
+        if provider.get("credential_required") and not request.credential_id:
+            raise ToolsetValidationError("A Provider credential is required.")
+        item = service.store.create_toolset(
+            name=request.name,
+            kind="builtin",
+            description=request.description,
+            tags=request.tags,
+            connection={
+                "provider_id": provider_id,
+                "provider_credential_id": request.credential_id,
+                "timeout_seconds": 30,
+                "response_limit_bytes": 2 * 1024 * 1024,
+            },
+        )
+        item = await service.connect(item.id)
+        return item.model_dump(mode="json")
+    except Exception as exc:
+        raise _error(exc) from exc
 
 
 @router.post("/api/toolsets", status_code=201)

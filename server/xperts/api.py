@@ -169,16 +169,21 @@ def _prepare_published_resource_snapshot(
                 data["versionPolicy"] = "pinned"
                 data["pinnedVersion"] = version_number
                 node.data = data
-                mutating_names = []
+                mutating_approval_names: list[str] = []
+                sensitive_approval_names: list[str] = []
                 prefix = version.connection.tool_prefix
                 for tool in version.tools:
-                    if tool.read_only or not tool.requires_approval:
+                    if not (tool.requires_approval or tool.sensitive):
                         continue
                     exposed_name = tool.exposed_name
-                    mutating_names.append(
+                    resolved_name = (
                         f"{prefix}_{exposed_name}" if prefix else exposed_name
                     )
-                if mutating_names:
+                    if tool.requires_approval:
+                        mutating_approval_names.append(resolved_name)
+                    if tool.sensitive:
+                        sensitive_approval_names.append(resolved_name)
+                if mutating_approval_names or sensitive_approval_names:
                     binding = next(
                         (
                             edge
@@ -193,19 +198,39 @@ def _prepare_published_resource_snapshot(
                         if binding is not None
                         else set()
                     )
-                    uncovered = sorted(
+                    uncovered_mutating = sorted(
                         name
-                        for name in mutating_names
+                        for name in mutating_approval_names
                         if "*" not in rules and name not in rules
                     )
-                    if uncovered:
+                    uncovered_sensitive = sorted(
+                        name
+                        for name in sensitive_approval_names
+                        if "*" not in rules and name not in rules
+                    )
+                    if uncovered_mutating:
                         issues.append(
                             ValidationIssue(
                                 code="xpert_toolset_mutating_hitl_required",
                                 message=(
-                                    "Mutating API Toolset operations require "
+                                    "Mutating or approval-required Toolset operations require "
                                     "human_in_the_loop coverage: "
-                                    + ", ".join(uncovered)
+                                    + ", ".join(uncovered_mutating)
+                                ),
+                                node_id=node.id,
+                            )
+                        )
+                    sensitive_only = sorted(
+                        set(uncovered_sensitive) - set(uncovered_mutating)
+                    )
+                    if sensitive_only:
+                        issues.append(
+                            ValidationIssue(
+                                code="xpert_toolset_sensitive_hitl_required",
+                                message=(
+                                    "Sensitive Toolset operations require "
+                                    "human_in_the_loop coverage: "
+                                    + ", ".join(sensitive_only)
                                 ),
                                 node_id=node.id,
                             )
@@ -692,6 +717,52 @@ async def get_xpert_conversation(xpert_id: str, conversation_id: str) -> dict:
         store = get_xpert_context_store()
         item = await asyncio.to_thread(store.get_conversation, xpert_id, conversation_id)
         return store.conversation_payload(item, include_messages=True)
+    except XpertContextError as exc:
+        _raise_context_error(exc)
+
+
+@router.get("/{xpert_id}/conversations/{conversation_id}/tool-memory")
+async def list_xpert_conversation_tool_memory(
+    xpert_id: str,
+    conversation_id: str,
+    limit: int = Query(default=50, ge=1, le=100),
+) -> dict:
+    await _ensure_xpert_exists(xpert_id)
+    try:
+        store = get_xpert_context_store()
+        items = await asyncio.to_thread(
+            store.list_tool_memories,
+            xpert_id,
+            conversation_id,
+            limit=limit,
+        )
+        return {
+            "version": "xpert-tool-memory-v1",
+            "items": [store.tool_memory_payload(item) for item in items],
+            "total": len(items),
+        }
+    except XpertContextError as exc:
+        _raise_context_error(exc)
+
+
+@router.delete(
+    "/{xpert_id}/conversations/{conversation_id}/tool-memory/{memory_id}"
+)
+async def archive_xpert_conversation_tool_memory(
+    xpert_id: str,
+    conversation_id: str,
+    memory_id: str,
+) -> dict:
+    await _ensure_xpert_exists(xpert_id)
+    try:
+        store = get_xpert_context_store()
+        item = await asyncio.to_thread(
+            store.archive_tool_memory,
+            xpert_id,
+            conversation_id,
+            memory_id,
+        )
+        return store.tool_memory_payload(item)
     except XpertContextError as exc:
         _raise_context_error(exc)
 

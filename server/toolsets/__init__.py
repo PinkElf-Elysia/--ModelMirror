@@ -16,6 +16,7 @@ from .service import (
     PublishedToolsetProvider,
     ToolsetService,
 )
+from .providers import BuiltinToolProviderRegistry
 from .store import (
     ToolsetConflictError,
     ToolsetNotFoundError,
@@ -26,6 +27,7 @@ from .store import (
 __all__ = [
     "CredentialRecord",
     "CredentialStore",
+    "BuiltinToolProviderRegistry",
     "DraftMCPToolTestProvider",
     "DraftToolsetTestProvider",
     "APIAuthProfile",

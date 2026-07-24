@@ -1,6 +1,8 @@
 # workflow-native 自研工作流设计
 
-> 2026-07-23 Toolset Runtime：`toolset_resource` 已成为真实资源节点，通过 `toolset-binding -> toolset` 绑定单个 `workflow_agent`。节点引用可发布的 MCP、OpenAPI 或 OData Toolset；Xpert 发布时固定具体版本，运行时只暴露版本中启用的工具，并复用 Tool Policy、HITL、Audit 与 checkpoint。绑定边不进入控制流和变量可达性，公开 App 暂时禁止此资源。
+> 2026-07-23 Toolset Semantics：`workflow_agent` 已支持单工具或有界并行 `tools` 决策。并行批次只接受只读、`parallel_safe`、非敏感、非终点工具，并受并发、总调用数、决策轮次和嵌套深度预算约束。固定 Toolset 版本同时保存敏感、终点、Tool Memory 与公共 App 语义；敏感工具必须有 HITL，terminal 成功后直接成为最终输出。SSE 事件类型保持兼容。
+
+> 2026-07-23 Toolset Runtime：`toolset_resource` 已成为真实资源节点，通过 `toolset-binding -> toolset` 绑定单个 `workflow_agent`。节点引用可发布的 MCP、OpenAPI、OData 或内置 Provider Toolset；Xpert 发布时固定具体版本，运行时只暴露版本中启用的工具，并复用 Tool Policy、HITL、Audit 与 checkpoint。绑定边不进入控制流和变量可达性；公开 App 仅允许逐工具显式确认的固定版本安全只读能力。
 
 > 2026-07-22 Resource Nodes：新增 `external_xpert` 与 `knowledge_base`。资源节点通过 `sourceHandle="expert-binding" -> targetHandle="expert"` 或 `sourceHandle="knowledge-binding" -> targetHandle="knowledge"` 绑定单个 `workflow_agent`，不参与控制流、变量可达性或节点调度。发布 Xpert 时外部专家解析为不可变版本；知识库继续读取活动索引。同步专家调用与异步 Handoff 是两套明确语义。
 
@@ -147,7 +149,7 @@ Classic workflow 每次运行会登记一条 `workflow` run，并在 `workflow_m
 
 workflow-native 是模镜自研工作流引擎的渐进式实验线。它不会替换当前稳定的 `/workflow` Dify iframe 入口，也不会改动 `/rag`。当前阶段提供静态图校验能力，并在 classic 运行器中试点少量本地节点执行，让团队先把数据模型、API 契约、错误模型和测试流程立起来。
 
-最后更新日期：2026-07-16
+最后更新日期：2026-07-23
 维护人：模镜团队
 
 ## 2026-07-10 增量：Xpert Handoff 自动执行
@@ -679,7 +681,7 @@ Classic workflow 新增 handoff_router 节点，作为 workflow_agent -> Handoff
 
 当前边界：不是 OpenAI function calling，不自动创建 Handoff，不接真实多 Agent 调度，也不保存完整 prompt、工具输出、模型回答或 API key 到运行元数据中。
 
-最后更新日期：2026-07-16
+最后更新日期：2026-07-23
 
 ## 长期 Goal 调度（2026-07-10）
 

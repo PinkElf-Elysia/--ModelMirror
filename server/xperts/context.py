@@ -32,6 +32,8 @@ MAX_FILES_PER_CONVERSATION = 20
 MAX_SELECTED_FILES = 5
 MAX_EXTRACTED_CHARS = 500_000
 MAX_CONVERSATION_MESSAGES = 200
+MAX_TOOL_MEMORY_CHARS = 8_000
+MAX_TOOL_MEMORIES_PER_CONVERSATION = 100
 
 
 class XpertContextError(Exception):
@@ -144,6 +146,21 @@ class MemoryWriteCandidate:
     error: str | None = None
 
 
+@dataclass(slots=True)
+class XpertToolMemoryRecord:
+    memory_id: str
+    xpert_id: str
+    conversation_id: str
+    tool_name: str
+    provider: str
+    summary: str
+    parameter_summary: dict[str, Any] = field(default_factory=dict)
+    source_run_id: str | None = None
+    status: Literal["active", "archived"] = "active"
+    created_at: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)
+
+
 class XpertContextStore:
     """Atomic file-backed context store for published Xpert conversations."""
 
@@ -165,6 +182,7 @@ class XpertContextStore:
         self._assets: dict[str, XpertFileAsset] = {}
         self._memories: dict[str, XpertMemoryRecord] = {}
         self._candidates: dict[str, MemoryWriteCandidate] = {}
+        self._tool_memories: dict[str, XpertToolMemoryRecord] = {}
         self._load()
 
     def create_conversation(self, xpert_id: str, *, title: str = "") -> XpertConversation:
@@ -946,6 +964,95 @@ class XpertContextStore:
             self._persist_unlocked()
             return candidate
 
+    def create_tool_memory(
+        self,
+        xpert_id: str,
+        conversation_id: str,
+        *,
+        tool_name: str,
+        provider: str,
+        summary: str,
+        arguments: dict[str, Any] | None = None,
+        source_run_id: str | None = None,
+    ) -> XpertToolMemoryRecord:
+        clean_summary = self._required_text(
+            str(summary or "")[:MAX_TOOL_MEMORY_CHARS],
+            "summary",
+            MAX_TOOL_MEMORY_CHARS,
+        )
+        record = XpertToolMemoryRecord(
+            memory_id=f"toolmem_{uuid.uuid4().hex}",
+            xpert_id=self._required_text(xpert_id, "xpert_id", 200),
+            conversation_id=self._required_text(
+                conversation_id,
+                "conversation_id",
+                200,
+            ),
+            tool_name=self._required_text(tool_name, "tool_name", 200),
+            provider=str(provider or "runtime").strip()[:120] or "runtime",
+            summary=clean_summary,
+            parameter_summary=self._redact_tool_arguments(arguments or {}),
+            source_run_id=(str(source_run_id).strip()[:200] if source_run_id else None),
+        )
+        with self._lock:
+            self._require_conversation_unlocked(xpert_id, conversation_id)
+            active = sorted(
+                (
+                    item
+                    for item in self._tool_memories.values()
+                    if item.xpert_id == xpert_id
+                    and item.conversation_id == conversation_id
+                    and item.status == "active"
+                ),
+                key=lambda item: item.created_at,
+            )
+            for stale in active[
+                : max(0, len(active) - MAX_TOOL_MEMORIES_PER_CONVERSATION + 1)
+            ]:
+                stale.status = "archived"
+                stale.updated_at = time.time()
+            self._tool_memories[record.memory_id] = record
+            self._persist_unlocked()
+        return record
+
+    def list_tool_memories(
+        self,
+        xpert_id: str,
+        conversation_id: str,
+        *,
+        limit: int = 50,
+    ) -> list[XpertToolMemoryRecord]:
+        with self._lock:
+            self._require_conversation_unlocked(xpert_id, conversation_id)
+            items = [
+                item
+                for item in self._tool_memories.values()
+                if item.xpert_id == xpert_id
+                and item.conversation_id == conversation_id
+                and item.status == "active"
+            ]
+        items.sort(key=lambda item: (-item.created_at, item.memory_id))
+        return items[: max(1, min(int(limit), 100))]
+
+    def archive_tool_memory(
+        self,
+        xpert_id: str,
+        conversation_id: str,
+        memory_id: str,
+    ) -> XpertToolMemoryRecord:
+        with self._lock:
+            item = self._tool_memories.get(memory_id)
+            if (
+                item is None
+                or item.xpert_id != xpert_id
+                or item.conversation_id != conversation_id
+            ):
+                raise XpertContextNotFoundError("Tool memory not found.")
+            item.status = "archived"
+            item.updated_at = time.time()
+            self._persist_unlocked()
+            return item
+
     @staticmethod
     def conversation_payload(item: XpertConversation, *, include_messages: bool) -> dict[str, Any]:
         payload = asdict(item)
@@ -972,6 +1079,10 @@ class XpertContextStore:
         payload = asdict(item)
         payload["type"] = payload.get("memory_type", "project")
         return payload
+
+    @staticmethod
+    def tool_memory_payload(item: XpertToolMemoryRecord) -> dict[str, Any]:
+        return asdict(item)
 
     def file_memory_index(self, xpert_id: str) -> dict[str, Any]:
         with self._lock:
@@ -1133,6 +1244,9 @@ class XpertContextStore:
             for raw in payload.get("candidates", []):
                 candidate = MemoryWriteCandidate(**raw)
                 self._candidates[candidate.candidate_id] = candidate
+            for raw in payload.get("tool_memories", []):
+                memory = XpertToolMemoryRecord(**raw)
+                self._tool_memories[memory.memory_id] = memory
         except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
             raise XpertContextError(f"Failed to load Xpert context store: {exc}") from exc
 
@@ -1144,6 +1258,9 @@ class XpertContextStore:
             "assets": [asdict(item) for item in self._assets.values()],
             "memories": [asdict(item) for item in self._memories.values()],
             "candidates": [asdict(item) for item in self._candidates.values()],
+            "tool_memories": [
+                asdict(item) for item in self._tool_memories.values()
+            ],
         }
         temporary = self.snapshot_path.with_suffix(
             f".{os.getpid()}.{uuid.uuid4().hex}.tmp"
@@ -1216,6 +1333,31 @@ class XpertContextStore:
     @staticmethod
     def _memory_summary(content: str) -> str:
         return re.sub(r"\s+", " ", content).strip()[:500]
+
+    @classmethod
+    def _redact_tool_arguments(cls, arguments: dict[str, Any]) -> dict[str, Any]:
+        sensitive = re.compile(
+            r"(api.?key|token|secret|password|authorization|cookie|credential)",
+            re.IGNORECASE,
+        )
+
+        def clean(value: Any, key: str = "") -> Any:
+            if key and sensitive.search(key):
+                return "[redacted]"
+            if isinstance(value, dict):
+                return {
+                    str(child_key)[:120]: clean(child_value, str(child_key))
+                    for child_key, child_value in list(value.items())[:40]
+                }
+            if isinstance(value, list):
+                return [clean(item) for item in value[:20]]
+            if isinstance(value, str):
+                return value[:300]
+            if value is None or isinstance(value, (bool, int, float)):
+                return value
+            return str(value)[:300]
+
+        return clean(arguments)
 
     @staticmethod
     def _search_terms(value: str) -> set[str]:

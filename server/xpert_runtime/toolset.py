@@ -17,6 +17,13 @@ class RuntimeTool:
     session_id: str | None = None
     server_id: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    read_only: bool = True
+    requires_approval: bool = False
+    sensitive: bool = False
+    terminal: bool = False
+    memory_mode: str = "off"
+    parallel_safe: bool = False
+    public_app_allowed: bool = False
 
 
 @dataclass(slots=True)
@@ -89,6 +96,9 @@ class MCPToolsetProvider:
                     session_id=_optional_str(record.get("session_id")),
                     server_id=_optional_str(record.get("server_id")),
                     metadata={"registered_at": record.get("registered_at")},
+                    read_only=True,
+                    parallel_safe=False,
+                    public_app_allowed=False,
                 )
             )
         return tools

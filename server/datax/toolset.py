@@ -256,7 +256,19 @@ def _tool(name: str, description: str, properties: dict[str, Any], required: lis
     schema: dict[str, Any] = {"type": "object", "properties": properties}
     if required:
         schema["required"] = required
-    return RuntimeTool(name=name, description=description, input_schema=schema, provider="datax")
+    write_tool = name in {
+        "datax_indicator_propose_create",
+        "datax_indicator_propose_update",
+    }
+    return RuntimeTool(
+        name=name,
+        description=description,
+        input_schema=schema,
+        provider="datax",
+        read_only=not write_tool,
+        memory_mode="run",
+        parallel_safe=not write_tool,
+    )
 
 
 def _list_metadata(value: Any, limit: int) -> list[str]:

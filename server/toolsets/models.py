@@ -6,7 +6,8 @@ from pydantic import BaseModel, Field
 
 
 ToolsetStatus = Literal["draft", "published", "archived"]
-ToolsetKind = Literal["mcp", "openapi", "odata"]
+ToolsetKind = Literal["mcp", "openapi", "odata", "builtin"]
+ToolMemoryMode = Literal["off", "run", "conversation"]
 MCPTransport = Literal["stdio", "streamable_http", "legacy_sse"]
 MCPNetworkPolicy = Literal["public_only", "trusted_private"]
 APIAuthType = Literal[
@@ -67,6 +68,9 @@ class MCPConnectionProfile(BaseModel):
         le=10 * 1024 * 1024,
     )
     redirect_limit: int = Field(default=3, ge=0, le=5)
+    provider_id: str = Field(default="", max_length=120)
+    provider_credential_id: str = Field(default="", max_length=160)
+    provider_config: dict[str, Any] = Field(default_factory=dict)
 
 
 class ToolDefinition(BaseModel):
@@ -82,6 +86,11 @@ class ToolDefinition(BaseModel):
     execution: dict[str, Any] = Field(default_factory=dict)
     read_only: bool = True
     requires_approval: bool = False
+    sensitive: bool = False
+    terminal: bool = False
+    memory_mode: ToolMemoryMode = "off"
+    parallel_safe: bool = False
+    public_app_allowed: bool = False
     compatibility: Literal["compatible", "warning", "breaking"] = "compatible"
     compatibility_message: str = Field(default="", max_length=1000)
 

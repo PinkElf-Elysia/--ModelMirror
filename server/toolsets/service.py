@@ -34,6 +34,7 @@ from .api_compiler import (
     parse_openapi_text,
 )
 from .http_executor import SafeAPIExecutor
+from .providers import BuiltinToolProviderRegistry
 from .models import (
     MCPConnectionProfile,
     ToolDefinition,
@@ -69,12 +70,16 @@ class ToolsetService:
         mcp_manager: MCPClientManager,
         installed_project_resolver: InstalledProjectResolver | None = None,
         api_executor: SafeAPIExecutor | None = None,
+        builtin_providers: BuiltinToolProviderRegistry | None = None,
     ) -> None:
         self.store = store
         self.credentials = credentials
         self.mcp_manager = mcp_manager
         self.installed_project_resolver = installed_project_resolver
         self.api_executor = api_executor or SafeAPIExecutor(credentials)
+        self.builtin_providers = builtin_providers or BuiltinToolProviderRegistry(
+            credentials
+        )
         self._draft_sessions: dict[str, str] = {}
         self._version_sessions: dict[tuple[str, int], str] = {}
         self._version_warnings: dict[tuple[str, int], list[str]] = {}
@@ -88,6 +93,15 @@ class ToolsetService:
         lock = self._locks.setdefault(toolset_id, asyncio.Lock())
         async with lock:
             item = self.store.get_toolset(toolset_id)
+            if item.kind == "builtin":
+                provider_id = item.connection.provider_id.strip()
+                self.builtin_providers.get_provider(provider_id)
+                tools = self.builtin_providers.provider_tools(provider_id)
+                return self.store.replace_discovered_tools(
+                    toolset_id,
+                    tools=tools,
+                    runtime_status="ready",
+                )
             if item.kind != "mcp":
                 if not item.tools or not item.connection.api_base_url:
                     raise ToolsetValidationError(
@@ -226,8 +240,10 @@ class ToolsetService:
             if item.kind == "mcp"
             else item.connection
         )
-        if item.kind != "mcp":
+        if item.kind in {"openapi", "odata"}:
             await self._validate_api_publish(item)
+        elif item.kind == "builtin":
+            self._validate_builtin_publish(item)
         return self.store.publish(
             toolset_id,
             revision=expected_revision,
@@ -272,6 +288,20 @@ class ToolsetService:
         if item.kind == "mcp":
             result = await self.mcp_manager.call_tool(session_id, raw_name, merged)
             return _normalize_result(result, toolset_id=toolset_id, version=None)
+        if item.kind == "builtin":
+            return await self.builtin_providers.call(
+                item.connection.provider_id,
+                raw_name,
+                merged,
+                credential_id=item.connection.provider_credential_id,
+                timeout_seconds=item.connection.timeout_seconds,
+                response_limit_bytes=item.connection.response_limit_bytes,
+                metadata={
+                    **dict(call.metadata),
+                    "todo_scope_type": "workflow",
+                    "todo_scope_id": f"toolset-test:{toolset_id}",
+                },
+            )
         return await self.api_executor.execute(item.connection, tool, merged)
 
     async def autostart(self) -> list[str]:
@@ -380,6 +410,15 @@ class ToolsetService:
                     toolset_id=toolset_id,
                     version=version,
                 )
+            elif snapshot.kind == "builtin":
+                normalized = await self.builtin_providers.call(
+                    snapshot.connection.provider_id,
+                    tool.raw_name,
+                    merged,
+                    credential_id=snapshot.connection.provider_credential_id,
+                    timeout_seconds=snapshot.connection.timeout_seconds,
+                    response_limit_bytes=snapshot.connection.response_limit_bytes,
+                )
             else:
                 normalized = await self.api_executor.execute(
                     snapshot.connection,
@@ -469,6 +508,22 @@ class ToolsetService:
                 + ", ".join(sorted(unsafe))
             )
 
+    def _validate_builtin_publish(self, item: ToolsetDefinition) -> None:
+        provider = self.builtin_providers.get_provider(
+            item.connection.provider_id
+        )
+        if provider.get("credential_required"):
+            credential_id = item.connection.provider_credential_id.strip()
+            if not credential_id:
+                raise ToolsetValidationError(
+                    "Builtin Provider requires a credential reference."
+                )
+            credential = self.credentials.get_public(credential_id)
+            if credential.status != "active":
+                raise ToolsetValidationError(
+                    f"Credential is unavailable: {credential_id}."
+                )
+
     async def _connect_profile(self, profile: Any) -> str:
         profile = self._resolve_installed_project(profile)
         headers: dict[str, str] = {}
@@ -543,6 +598,10 @@ class PublishedToolsetProvider:
 
     def __init__(self, service: ToolsetService) -> None:
         self.service = service
+        self._runtime_delegates: dict[str, Any] = {}
+
+    def register_runtime_delegate(self, provider_id: str, provider: Any) -> None:
+        self._runtime_delegates[str(provider_id or "").strip().lower()] = provider
 
     async def list_tools(
         self,
@@ -572,9 +631,22 @@ class PublishedToolsetProvider:
                             "toolset_raw_name": tool.raw_name,
                             "toolset_exposed_name": tool.exposed_name,
                             "toolset_kind": snapshot.kind,
+                            "provider_id": snapshot.connection.provider_id,
                             "requires_approval": tool.requires_approval,
                             "read_only": tool.read_only,
+                            "sensitive": tool.sensitive,
+                            "terminal": tool.terminal,
+                            "memory_mode": tool.memory_mode,
+                            "parallel_safe": tool.parallel_safe,
+                            "public_app_allowed": tool.public_app_allowed,
                         },
+                        read_only=tool.read_only,
+                        requires_approval=tool.requires_approval,
+                        sensitive=tool.sensitive,
+                        terminal=tool.terminal,
+                        memory_mode=tool.memory_mode,
+                        parallel_safe=tool.parallel_safe,
+                        public_app_allowed=tool.public_app_allowed,
                     )
                 )
         return result
@@ -599,6 +671,29 @@ class PublishedToolsetProvider:
                 code="toolset_scope_denied",
             )
         metadata = matched.metadata
+        provider_id = str(metadata.get("provider_id") or "").strip().lower()
+        delegate = self._runtime_delegates.get(provider_id)
+        if delegate is not None:
+            raw_name = str(metadata["toolset_raw_name"])
+            delegated_tool = await delegate.find_tool(raw_name)
+            if delegated_tool is None:
+                raise RuntimeToolError(
+                    call.tool_name,
+                    "The builtin Runtime Provider no longer exposes this fixed tool.",
+                    code="toolset_schema_drift",
+                )
+            return await delegate.call_tool(
+                RuntimeToolCall(
+                    tool_name=raw_name,
+                    arguments=dict(call.arguments),
+                    metadata={
+                        **dict(call.metadata),
+                        "toolset_id": metadata["toolset_id"],
+                        "toolset_version": metadata["toolset_version"],
+                        "toolset_exposed_name": call.tool_name,
+                    },
+                )
+            )
         return await self.service.call_published_tool(
             toolset_id=str(metadata["toolset_id"]),
             version=int(metadata["toolset_version"]),
@@ -638,6 +733,21 @@ class DraftToolsetTestProvider:
                 code="toolset_scope_denied",
             )
         try:
+            if toolset_kind == "builtin":
+                item = self.service.store.get_toolset(toolset_id)
+                return await self.service.builtin_providers.call(
+                    item.connection.provider_id,
+                    raw_name,
+                    call.arguments,
+                    credential_id=item.connection.provider_credential_id,
+                    timeout_seconds=item.connection.timeout_seconds,
+                    response_limit_bytes=item.connection.response_limit_bytes,
+                    metadata={
+                        **dict(call.metadata),
+                        "todo_scope_type": "workflow",
+                        "todo_scope_id": f"toolset-test:{toolset_id}",
+                    },
+                )
             if toolset_kind != "mcp":
                 item = self.service.store.get_toolset(toolset_id)
                 tool = next(

@@ -911,6 +911,135 @@ async def test_workflow_agent_mcp_tool_mode_uses_runtime_toolset(
 
 
 @pytest.mark.asyncio
+async def test_workflow_agent_executes_safe_parallel_tool_batch_in_decision_order(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider, restore_provider = _install_fake_tool_provider()
+    provider.tools[0].parallel_safe = True
+    provider.tools.append(
+        RuntimeTool(
+            name="lookup",
+            description="Look up test content",
+            input_schema={"type": "object"},
+            read_only=True,
+            parallel_safe=True,
+        )
+    )
+    responses = iter(
+        [
+            json.dumps(
+                {
+                    "tools": [
+                        {"tool": "fetch", "arguments": {"query": "first"}},
+                        {"tool": "lookup", "arguments": {"query": "second"}},
+                    ]
+                }
+            ),
+            '{"answer":"parallel complete"}',
+        ]
+    )
+
+    async def fake_collect_chat_completion_text(*args, **kwargs):
+        return next(responses)
+
+    monkeypatch.setattr(
+        main_module,
+        "get_llm_gateway_config",
+        lambda: ("http://test-gateway.local/v1/chat/completions", "test-key"),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "collect_chat_completion_text",
+        fake_collect_chat_completion_text,
+    )
+    monkeypatch.setattr(main_module, "workflow_mcp_provider", provider)
+    workflow = _workflow_agent_strategy_workflow(
+        {
+            "toolMode": "mcp_tools",
+            "toolNames": "fetch,lookup",
+            "maxIterations": "3",
+            "parallelToolCalls": "true",
+            "maxToolConcurrency": "2",
+            "maxToolCalls": "4",
+        }
+    )
+
+    try:
+        response = await client.post(
+            "/api/workflow/run",
+            json={"workflow": workflow, "inputs": {"user_input": "parallel"}},
+        )
+    finally:
+        restore_provider()
+
+    assert response.status_code == 200, response.text
+    events = _parse_sse_events(response.text)
+    agent_end = next(
+        event
+        for event in events
+        if event.get("event") == "node_end"
+        and event.get("node_id") == "workflow_agent"
+    )
+    assert agent_end["output"] == "parallel complete"
+    assert [call.tool_name for call in provider.calls] == ["fetch", "lookup"]
+
+
+@pytest.mark.asyncio
+async def test_workflow_agent_terminal_tool_ends_without_model_summary(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider, restore_provider = _install_fake_tool_provider()
+    provider.tools[0].terminal = True
+    decisions: list[str] = []
+
+    async def fake_collect_chat_completion_text(*args, **kwargs):
+        decisions.append("called")
+        return '{"tool":"fetch","arguments":{"query":"terminal"}}'
+
+    monkeypatch.setattr(
+        main_module,
+        "get_llm_gateway_config",
+        lambda: ("http://test-gateway.local/v1/chat/completions", "test-key"),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "collect_chat_completion_text",
+        fake_collect_chat_completion_text,
+    )
+    monkeypatch.setattr(main_module, "workflow_mcp_provider", provider)
+    workflow = _workflow_agent_strategy_workflow(
+        {
+            "toolMode": "mcp_tools",
+            "toolNames": "fetch",
+            "maxIterations": "3",
+            "maxToolCalls": "2",
+        }
+    )
+
+    try:
+        response = await client.post(
+            "/api/workflow/run",
+            json={"workflow": workflow, "inputs": {"user_input": "terminal"}},
+        )
+    finally:
+        restore_provider()
+
+    assert response.status_code == 200, response.text
+    events = _parse_sse_events(response.text)
+    agent_end = next(
+        event
+        for event in events
+        if event.get("event") == "node_end"
+        and event.get("node_id") == "workflow_agent"
+    )
+    assert agent_end["output"] == "tool response"
+    assert len(decisions) == 1
+    assert len(provider.calls) == 1
+
+
+@pytest.mark.asyncio
 async def test_workflow_agent_tool_policy_denial_does_not_crash_workflow(
     client: httpx.AsyncClient,
     monkeypatch: pytest.MonkeyPatch,

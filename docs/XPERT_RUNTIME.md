@@ -30,7 +30,7 @@ Private Workflow, Xpert Chat, Goal, and Handoff runs can bind `browser_automatio
 
 Browser sessions, per-session domain grants, idempotent operations, screenshots, and downloads use a file-backed store. Conversation, goal/step, handoff, and workflow task/node scopes remain isolated. Mutating actions require durable HITL coverage; public Xpert App/API deployments reject Browser middleware. API, audit, event, and checkpoint payloads expose only safe metadata. See `docs/XPERT_BROWSER.md`.
 
-Last updated: 2026-07-18
+Last updated: 2026-07-23
 
 ## Purpose
 
@@ -256,7 +256,7 @@ The `datax_indicators` Agent middleware compiles explicit project/model scopes i
 
 ## Versioned MCP And API Toolset Runtime
 
-`ToolsetStore` persists editable MCP, OpenAPI, and OData Toolset definitions plus immutable published versions. A version fixes the transport or API profile, credential references, enabled tools, aliases, default arguments, JSON Schema hashes, prefix, and release metadata. Xpert publication resolves `latest` to a concrete Toolset version; later discovery, import, or draft edits cannot expand an already published Xpert.
+`ToolsetStore` persists editable MCP, OpenAPI, OData, and builtin Provider Toolset definitions plus immutable published versions. A version fixes the transport, API, or Provider profile, credential references, enabled tools, aliases, default arguments, JSON Schema hashes, tool semantics, prefix, and release metadata. Xpert publication resolves `latest` to a concrete Toolset version; later discovery, import, or draft edits cannot expand an already published Xpert.
 
 Stdio profiles accept argv only and run inside the MCP sandbox boundary. Streamable HTTP is the preferred remote transport and legacy SSE remains compatibility-only. Remote transports reject URL credentials and, under the default policy, resolve and block loopback, private, link-local, reserved, multicast, Docker-local, and metadata targets. Reconnect attempts and operation timeouts are bounded.
 
@@ -264,4 +264,16 @@ Secrets are referenced by credential ID. The encrypted credential file never sto
 
 OpenAPI 3.0/3.1 documents are compiled into bounded operation schemas; OData v4 CSDL is compiled into controlled EntitySet reads, key lookup, creates, and supported primitive operations. The executor does not accept caller-supplied URLs or arbitrary HTTP templates. It validates the fixed base URL for every request and redirect, blocks private/reserved targets by default, rejects cross-origin redirects that could leak credentials, and limits timeout, redirects, and response bytes. API Key, Bearer, Basic, and OAuth2 client-credentials authentication resolve encrypted references only at call time.
 
-`toolset_resource` is a non-control binding into `workflow_agent`. The runtime exposes only tools enabled in the fixed version. Calls merge versioned default arguments, validate the resulting object against the fixed JSON Schema, then enter the existing permission policy, durable HITL, audit, middleware, and checkpoint path. Mutating API operations require explicit management-test confirmation and bound HITL coverage in published Xperts; the runtime checks this again before dispatch. A missing tool, a newly required parameter, or changed method/path is a hard Schema-drift condition. Public Xpert Apps continue to reject Toolset resources until the later public tool-policy round.
+`toolset_resource` is a non-control binding into `workflow_agent`. The runtime exposes only tools enabled in the fixed version. Calls merge versioned default arguments, validate the resulting object against the fixed JSON Schema, then enter the existing permission policy, durable HITL, audit, middleware, and checkpoint path. Mutating API operations require explicit management-test confirmation and bound HITL coverage in published Xperts; the runtime checks this again before dispatch. A missing tool, a newly required parameter, or changed method/path is a hard Schema-drift condition.
+
+## Tool Semantics And Builtin Providers
+
+Every fixed Toolset tool now carries conservative runtime semantics: `read_only`, `requires_approval`, `sensitive`, `terminal`, `memory_mode`, `parallel_safe`, and `public_app_allowed`. Sensitive tools require matching HITL coverage even when the normal permission policy allows them. A successful terminal tool returns its bounded output as the Agent answer without another model call.
+
+The builtin registry exposes Tavily and Todo Provider instances. Tavily resolves a credential reference only at dispatch and uses fixed endpoints with bounded timeouts and response sizes. Todo delegates to the existing scope-aware `RuntimeTodoStore`; management tests use an isolated workflow test scope, while published runs retain conversation, Goal, Handoff, Workflow, or App-run scope.
+
+The ReAct-Lite contract accepts one `tool` or an ordered `tools` batch. Parallel execution is limited to read-only, parallel-safe, non-sensitive, non-terminal tools. `maxToolConcurrency`, `maxToolCalls`, `maxToolDepth`, and `maxIterations` bound a run; failures do not cancel already completed siblings and results return in decision order. Each call still receives its own policy, audit, and checkpoint record.
+
+Run memory remains inside one Agent execution. Conversation memory is available only to private Xpert conversations, persists a redacted normalized summary of at most 8 KB, and can be listed or archived through the conversation API. Public App calls always downgrade memory to run scope.
+
+Public Apps may deploy a fixed Toolset only when `allow_tools` is enabled, a Tool Policy is bound, and every enabled tool is read-only, non-sensitive, explicitly public, and not conversation-memory scoped. Provider credentials remain server-side and never enter the manifest or public response.

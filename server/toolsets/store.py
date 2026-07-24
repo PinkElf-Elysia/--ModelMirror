@@ -212,6 +212,33 @@ class ToolsetStore:
                 )
                 candidate.enabled = previous.enabled if previous else False
                 candidate.order = previous.order if previous else index
+                candidate.read_only = (
+                    previous.read_only if previous else candidate.read_only
+                )
+                candidate.requires_approval = (
+                    previous.requires_approval
+                    if previous
+                    else candidate.requires_approval
+                )
+                candidate.sensitive = (
+                    previous.sensitive if previous else candidate.sensitive
+                )
+                candidate.terminal = (
+                    previous.terminal if previous else candidate.terminal
+                )
+                candidate.memory_mode = (
+                    previous.memory_mode if previous else candidate.memory_mode
+                )
+                candidate.parallel_safe = (
+                    previous.parallel_safe
+                    if previous
+                    else candidate.parallel_safe
+                )
+                candidate.public_app_allowed = (
+                    previous.public_app_allowed
+                    if previous
+                    else candidate.public_app_allowed
+                )
                 candidate.schema_hash = self.schema_hash(candidate.input_schema)
                 candidate.discovered_at = now
                 discovered.append(candidate)
@@ -245,7 +272,13 @@ class ToolsetStore:
             "default_arguments",
             "enabled",
             "order",
+            "read_only",
             "requires_approval",
+            "sensitive",
+            "terminal",
+            "memory_mode",
+            "parallel_safe",
+            "public_app_allowed",
         }
         unknown = set(patch) - allowed
         if unknown:
@@ -277,12 +310,58 @@ class ToolsetStore:
                 tool.enabled = bool(patch["enabled"])
             if "order" in patch:
                 tool.order = max(0, min(int(patch["order"]), 10_000))
+            if "read_only" in patch:
+                if item.kind != "mcp":
+                    raise ToolsetValidationError(
+                        "API and builtin Provider tool mutability is fixed by its schema."
+                    )
+                tool.read_only = bool(patch["read_only"])
+                if not tool.read_only:
+                    tool.parallel_safe = False
+                    tool.public_app_allowed = False
             if "requires_approval" in patch:
                 if not tool.read_only and not bool(patch["requires_approval"]):
                     raise ToolsetValidationError(
                         "Mutating API operations must require approval."
                     )
                 tool.requires_approval = bool(patch["requires_approval"])
+            if "sensitive" in patch:
+                tool.sensitive = bool(patch["sensitive"])
+                if tool.sensitive:
+                    tool.requires_approval = True
+            if "terminal" in patch:
+                tool.terminal = bool(patch["terminal"])
+            if "memory_mode" in patch:
+                memory_mode = str(patch["memory_mode"] or "off").strip()
+                if memory_mode not in {"off", "run", "conversation"}:
+                    raise ToolsetValidationError(
+                        "memory_mode must be off, run, or conversation."
+                    )
+                tool.memory_mode = memory_mode  # type: ignore[assignment]
+            if "parallel_safe" in patch:
+                requested = bool(patch["parallel_safe"])
+                if requested and (
+                    not tool.read_only or tool.sensitive or tool.terminal
+                ):
+                    raise ToolsetValidationError(
+                        "Only non-sensitive, non-terminal read-only tools may be parallel safe."
+                    )
+                tool.parallel_safe = requested
+            if "public_app_allowed" in patch:
+                requested = bool(patch["public_app_allowed"])
+                if requested and (
+                    not tool.read_only
+                    or tool.sensitive
+                    or tool.memory_mode == "conversation"
+                ):
+                    raise ToolsetValidationError(
+                        "Public App tools must be read-only, non-sensitive, and not use conversation memory."
+                    )
+                tool.public_app_allowed = requested
+            if tool.sensitive and not tool.requires_approval:
+                raise ToolsetValidationError(
+                    "Sensitive tools must require approval."
+                )
             self._ensure_unique_runtime_names(item.tools)
             item.revision += 1
             item.updated_at = time.time()
@@ -319,12 +398,18 @@ class ToolsetStore:
             items = self._read_unlocked()
             item = self._find_unlocked(items, toolset_id)
             self._check_revision(item, revision)
-            expected_runtime_status = "connected" if item.kind == "mcp" else "ready"
+            expected_runtime_status = (
+                "connected" if item.kind == "mcp" else "ready"
+            )
             if item.runtime_status != expected_runtime_status:
                 raise ToolsetValidationError(
                     "MCP Toolset must be connected before publish."
                     if item.kind == "mcp"
-                    else "API Toolset must be imported successfully before publish."
+                    else (
+                        "Builtin Provider must be configured before publish."
+                        if item.kind == "builtin"
+                        else "API Toolset must be imported successfully before publish."
+                    )
                 )
             enabled = sorted(
                 (tool.model_copy(deep=True) for tool in item.tools if tool.enabled),

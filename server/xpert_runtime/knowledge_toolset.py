@@ -40,6 +40,9 @@ class KnowledgeToolsetProvider:
                     "required": ["query"],
                 },
                 provider="knowledge",
+                read_only=True,
+                memory_mode="run",
+                parallel_safe=True,
             ),
             RuntimeTool(
                 name="knowledge_get",
@@ -53,6 +56,9 @@ class KnowledgeToolsetProvider:
                     "required": ["kb_id", "chunk_id"],
                 },
                 provider="knowledge",
+                read_only=True,
+                memory_mode="run",
+                parallel_safe=True,
             ),
             RuntimeTool(
                 name="knowledge_cite",
@@ -66,6 +72,9 @@ class KnowledgeToolsetProvider:
                     "required": ["kb_id", "chunk_id"],
                 },
                 provider="knowledge",
+                read_only=True,
+                memory_mode="run",
+                parallel_safe=True,
             ),
             RuntimeTool(
                 name=WRITE_TOOL_NAME,
@@ -81,6 +90,9 @@ class KnowledgeToolsetProvider:
                     "required": ["kb_id", "title", "content"],
                 },
                 provider="knowledge",
+                read_only=False,
+                memory_mode="run",
+                parallel_safe=False,
             ),
         ]
 

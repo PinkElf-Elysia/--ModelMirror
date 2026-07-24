@@ -4,7 +4,8 @@ import PageContainer from "../components/PageContainer";
 
 type Transport = "stdio" | "streamable_http" | "legacy_sse";
 type CredentialKind = "header" | "environment" | "provider_key" | "generic";
-type ToolsetKind = "mcp" | "openapi" | "odata";
+type ToolsetKind = "mcp" | "openapi" | "odata" | "builtin";
+type ToolMemoryMode = "off" | "run" | "conversation";
 type APIAuthType = "none" | "api_key" | "bearer" | "basic" | "oauth2_client_credentials";
 
 interface APIAuthProfile {
@@ -56,6 +57,9 @@ interface ConnectionProfile {
   api_auth: APIAuthProfile;
   response_limit_bytes: number;
   redirect_limit: number;
+  provider_id: string;
+  provider_credential_id: string;
+  provider_config: Record<string, unknown>;
 }
 
 interface ToolDefinition {
@@ -70,6 +74,11 @@ interface ToolDefinition {
   execution: Record<string, unknown>;
   read_only: boolean;
   requires_approval: boolean;
+  sensitive: boolean;
+  terminal: boolean;
+  memory_mode: ToolMemoryMode;
+  parallel_safe: boolean;
+  public_app_allowed: boolean;
   compatibility: "compatible" | "warning" | "breaking";
   compatibility_message: string;
 }
@@ -118,6 +127,17 @@ interface InstalledMCPProject {
   npm_package?: string;
 }
 
+interface BuiltinProvider {
+  id: string;
+  title: string;
+  description: string;
+  credential_required: boolean;
+  credential_kind: CredentialKind | null;
+  instance_creatable: boolean;
+  runtime_binding?: string;
+  tools: ToolDefinition[];
+}
+
 const emptyConnection: ConnectionProfile = {
   transport: "stdio",
   command: [],
@@ -151,6 +171,9 @@ const emptyConnection: ConnectionProfile = {
   },
   response_limit_bytes: 2 * 1024 * 1024,
   redirect_limit: 3,
+  provider_id: "",
+  provider_credential_id: "",
+  provider_config: {},
 };
 
 const inputClass =
@@ -217,11 +240,14 @@ export default function ToolsetsPage() {
   const [toolsets, setToolsets] = useState<ToolsetDefinition[]>([]);
   const [credentials, setCredentials] = useState<CredentialSummary[]>([]);
   const [installedProjects, setInstalledProjects] = useState<InstalledMCPProject[]>([]);
+  const [providers, setProviders] = useState<BuiltinProvider[]>([]);
   const [selectedId, setSelectedId] = useState("");
   const [draft, setDraft] = useState<ToolsetDefinition | null>(null);
   const [commandText, setCommandText] = useState("[]");
   const [newKind, setNewKind] = useState<ToolsetKind>("mcp");
-  const [kindFilter, setKindFilter] = useState<"all" | "mcp" | "api">("all");
+  const [kindFilter, setKindFilter] = useState<"all" | "mcp" | "api" | "provider">("all");
+  const [selectedProviderId, setSelectedProviderId] = useState("tavily");
+  const [providerCredentialId, setProviderCredentialId] = useState("");
   const [newName, setNewName] = useState("");
   const [newDescription, setNewDescription] = useState("");
   const [importMode, setImportMode] = useState<"text" | "url">("text");
@@ -245,6 +271,10 @@ export default function ToolsetsPage() {
     () => toolsets.find((item) => item.id === selectedId) ?? null,
     [selectedId, toolsets],
   );
+  const selectedProvider = useMemo(
+    () => providers.find((provider) => provider.id === selectedProviderId) ?? null,
+    [providers, selectedProviderId],
+  );
   const activeToolDefinition = useMemo(
     () => draft?.tools.find((tool) => tool.original_name === activeTool) ?? null,
     [activeTool, draft],
@@ -256,7 +286,9 @@ export default function ToolsetsPage() {
           ? true
           : kindFilter === "mcp"
             ? item.kind === "mcp"
-            : item.kind !== "mcp",
+            : kindFilter === "provider"
+              ? item.kind === "builtin"
+              : item.kind === "openapi" || item.kind === "odata",
       ),
     [kindFilter, toolsets],
   );
@@ -277,14 +309,25 @@ export default function ToolsetsPage() {
   const loadAll = useCallback(async (preferredId?: string) => {
     setLoading(true);
     try {
-      const [toolsetPayload, credentialPayload, installedPayload] = await Promise.all([
+      const [toolsetPayload, credentialPayload, installedPayload, providerPayload] = await Promise.all([
         requestJson<{ toolsets: ToolsetDefinition[] }>("/api/toolsets"),
         requestJson<{ credentials: CredentialSummary[] }>("/api/runtime/credentials"),
         requestJson<{ installed: InstalledMCPProject[] }>("/api/mcp/installed"),
+        requestJson<{ providers: BuiltinProvider[] }>("/api/toolsets/providers").catch(
+          () => ({ providers: [] }),
+        ),
       ]);
       setToolsets(toolsetPayload.toolsets);
       setCredentials(credentialPayload.credentials);
       setInstalledProjects(installedPayload.installed);
+      setProviders(providerPayload.providers);
+      setProviderCredentialId((current) =>
+        credentialPayload.credentials.some((item) => item.credential_id === current)
+          ? current
+          : credentialPayload.credentials.find(
+              (item) => item.kind === "provider_key" && item.status === "active",
+            )?.credential_id || "",
+      );
       setSelectedId((current) => {
         const wanted = preferredId || current;
         return toolsetPayload.toolsets.some((item) => item.id === wanted)
@@ -337,6 +380,26 @@ export default function ToolsetsPage() {
     if (!newName.trim()) return;
     setBusy("create");
     try {
+      if (kindFilter === "provider") {
+        const created = await requestJson<ToolsetDefinition>(
+          `/api/toolsets/providers/${encodeURIComponent(selectedProviderId)}/instances`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              name: newName.trim(),
+              description: newDescription.trim(),
+              credential_id: providerCredentialId,
+              tags: ["builtin-provider"],
+            }),
+          },
+        );
+        setNewName("");
+        setNewDescription("");
+        setNotice("Provider Toolset 已创建并发现工具。");
+        await loadAll(created.id);
+        return;
+      }
       const created = await requestJson<ToolsetDefinition>("/api/toolsets", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -642,6 +705,7 @@ export default function ToolsetsPage() {
             ["all", "全部"],
             ["mcp", "MCP"],
             ["api", "API Toolset"],
+            ["provider", "内置 Provider"],
           ] as const).map(([value, label]) => (
             <button
               className={`px-3 py-2 text-sm font-semibold ${
@@ -656,9 +720,6 @@ export default function ToolsetsPage() {
               {label}
             </button>
           ))}
-          <button className="cursor-not-allowed px-3 py-2 text-sm text-slate-500" disabled type="button">
-            内置 Provider（下一轮）
-          </button>
         </nav>
 
         {error ? <InlineMessage onClose={() => setError("")} tone="error">{error}</InlineMessage> : null}
@@ -668,26 +729,89 @@ export default function ToolsetsPage() {
           <aside className="border-r border-white/10 pr-5">
             <form className="border-b border-white/10 pb-5" onSubmit={createToolset}>
               <h2 className="text-sm font-semibold text-white">创建 Toolset</h2>
-              <div className="mt-3 grid grid-cols-3 gap-1 rounded-md bg-white/5 p-1">
-                {([
-                  ["mcp", "MCP"],
-                  ["openapi", "OpenAPI"],
-                  ["odata", "OData"],
-                ] as Array<[ToolsetKind, string]>).map(([value, label]) => (
-                  <button
-                    className={`rounded px-2 py-2 text-xs font-semibold ${
-                      newKind === value
-                        ? "bg-cyan-300 text-slate-950"
-                        : "text-slate-400 hover:bg-white/5 hover:text-white"
-                    }`}
-                    key={value}
-                    onClick={() => setNewKind(value)}
-                    type="button"
-                  >
-                    {label}
-                  </button>
-                ))}
-              </div>
+              {kindFilter === "provider" ? (
+                <div className="mt-3 space-y-3">
+                  <label className="block text-xs font-semibold text-slate-300">
+                    Provider
+                    <select
+                      className={`${inputClass} mt-1`}
+                      onChange={(event) => setSelectedProviderId(event.target.value)}
+                      value={selectedProviderId}
+                    >
+                      {providers
+                        .filter((provider) => provider.instance_creatable)
+                        .map((provider) => (
+                          <option
+                            className="bg-slate-950"
+                            key={provider.id}
+                            value={provider.id}
+                          >
+                            {provider.title}
+                          </option>
+                        ))}
+                    </select>
+                  </label>
+                  {selectedProvider?.credential_required ? (
+                    <>
+                      <label className="block text-xs font-semibold text-slate-300">
+                        加密 Provider 凭据
+                        <select
+                          className={`${inputClass} mt-1`}
+                          onChange={(event) => setProviderCredentialId(event.target.value)}
+                          value={providerCredentialId}
+                        >
+                          <option className="bg-slate-950" value="">
+                            请选择 Provider Key
+                          </option>
+                          {credentials
+                            .filter(
+                              (credential) =>
+                                credential.kind === "provider_key" &&
+                                credential.status === "active",
+                            )
+                            .map((credential) => (
+                              <option
+                                className="bg-slate-950"
+                                key={credential.credential_id}
+                                value={credential.credential_id}
+                              >
+                                {credential.name} · {credential.masked_value}
+                              </option>
+                            ))}
+                        </select>
+                      </label>
+                      <p className="text-[11px] leading-5 text-slate-500">
+                        Provider Key 只以 Credential ID 固定到版本，页面不会回显明文。
+                      </p>
+                    </>
+                  ) : (
+                    <p className="rounded-md border border-emerald-300/15 bg-emerald-300/[0.05] px-3 py-2 text-[11px] leading-5 text-emerald-100">
+                      此 Provider 复用当前 Runtime 的持久化作用域，不需要额外凭据。
+                    </p>
+                  )}
+                </div>
+              ) : (
+                <div className="mt-3 grid grid-cols-3 gap-1 rounded-md bg-white/5 p-1">
+                  {([
+                    ["mcp", "MCP"],
+                    ["openapi", "OpenAPI"],
+                    ["odata", "OData"],
+                  ] as Array<[ToolsetKind, string]>).map(([value, label]) => (
+                    <button
+                      className={`rounded px-2 py-2 text-xs font-semibold ${
+                        newKind === value
+                          ? "bg-cyan-300 text-slate-950"
+                          : "text-slate-400 hover:bg-white/5 hover:text-white"
+                      }`}
+                      key={value}
+                      onClick={() => setNewKind(value)}
+                      type="button"
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              )}
               <label className="mt-3 block text-xs font-semibold text-slate-300">
                 名称
                 <input
@@ -710,7 +834,11 @@ export default function ToolsetsPage() {
               </label>
               <button
                 className={`${primaryButton} mt-3 w-full`}
-                disabled={busy === "create" || !newName.trim()}
+                disabled={
+                  busy === "create" ||
+                  !newName.trim() ||
+                  (kindFilter === "provider" && !providerCredentialId)
+                }
                 type="submit"
               >
                 {busy === "create" ? "创建中..." : "创建草稿"}
@@ -795,6 +923,15 @@ export default function ToolsetsPage() {
                           {busy === "connect" ? "连接中..." : "保存并连接"}
                         </button>
                       </>
+                    ) : draft.kind === "builtin" ? (
+                      <button
+                        className={primaryButton}
+                        disabled={busy !== ""}
+                        onClick={() => void runConnection("connect")}
+                        type="button"
+                      >
+                        {busy === "connect" ? "刷新中..." : "保存并刷新工具"}
+                      </button>
                     ) : (
                       <>
                         <button
@@ -969,6 +1106,89 @@ export default function ToolsetsPage() {
                         onUpdate={(index, patch) => updateBinding("environment", index, patch)}
                       />
                     </>
+                  ) : draft.kind === "builtin" ? (
+                    <div className="space-y-4 border-t border-white/10 pt-4">
+                      <div className="rounded-md bg-cyan-300/10 px-3 py-3 text-xs leading-5 text-cyan-50">
+                        内置 Provider 通过固定受控端点运行；凭据仅以加密引用保存。
+                      </div>
+                      <label className="block text-xs font-semibold text-slate-300">
+                        Provider
+                        <input
+                          className={`${inputClass} mt-1`}
+                          disabled
+                          value={draft.connection.provider_id}
+                        />
+                      </label>
+                      <label className="block text-xs font-semibold text-slate-300">
+                        Provider 凭据
+                        <select
+                          className={`${inputClass} mt-1`}
+                          onChange={(event) =>
+                            patchConnection({
+                              provider_credential_id: event.target.value,
+                            })
+                          }
+                          value={draft.connection.provider_credential_id}
+                        >
+                          <option className="bg-slate-950" value="">
+                            请选择 Provider Key
+                          </option>
+                          {credentials
+                            .filter(
+                              (credential) =>
+                                credential.kind === "provider_key" &&
+                                credential.status === "active",
+                            )
+                            .map((credential) => (
+                              <option
+                                className="bg-slate-950"
+                                key={credential.credential_id}
+                                value={credential.credential_id}
+                              >
+                                {credential.name} · {credential.masked_value}
+                              </option>
+                            ))}
+                        </select>
+                      </label>
+                      <div className="grid gap-3 sm:grid-cols-2">
+                        <label className="block text-xs font-semibold text-slate-300">
+                          调用超时（秒）
+                          <input
+                            className={`${inputClass} mt-1`}
+                            max={120}
+                            min={5}
+                            onChange={(event) =>
+                              patchConnection({
+                                timeout_seconds: Number(event.target.value),
+                              })
+                            }
+                            type="number"
+                            value={draft.connection.timeout_seconds}
+                          />
+                        </label>
+                        <label className="block text-xs font-semibold text-slate-300">
+                          响应上限（MB）
+                          <input
+                            className={`${inputClass} mt-1`}
+                            max={10}
+                            min={1}
+                            onChange={(event) =>
+                              patchConnection({
+                                response_limit_bytes:
+                                  Number(event.target.value) * 1024 * 1024,
+                              })
+                            }
+                            type="number"
+                            value={Math.max(
+                              1,
+                              Math.round(
+                                draft.connection.response_limit_bytes / 1024 / 1024,
+                              ),
+                            )}
+                          />
+                        </label>
+                      </div>
+                    </div>
                   ) : (
                     <div className="space-y-4 border-t border-white/10 pt-4">
                       <div className="grid grid-cols-2 gap-1 rounded-md bg-white/5 p-1">
@@ -1326,8 +1546,7 @@ export default function ToolsetsPage() {
                           <p className="mt-1 truncate font-mono text-[11px] text-slate-500">
                             {activeToolDefinition.original_name}
                           </p>
-                          {draft.kind !== "mcp" ? (
-                            <div className="mt-2 flex flex-wrap gap-1.5 text-[10px] font-semibold">
+                          <div className="mt-2 flex flex-wrap gap-1.5 text-[10px] font-semibold">
                               <span className="rounded bg-white/5 px-2 py-1 text-slate-300">
                                 {String(activeToolDefinition.execution.method || "API")}
                               </span>
@@ -1345,8 +1564,15 @@ export default function ToolsetsPage() {
                                   强制 HITL
                                 </span>
                               ) : null}
+                              {activeToolDefinition.terminal ? (
+                                <span className="rounded bg-violet-300/10 px-2 py-1 text-violet-100">
+                                  Terminal
+                                </span>
+                              ) : null}
+                              <span className="rounded bg-white/5 px-2 py-1 text-slate-300">
+                                memory:{activeToolDefinition.memory_mode}
+                              </span>
                             </div>
-                          ) : null}
                         </div>
                         <label className="flex items-center gap-2 text-xs font-semibold text-slate-300">
                           <input
@@ -1360,6 +1586,137 @@ export default function ToolsetsPage() {
                           启用
                         </label>
                       </div>
+                      <div className="grid gap-2 sm:grid-cols-2">
+                        <label className="flex items-start gap-2 rounded-md bg-white/[0.035] px-3 py-2 text-xs leading-5 text-slate-300">
+                          <input
+                            checked={activeToolDefinition.read_only}
+                            className="mt-1"
+                            disabled={busy !== "" || draft.kind !== "mcp"}
+                            onChange={(event) =>
+                              void updateTool({ read_only: event.target.checked })
+                            }
+                            type="checkbox"
+                          />
+                          <span>
+                            <strong className="block text-white">只读工具</strong>
+                            MCP 需管理员显式确认；API 工具由导入规范推断。
+                          </span>
+                        </label>
+                        <label className="flex items-start gap-2 rounded-md bg-white/[0.035] px-3 py-2 text-xs leading-5 text-slate-300">
+                          <input
+                            checked={activeToolDefinition.sensitive}
+                            className="mt-1"
+                            disabled={busy !== ""}
+                            onChange={(event) =>
+                              void updateTool({ sensitive: event.target.checked })
+                            }
+                            type="checkbox"
+                          />
+                          <span>
+                            <strong className="block text-white">敏感</strong>
+                            调用前强制 HITL，发布和运行时双重校验。
+                          </span>
+                        </label>
+                        <label className="flex items-start gap-2 rounded-md bg-white/[0.035] px-3 py-2 text-xs leading-5 text-slate-300">
+                          <input
+                            checked={activeToolDefinition.requires_approval}
+                            className="mt-1"
+                            disabled={busy !== "" || activeToolDefinition.sensitive}
+                            onChange={(event) =>
+                              void updateTool({
+                                requires_approval: event.target.checked,
+                              })
+                            }
+                            type="checkbox"
+                          />
+                          <span>
+                            <strong className="block text-white">要求审批</strong>
+                            非敏感工具也可要求每次调用由人工确认。
+                          </span>
+                        </label>
+                        <label className="flex items-start gap-2 rounded-md bg-white/[0.035] px-3 py-2 text-xs leading-5 text-slate-300">
+                          <input
+                            checked={activeToolDefinition.terminal}
+                            className="mt-1"
+                            disabled={busy !== ""}
+                            onChange={(event) =>
+                              void updateTool({ terminal: event.target.checked })
+                            }
+                            type="checkbox"
+                          />
+                          <span>
+                            <strong className="block text-white">终点工具</strong>
+                            成功结果直接成为最终答案，不再调用模型总结。
+                          </span>
+                        </label>
+                        <label className="flex items-start gap-2 rounded-md bg-white/[0.035] px-3 py-2 text-xs leading-5 text-slate-300">
+                          <input
+                            checked={activeToolDefinition.parallel_safe}
+                            className="mt-1"
+                            disabled={
+                              busy !== "" ||
+                              !activeToolDefinition.read_only ||
+                              activeToolDefinition.sensitive ||
+                              activeToolDefinition.terminal ||
+                              activeToolDefinition.requires_approval
+                            }
+                            onChange={(event) =>
+                              void updateTool({
+                                parallel_safe: event.target.checked,
+                              })
+                            }
+                            type="checkbox"
+                          />
+                          <span>
+                            <strong className="block text-white">允许并行</strong>
+                            仅只读、非敏感、非终点且无需审批的工具可开启。
+                          </span>
+                        </label>
+                        <label className="flex items-start gap-2 rounded-md bg-white/[0.035] px-3 py-2 text-xs leading-5 text-slate-300">
+                          <input
+                            checked={activeToolDefinition.public_app_allowed}
+                            className="mt-1"
+                            disabled={
+                              busy !== "" ||
+                              !activeToolDefinition.read_only ||
+                              activeToolDefinition.sensitive ||
+                              activeToolDefinition.memory_mode === "conversation"
+                            }
+                            onChange={(event) =>
+                              void updateTool({
+                                public_app_allowed: event.target.checked,
+                              })
+                            }
+                            type="checkbox"
+                          />
+                          <span>
+                            <strong className="block text-white">允许公共 App</strong>
+                            仍需 App 开启工具并绑定 Tool Policy。
+                          </span>
+                        </label>
+                      </div>
+                      <label className="block text-xs font-semibold text-slate-300">
+                        Tool Memory
+                        <select
+                          className={`${inputClass} mt-1`}
+                          onChange={(event) =>
+                            void updateTool({
+                              memory_mode: event.target.value as ToolMemoryMode,
+                            })
+                          }
+                          value={activeToolDefinition.memory_mode}
+                        >
+                          <option className="bg-slate-950" value="off">
+                            off · 不保存
+                          </option>
+                          <option className="bg-slate-950" value="run">
+                            run · 仅本次 Agent 执行
+                          </option>
+                          <option className="bg-slate-950" value="conversation">
+                            conversation · 私有 Xpert 会话
+                          </option>
+                        </select>
+                      </label>
                       <label className="block text-xs font-semibold text-slate-300">
                         Agent 别名
                         <input

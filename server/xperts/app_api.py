@@ -136,6 +136,7 @@ def _deployment_preflight(version: XpertVersion, policy: XpertAppPolicy) -> dict
     has_datax_write = False
     has_external_xpert = False
     has_toolset_resource = False
+    toolset_resource_issues: list[dict[str, str]] = []
     datax_project_ids: set[str] = set()
     datax_model_ids: set[str] = set()
     contract_forbidden_middleware: set[str] = set()
@@ -171,6 +172,53 @@ def _deployment_preflight(version: XpertVersion, policy: XpertAppPolicy) -> dict
         if kind == "toolset_resource":
             has_toolset_resource = True
             has_tool_call = True
+            try:
+                try:
+                    from server.toolsets import get_toolset_service
+                except ModuleNotFoundError:
+                    from toolsets import get_toolset_service
+
+                toolset_id = str(data.get("toolsetId") or "").strip()
+                version_number = int(data.get("pinnedVersion") or 0)
+                if not toolset_id or version_number < 1:
+                    raise ValueError(
+                        "App Toolset resources must pin a published version."
+                    )
+                toolset_service = get_toolset_service()
+                toolset = toolset_service.store.get_toolset(toolset_id)
+                toolset_version = toolset_service.store.get_version(
+                    toolset.id,
+                    version_number,
+                )
+                unsafe_tools = [
+                    tool.exposed_name
+                    for tool in toolset_version.tools
+                    if tool.enabled
+                    and not (
+                        tool.read_only
+                        and not tool.sensitive
+                        and tool.public_app_allowed
+                        and tool.memory_mode != "conversation"
+                    )
+                ]
+                if unsafe_tools:
+                    toolset_resource_issues.append(
+                        {
+                            "code": "app_toolset_tools_unsafe",
+                            "message": (
+                                f"Toolset {toolset.name} contains tools that are not "
+                                "approved for public read-only use: "
+                                + ", ".join(sorted(unsafe_tools))
+                            ),
+                        }
+                    )
+            except Exception as exc:
+                toolset_resource_issues.append(
+                    {
+                        "code": "app_toolset_resource_invalid",
+                        "message": str(exc)[:500],
+                    }
+                )
         if kind == "knowledge_base":
             has_knowledge = True
             has_dynamic_knowledge_read = True
@@ -295,14 +343,7 @@ def _deployment_preflight(version: XpertVersion, policy: XpertAppPolicy) -> dict
             }
         )
     if has_toolset_resource:
-        issues.append(
-            {
-                "code": "app_toolset_resource_forbidden",
-                "message": (
-                    "Public Xpert Apps cannot deploy bound MCP Toolset resources yet."
-                ),
-            }
-        )
+        issues.extend(toolset_resource_issues)
     if has_dynamic_knowledge_read and not policy.allow_knowledge_read:
         issues.append(
             {
