@@ -102,6 +102,9 @@ export interface WorkflowNodeData extends Record<string, unknown> {
   disableOutput?: string;
   enableFileUnderstanding?: string;
   parallelToolCalls?: string;
+  maxToolConcurrency?: string;
+  maxToolCalls?: string;
+  maxToolDepth?: string;
   retryOnFailure?: string;
   fallbackModelId?: string;
   exceptionHandling?: string;

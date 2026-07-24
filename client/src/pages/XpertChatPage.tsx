@@ -114,6 +114,16 @@ interface RuntimeTodoItem {
   revision: number;
 }
 
+interface XpertToolMemoryRecord {
+  memory_id: string;
+  tool_name: string;
+  provider: string;
+  summary: string;
+  parameter_summary: Record<string, unknown>;
+  source_run_id: string | null;
+  created_at: number;
+}
+
 async function responseError(response: Response) {
   try {
     const payload = (await response.json()) as { detail?: string; error?: string };
@@ -175,6 +185,7 @@ export default function XpertChatPage() {
   const [selectedFileIds, setSelectedFileIds] = useState<string[]>([]);
   const [memories, setMemories] = useState<XpertMemoryRecord[]>([]);
   const [memoryCandidates, setMemoryCandidates] = useState<XpertMemoryCandidate[]>([]);
+  const [toolMemories, setToolMemories] = useState<XpertToolMemoryRecord[]>([]);
   const [todos, setTodos] = useState<RuntimeTodoItem[]>([]);
   const [newTodoTitle, setNewTodoTitle] = useState("");
   const [todoBusy, setTodoBusy] = useState(false);
@@ -266,12 +277,13 @@ export default function XpertChatPage() {
     cancelled = false,
   ) {
     if (!selectedXpertId || !nextConversationId) return;
-    const [conversation, filePayload, memoryPayload, candidatePayload, todoItems] = await Promise.all([
+    const [conversation, filePayload, memoryPayload, candidatePayload, todoItems, toolMemoryPayload] = await Promise.all([
       getXpertConversation(selectedXpertId, nextConversationId),
       listXpertFiles(selectedXpertId, nextConversationId),
       listXpertMemories(selectedXpertId, nextConversationId),
       listXpertMemoryCandidates(selectedXpertId, nextConversationId),
       listConversationTodos(selectedXpertId, nextConversationId),
+      listToolMemories(selectedXpertId, nextConversationId),
     ]);
     if (cancelled) return;
     setConversationId(nextConversationId);
@@ -282,16 +294,18 @@ export default function XpertChatPage() {
     setMemories(memoryPayload.items);
     setMemoryCandidates(candidatePayload.items);
     setTodos(todoItems);
+    setToolMemories(toolMemoryPayload.items);
   }
 
   async function refreshContext() {
     if (!xpert || !conversationId) return;
-    const [conversationPayload, filePayload, memoryPayload, candidatePayload, todoItems] = await Promise.all([
+    const [conversationPayload, filePayload, memoryPayload, candidatePayload, todoItems, toolMemoryPayload] = await Promise.all([
       listXpertConversations(xpert.id),
       listXpertFiles(xpert.id, conversationId),
       listXpertMemories(xpert.id, conversationId),
       listXpertMemoryCandidates(xpert.id, conversationId),
       listConversationTodos(xpert.id, conversationId),
+      listToolMemories(xpert.id, conversationId),
     ]);
     setConversations(conversationPayload.items);
     setFiles(filePayload.items);
@@ -301,6 +315,28 @@ export default function XpertChatPage() {
     setMemories(memoryPayload.items);
     setMemoryCandidates(candidatePayload.items);
     setTodos(todoItems);
+    setToolMemories(toolMemoryPayload.items);
+  }
+
+  async function listToolMemories(selectedXpertId: string, selectedConversationId: string) {
+    const response = await fetch(
+      `/api/xperts/${encodeURIComponent(selectedXpertId)}/conversations/${encodeURIComponent(selectedConversationId)}/tool-memory`,
+    );
+    if (!response.ok) throw new Error(await responseError(response));
+    return response.json() as Promise<{ items: XpertToolMemoryRecord[] }>;
+  }
+
+  async function clearToolMemory(memoryId: string) {
+    if (!xpert || !conversationId) return;
+    const response = await fetch(
+      `/api/xperts/${encodeURIComponent(xpert.id)}/conversations/${encodeURIComponent(conversationId)}/tool-memory/${encodeURIComponent(memoryId)}`,
+      { method: "DELETE" },
+    );
+    if (!response.ok) {
+      setError(await responseError(response));
+      return;
+    }
+    setToolMemories((current) => current.filter((item) => item.memory_id !== memoryId));
   }
 
   async function refreshKnowledgeProposals(selectedXpertId = xpert?.id) {
@@ -1114,6 +1150,53 @@ export default function XpertChatPage() {
                   {todos.filter((todo) => todo.status !== "archived").length === 0 ? (
                     <p className="rounded-lg border border-dashed border-white/10 p-3 text-center text-xs text-slate-500">
                       暂无 Todo
+                    </p>
+                  ) : null}
+                </div>
+              </section>
+
+              <section>
+                <div className="flex items-center justify-between">
+                  <h3 className="text-xs font-semibold text-white">Tool Memory</h3>
+                  <span className="text-[10px] text-slate-500">{toolMemories.length}</span>
+                </div>
+                <p className="mt-1 text-[10px] leading-4 text-slate-500">
+                  仅保存当前私有会话的受限结果摘要；公共 App 不会跨调用持久化。
+                </p>
+                <div className="mt-2 space-y-2">
+                  {toolMemories.map((memory) => (
+                    <div
+                      className="rounded-lg border border-emerald-300/15 bg-emerald-300/[0.05] p-2.5"
+                      key={memory.memory_id}
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <p className="truncate text-[11px] font-semibold text-emerald-100">
+                            {memory.tool_name}
+                          </p>
+                          <p className="mt-0.5 text-[10px] text-slate-500">{memory.provider || "runtime"}</p>
+                        </div>
+                        <button
+                          className="shrink-0 text-[10px] text-rose-200"
+                          onClick={() => void clearToolMemory(memory.memory_id)}
+                          type="button"
+                        >
+                          清除
+                        </button>
+                      </div>
+                      <p className="mt-2 line-clamp-4 whitespace-pre-wrap text-[10px] leading-4 text-slate-300">
+                        {memory.summary}
+                      </p>
+                      {Object.keys(memory.parameter_summary ?? {}).length > 0 ? (
+                        <p className="mt-1 truncate font-mono text-[9px] text-slate-600">
+                          {JSON.stringify(memory.parameter_summary)}
+                        </p>
+                      ) : null}
+                    </div>
+                  ))}
+                  {toolMemories.length === 0 ? (
+                    <p className="rounded-lg border border-dashed border-white/10 p-3 text-center text-xs text-slate-500">
+                      暂无会话级 Tool Memory
                     </p>
                   ) : null}
                 </div>

@@ -17,7 +17,7 @@ Do not use for: refactoring, writing scripts from scratch, debugging business lo
 
 本文件是模镜仓库内 AI Agent、人类开发者和自动化任务的项目级操作说明。任何代码生成、重构、测试、提交和发布都必须优先遵守本文档。
 
-最后更新日期：2026-07-22
+最后更新日期：2026-07-23
 维护人：模镜团队
 
 ## 1. 项目边界
@@ -406,7 +406,11 @@ Office 自动化是高风险客户端副作用路径。修改 `server/xpert_runt
 - API Toolset 默认阻断回环、私网、link-local、reserved、云元数据和 URL credentials；`trusted_private` 只允许可信管理面显式选择，不能由模型参数开启。
 - API Key、Bearer、Basic 与 OAuth2 client credentials 均只能引用 Credential ID。OAuth token endpoint 必须经过同一网络策略，不得把 token 或认证 header 写入响应摘要。
 - OpenAPI/OData 写操作默认 `requires_approval=true`。管理测试需显式确认；已发布 Xpert 必须由同一 Agent 的 HITL 覆盖，运行时再次检查，任何异常不得 fail-open。
-- 修改 Toolset Runtime 至少运行 `test_toolset_store.py`、`test_toolset_service.py`、`test_toolset_api.py`、`test_toolset_api_compiler.py`、`test_toolset_api_runtime.py`、`test_workflow_toolset_resource.py`、MCP/Toolset/Workflow/Xpert/App 回归和前端生产构建。
+- Toolset 工具语义必须固定在不可变版本中。`sensitive` 必须 HITL；`terminal` 成功后直接结束 Agent；conversation Tool Memory 只允许私有 Xpert 会话并保存受限脱敏摘要。
+- 并行工具批次只允许 `read_only + parallel_safe + !sensitive + !terminal`，并逐调用经过 policy、audit 和 checkpoint。必须同时限制并发数、总调用数、决策轮次和 External Xpert 嵌套深度。
+- 内置 Provider 必须复用现有 Store 与执行器。Todo 不得创建第二套 Todo Store；Knowledge、Memory 和 Data X 不得复制已有 Provider 逻辑。
+- 公共 App Toolset 必须固定已发布版本，要求 `allow_tools`、Tool Policy，以及全部工具显式 `public_app_allowed`、只读、非敏感、非 conversation memory。凭据只在服务端解析。
+- 修改 Toolset Runtime 至少运行 `test_toolset_semantics.py`、`test_toolset_store.py`、`test_toolset_service.py`、`test_toolset_api.py`、`test_toolset_api_compiler.py`、`test_toolset_api_runtime.py`、`test_workflow_toolset_resource.py`、MCP/Toolset/Workflow/Xpert/App 回归和前端生产构建。
 - EvoAgentX 只允许选择性移植已锁定 commit 且许可证审计通过的 MIT 文件；必须保留版权和 NOTICE，并在 `docs/EVOAGENTX_ALIGNMENT.md` 记录来源。
 - EvoAgentX optimizer 或 planner 只能产生候选 Xpert 草稿与评估报告，不得静默发布、覆盖人工草稿或修改不可变线上版本。
 

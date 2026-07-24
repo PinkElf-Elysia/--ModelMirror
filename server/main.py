@@ -633,6 +633,14 @@ runtime_todo_store = configure_runtime_todo_store(
     RuntimeTodoStore(storage_dir=AGENT_TASK_STORAGE_DIR or None)
 )
 workflow_todo_provider = TodoToolsetProvider(runtime_todo_store)
+toolset_service.builtin_providers.register_runtime_delegate(
+    "todos",
+    workflow_todo_provider,
+)
+workflow_published_toolset_provider.register_runtime_delegate(
+    "todos",
+    workflow_todo_provider,
+)
 sandbox_workspace_store = SandboxWorkspaceStore(
     storage_dir=AGENT_TASK_STORAGE_DIR or None,
     workspace_root=os.getenv("SANDBOX_WORKSPACE_ROOT", "").strip() or None,
@@ -3891,11 +3899,18 @@ async def _run_workflow_response(
                 "allow_tools"
             ):
                 raise PermissionError("Xpert App tool access is disabled.")
-            if (
-                capability_name == "published_mcp_toolsets"
-                and runtime_run_type == "xpert_app"
-            ):
-                raise PermissionError("Xpert App bound Toolset access is disabled.")
+            if capability_name == "published_mcp_toolsets" and runtime_run_type == "xpert_app":
+                if not app_capability_allowed("allow_tools"):
+                    raise PermissionError("Xpert App Toolset access is disabled.")
+                if not (
+                    matched_tool.read_only
+                    and not matched_tool.sensitive
+                    and matched_tool.public_app_allowed
+                    and matched_tool.memory_mode != "conversation"
+                ):
+                    raise PermissionError(
+                        "Xpert App may only call explicitly approved, read-only Toolset tools."
+                    )
             if capability_name == "memory_tools" and not app_capability_allowed(
                 "allow_xpert_memory"
             ):
@@ -3937,10 +3952,7 @@ async def _run_workflow_response(
                 raise PermissionError("Xpert App authoring tools are disabled.")
             if not matched_tool:
                 raise ValueError(f"MCP 工具未注册：{tool_name}")
-            if (
-                capability_name == "published_mcp_toolsets"
-                and bool(matched_tool.metadata.get("requires_approval"))
-            ):
+            if matched_tool.requires_approval or matched_tool.sensitive:
                 hitl_spec = (
                     middleware_spec(middleware_specs, "human_in_the_loop")
                     if middleware_specs is not None
@@ -3961,7 +3973,7 @@ async def _run_workflow_response(
                 }
                 if "*" not in hitl_rules and tool_name not in hitl_rules:
                     raise RuntimeMiddlewareFatalError(
-                        "Mutating API Toolset operations require "
+                        "Sensitive or approval-required Toolset operations require "
                         "human_in_the_loop approval coverage."
                     )
             run_context = task_state.get("runtime_metadata") or {}
@@ -4034,11 +4046,19 @@ async def _run_workflow_response(
                         ),
                         "tool_input_schema": dict(matched_tool.input_schema or {}),
                         "tool_requires_approval": bool(
-                            matched_tool.metadata.get("requires_approval")
+                            matched_tool.requires_approval
                         ),
-                        "tool_read_only": bool(
-                            matched_tool.metadata.get("read_only", True)
+                        "tool_read_only": matched_tool.read_only,
+                        "tool_sensitive": matched_tool.sensitive,
+                        "tool_terminal": matched_tool.terminal,
+                        "tool_memory_mode": (
+                            "run"
+                            if runtime_run_type == "xpert_app"
+                            and matched_tool.memory_mode == "conversation"
+                            else matched_tool.memory_mode
                         ),
+                        "tool_parallel_safe": matched_tool.parallel_safe,
+                        "tool_public_app_allowed": matched_tool.public_app_allowed,
                         "sandbox_config": effective_context.metadata.get("sandbox_config") or {},
                         "skills_config": effective_context.metadata.get("skills_config") or {},
                         "browser_config": effective_context.metadata.get("browser_config") or {},
@@ -4166,7 +4186,10 @@ async def _run_workflow_response(
                         external_xpert_tools
                     )
                 )
-            if toolset_resources and runtime_run_type != "xpert_app":
+            if toolset_resources and (
+                runtime_run_type != "xpert_app"
+                or app_capability_allowed("allow_tools")
+            ):
                 bound_toolset_tools = (
                     await workflow_published_toolset_provider.list_tools(
                         toolset_resources
@@ -4301,6 +4324,10 @@ async def _run_workflow_response(
             max_iterations: int,
             temperature: float,
             output_variable: str,
+            parallel_tool_calls: bool = False,
+            max_tool_concurrency: int = 2,
+            max_tool_calls: int = 12,
+            max_tool_depth: int = 4,
             run_id: str | None = None,
             include_mcp: bool = True,
             include_memory_read: bool = False,
@@ -4330,6 +4357,15 @@ async def _run_workflow_response(
             history_messages: list[dict[str, Any]] | None = None,
             resume_state: dict[str, Any] | None = None,
         ) -> tuple[str, list[dict[str, Any]]]:
+            max_tool_concurrency = min(max(int(max_tool_concurrency), 1), 8)
+            max_tool_calls = min(max(int(max_tool_calls), 1), 50)
+            max_tool_depth = min(max(int(max_tool_depth), 1), 4)
+            runtime_metadata = dict(task_state.get("runtime_metadata") or {})
+            current_depth = int(runtime_metadata.get("external_xpert_depth") or 0)
+            if current_depth > max_tool_depth:
+                raise RuntimeMiddlewareFatalError(
+                    f"Agent tool nesting depth exceeded maxToolDepth={max_tool_depth}."
+                )
             available_tools = await workflow_available_tools(
                 tool_names_raw,
                 include_mcp=include_mcp,
@@ -4526,18 +4562,45 @@ async def _run_workflow_response(
             tool_descriptions = "\n".join(
                 (
                     f"- {name}: {tool.description or '无描述'} "
-                    f"schema={json.dumps(tool.input_schema or {}, ensure_ascii=False)}"
+                    f"schema={json.dumps(tool.input_schema or {}, ensure_ascii=False)} "
+                    f"semantics={json.dumps({'read_only': tool.read_only, 'sensitive': tool.sensitive, 'terminal': tool.terminal, 'memory_mode': tool.memory_mode, 'parallel_safe': tool.parallel_safe}, ensure_ascii=False)}"
                 )
                 for name, tool in tool_by_name.items()
             )
             react_system_prompt = (
                 f"{system_prompt}\n\n"
-                "你可以选择调用一个工具，或给出最终答案。"
-                "每次回复必须是 JSON，且只能使用以下两种格式之一："
-                '{"tool":"工具名","arguments":{...}} 或 {"answer":"最终答案"}。'
-                "不要输出 JSON 以外的文字。\n\n可用工具：\n"
+                "Choose tools or provide a final answer. Every decision must be one JSON object: "
+                '{"tool":"tool_name","arguments":{...}}, '
+                '{"tools":[{"tool":"tool_a","arguments":{}},{"tool":"tool_b","arguments":{}}]}, '
+                'or {"answer":"final answer"}. '
+                "Use the tools array only when parallel calls are enabled and every selected "
+                "tool is read-only, parallel-safe, non-sensitive, and non-terminal. "
+                "Do not output text outside the JSON object.\n\nAvailable tools:\n"
                 f"{tool_descriptions}"
             )
+            persisted_tool_memory: list[Any] = []
+            xpert_id = str(runtime_metadata.get("xpert_id") or "").strip()
+            conversation_id = str(
+                runtime_metadata.get("conversation_id") or ""
+            ).strip()
+            if runtime_run_type == "xpert" and xpert_id and conversation_id:
+                try:
+                    persisted_tool_memory = await asyncio.to_thread(
+                        xpert_context_store.list_tool_memories,
+                        xpert_id,
+                        conversation_id,
+                        limit=20,
+                    )
+                except XpertContextError:
+                    persisted_tool_memory = []
+            if persisted_tool_memory:
+                react_system_prompt += (
+                    "\n\nRecent private conversation Tool Memory (bounded summaries):\n"
+                    + "\n".join(
+                        f"- {item.tool_name}: {item.summary}"
+                        for item in reversed(persisted_tool_memory)
+                    )
+                )
             messages: list[ChatMessage] = [
                 ChatMessage(role="system", content=react_system_prompt),
                 *[
@@ -4551,6 +4614,86 @@ async def _run_workflow_response(
             output_text = ""
             start_iteration = 0
             pending_state = dict(resume_state or {})
+            tool_calls_used = max(
+                0,
+                int(pending_state.get("tool_calls_used") or 0),
+            )
+            run_tool_memory: list[str] = []
+
+            async def remember_tool_result(
+                tool: Any,
+                arguments: dict[str, Any],
+                result_text: str,
+            ) -> None:
+                mode = str(tool.memory_mode or "off")
+                if runtime_run_type == "xpert_app" and mode == "conversation":
+                    mode = "run"
+                if mode == "off":
+                    return
+                normalized = re.sub(r"\s+", " ", result_text).strip()[:8000]
+                if not normalized:
+                    return
+                run_tool_memory.append(f"{tool.name}: {normalized}")
+                del run_tool_memory[:-20]
+                if (
+                    mode == "conversation"
+                    and runtime_run_type == "xpert"
+                    and xpert_id
+                    and conversation_id
+                ):
+                    await asyncio.to_thread(
+                        xpert_context_store.create_tool_memory,
+                        xpert_id,
+                        conversation_id,
+                        tool_name=tool.name,
+                        provider=str(tool.provider or "runtime"),
+                        summary=normalized,
+                        arguments=arguments,
+                        source_run_id=run_id,
+                    )
+
+            def tool_semantics(tool: Any) -> dict[str, Any]:
+                return {
+                    "read_only": bool(tool.read_only),
+                    "requires_approval": bool(tool.requires_approval),
+                    "sensitive": bool(tool.sensitive),
+                    "terminal": bool(tool.terminal),
+                    "memory_mode": str(tool.memory_mode or "off"),
+                    "parallel_safe": bool(tool.parallel_safe),
+                    "public_app_allowed": bool(tool.public_app_allowed),
+                }
+
+            def tool_call_metadata(
+                *,
+                iteration: int,
+                batch_id: str | None = None,
+                batch_index: int | None = None,
+            ) -> dict[str, Any]:
+                metadata = {
+                    "agent_kind": kind,
+                    "agent_node_id": node.id,
+                    "iteration": iteration,
+                    "run_id": run_id,
+                    "knowledge_read_enabled": include_knowledge_read,
+                    "knowledge_write_enabled": include_knowledge_write,
+                    "knowledge_base_ids": list(knowledge_base_ids or []),
+                    "external_xpert_tools": list(external_xpert_tools or []),
+                    "toolset_resources": list(toolset_resources or []),
+                    "max_tool_depth": max_tool_depth,
+                }
+                if batch_id:
+                    metadata["parallel_batch_id"] = batch_id
+                if batch_index is not None:
+                    metadata["parallel_batch_index"] = batch_index
+                return metadata
+
+            def ensure_tool_call_budget(additional_calls: int) -> None:
+                if tool_calls_used + additional_calls > max_tool_calls:
+                    raise RuntimeMiddlewareFatalError(
+                        f"Agent tool call budget exhausted: "
+                        f"{tool_calls_used}/{max_tool_calls} calls already used."
+                    )
+
             if (
                 pending_state.get("type") == "tool_call"
                 and str(pending_state.get("node_id") or "") == node.id
@@ -4582,19 +4725,17 @@ async def _run_workflow_response(
                     0,
                     int(pending_state.get("iteration_index") or 0),
                 )
+                pending_tool = tool_by_name.get(pending_tool_name)
+                if pending_tool is None:
+                    raise RuntimeMiddlewareFatalError(
+                        f"Pending tool is no longer available: {pending_tool_name}"
+                    )
+                ensure_tool_call_budget(1)
                 approval_payload = task_state.get("resolved_approval")
                 client_payload = task_state.get("resolved_client_tool")
-                resume_metadata = {
-                    "agent_kind": kind,
-                    "agent_node_id": node.id,
-                    "iteration": pending_iteration + 1,
-                    "run_id": run_id,
-                    "knowledge_read_enabled": include_knowledge_read,
-                    "knowledge_write_enabled": include_knowledge_write,
-                    "knowledge_base_ids": list(knowledge_base_ids or []),
-                    "external_xpert_tools": list(external_xpert_tools or []),
-                    "toolset_resources": list(toolset_resources or []),
-                }
+                resume_metadata = tool_call_metadata(
+                    iteration=pending_iteration + 1
+                )
                 if isinstance(approval_payload, dict):
                     resume_metadata["resolved_approval"] = approval_payload
                 if isinstance(client_payload, dict):
@@ -4616,7 +4757,13 @@ async def _run_workflow_response(
                     )
                     interrupt.continuation["agent_state"] = pending_state
                     raise
+                tool_calls_used += 1
                 pending_result_text = runtime_tool_result_text(call_result)
+                await remember_tool_result(
+                    pending_tool,
+                    pending_arguments,
+                    pending_result_text,
+                )
                 events.append(
                     {
                         "event": "node_delta",
@@ -4652,6 +4799,24 @@ async def _run_workflow_response(
                 task_state["agent_resume_state"] = {}
                 task_state["resolved_approval"] = None
                 task_state["resolved_client_tool"] = None
+                if pending_tool.terminal:
+                    output_text = pending_result_text
+                    if run_id:
+                        await run_registry.record_checkpoint(
+                            run_id,
+                            event_type="workflow_agent.terminal_tool",
+                            title="Terminal tool completed",
+                            summary=(
+                                f"{pending_tool_name} result_length="
+                                f"{len(pending_result_text)}"
+                            ),
+                            metadata={
+                                "tool_name": pending_tool_name,
+                                "tool_calls_used": tool_calls_used,
+                                "max_tool_calls": max_tool_calls,
+                            },
+                        )
+                    return output_text, events
 
             for iteration_index in range(start_iteration, max_iterations):
                 if not get_llm_gateway_config()[0]:
@@ -4701,6 +4866,222 @@ async def _run_workflow_response(
                             metadata={"iteration": iteration_index + 1},
                         )
                     break
+
+                parallel_decisions = decision.get("tools")
+                if isinstance(parallel_decisions, list):
+                    batch_error = ""
+                    parsed_batch: list[
+                        tuple[str, dict[str, Any], Any]
+                    ] = []
+                    if not parallel_tool_calls:
+                        batch_error = (
+                            "Parallel tool calls are disabled. Choose one tool "
+                            "and return the single-tool decision format."
+                        )
+                    elif not parallel_decisions:
+                        batch_error = "Parallel tool batch cannot be empty."
+                    elif len(parallel_decisions) > max_tool_concurrency:
+                        batch_error = (
+                            f"Parallel batch exceeds maxToolConcurrency="
+                            f"{max_tool_concurrency}. Split it into smaller batches."
+                        )
+                    else:
+                        seen_tool_names: set[str] = set()
+                        for item in parallel_decisions:
+                            if not isinstance(item, dict):
+                                batch_error = (
+                                    "Each parallel tool decision must be an object."
+                                )
+                                break
+                            batch_tool_name = str(item.get("tool") or "").strip()
+                            batch_arguments = item.get("arguments")
+                            if not isinstance(batch_arguments, dict):
+                                batch_arguments = {}
+                            batch_tool = tool_by_name.get(batch_tool_name)
+                            if batch_tool is None:
+                                batch_error = (
+                                    f"Parallel tool is unavailable: {batch_tool_name}"
+                                )
+                                break
+                            if batch_tool_name in seen_tool_names:
+                                batch_error = (
+                                    "A parallel batch cannot call the same tool twice."
+                                )
+                                break
+                            seen_tool_names.add(batch_tool_name)
+                            if not (
+                                batch_tool.read_only
+                                and batch_tool.parallel_safe
+                                and not batch_tool.sensitive
+                                and not batch_tool.terminal
+                                and not batch_tool.requires_approval
+                            ):
+                                batch_error = (
+                                    f"Tool {batch_tool_name} is not safe for parallel "
+                                    "execution. Call it serially."
+                                )
+                                break
+                            parsed_batch.append(
+                                (
+                                    batch_tool_name,
+                                    dict(batch_arguments),
+                                    batch_tool,
+                                )
+                            )
+
+                    if batch_error:
+                        if run_id:
+                            await run_registry.record_checkpoint(
+                                run_id,
+                                event_type="workflow_agent.parallel_batch_rejected",
+                                title="Parallel tool batch rejected",
+                                summary=batch_error[:500],
+                                severity="warning",
+                                metadata={
+                                    "iteration": iteration_index + 1,
+                                    "batch_size": len(parallel_decisions),
+                                    "max_tool_concurrency": max_tool_concurrency,
+                                },
+                            )
+                        messages.append(
+                            ChatMessage(
+                                role="assistant",
+                                content=json.dumps(decision, ensure_ascii=False),
+                            )
+                        )
+                        messages.append(
+                            ChatMessage(role="user", content=batch_error)
+                        )
+                        continue
+
+                    ensure_tool_call_budget(len(parsed_batch))
+                    batch_id = f"batch_{uuid.uuid4().hex}"
+                    tool_calls_used += len(parsed_batch)
+
+                    async def execute_parallel_tool(
+                        batch_index: int,
+                        batch_item: tuple[str, dict[str, Any], Any],
+                    ) -> dict[str, Any]:
+                        batch_tool_name, batch_arguments, batch_tool = batch_item
+                        started_at = time.perf_counter()
+                        try:
+                            batch_result = await call_workflow_runtime_tool(
+                                tool_name=batch_tool_name,
+                                arguments=batch_arguments,
+                                node=node,
+                                title=title,
+                                metadata=tool_call_metadata(
+                                    iteration=iteration_index + 1,
+                                    batch_id=batch_id,
+                                    batch_index=batch_index,
+                                ),
+                                pipeline=pipeline,
+                                middleware_context=middleware_context,
+                                middleware_specs=middleware_specs,
+                            )
+                            batch_result_text = runtime_tool_result_text(batch_result)
+                            await remember_tool_result(
+                                batch_tool,
+                                batch_arguments,
+                                batch_result_text,
+                            )
+                            if run_id:
+                                await run_registry.record_checkpoint(
+                                    run_id,
+                                    event_type="workflow_agent.tool_call",
+                                    title="Parallel tool call completed",
+                                    summary=(
+                                        f"{batch_tool_name} result_length="
+                                        f"{len(batch_result_text)}"
+                                    ),
+                                    metadata={
+                                        "iteration": iteration_index + 1,
+                                        "tool_name": batch_tool_name,
+                                        "batch_id": batch_id,
+                                        "batch_index": batch_index,
+                                        "duration_ms": round(
+                                            (
+                                                time.perf_counter()
+                                                - started_at
+                                            )
+                                            * 1000,
+                                            2,
+                                        ),
+                                        "result_length": len(batch_result_text),
+                                        "semantics": tool_semantics(batch_tool),
+                                    },
+                                )
+                            return {
+                                "tool": batch_tool_name,
+                                "status": "completed",
+                                "result": batch_result_text,
+                            }
+                        except RuntimeInterrupt:
+                            raise
+                        except Exception as exc:
+                            error_summary = workflow_error_summary(exc)
+                            if run_id:
+                                await run_registry.record_checkpoint(
+                                    run_id,
+                                    event_type="workflow_agent.tool_call_failed",
+                                    title="Parallel tool call failed",
+                                    summary=f"{batch_tool_name}: {error_summary}"[:500],
+                                    severity="warning",
+                                    metadata={
+                                        "iteration": iteration_index + 1,
+                                        "tool_name": batch_tool_name,
+                                        "batch_id": batch_id,
+                                        "batch_index": batch_index,
+                                        "semantics": tool_semantics(batch_tool),
+                                    },
+                                )
+                            return {
+                                "tool": batch_tool_name,
+                                "status": "failed",
+                                "error": error_summary,
+                            }
+
+                    batch_results = await asyncio.gather(
+                        *[
+                            execute_parallel_tool(index, item)
+                            for index, item in enumerate(parsed_batch)
+                        ]
+                    )
+                    event = {
+                        "event": "node_delta",
+                        "node_id": node.id,
+                        "node_title": title,
+                        "node_type": kind,
+                        "output": (
+                            f"[{iteration_index + 1}/{max_iterations}] "
+                            f"parallel batch {batch_id}: "
+                            f"{sum(item['status'] == 'completed' for item in batch_results)}"
+                            f"/{len(batch_results)} completed"
+                        ),
+                        "variable": output_variable,
+                    }
+                    if run_id:
+                        event["run_id"] = run_id
+                    events.append(event)
+                    messages.append(
+                        ChatMessage(
+                            role="assistant",
+                            content=json.dumps(decision, ensure_ascii=False),
+                        )
+                    )
+                    messages.append(
+                        ChatMessage(
+                            role="user",
+                            content=(
+                                "Parallel tool results, in original decision order:\n"
+                                f"{json.dumps(batch_results, ensure_ascii=False)}\n\n"
+                                f"Tool budget: {tool_calls_used}/{max_tool_calls}. "
+                                "Continue with one JSON decision."
+                            ),
+                        )
+                    )
+                    continue
+
                 tool_name = str(decision.get("tool") or "").strip()
                 arguments = decision.get("arguments")
                 if not tool_name:
@@ -4730,27 +5111,16 @@ async def _run_workflow_response(
                             metadata={"iteration": iteration_index + 1},
                         )
                 else:
+                    ensure_tool_call_budget(1)
                     try:
                         call_result = await call_workflow_runtime_tool(
                             tool_name=tool_name,
                             arguments=arguments,
                             node=node,
                             title=title,
-                            metadata={
-                                "agent_kind": kind,
-                                "agent_node_id": node.id,
-                                "iteration": iteration_index + 1,
-                                "run_id": run_id,
-                                "knowledge_read_enabled": include_knowledge_read,
-                                "knowledge_write_enabled": include_knowledge_write,
-                                "knowledge_base_ids": list(knowledge_base_ids or []),
-                                "external_xpert_tools": list(
-                                    external_xpert_tools or []
-                                ),
-                                "toolset_resources": list(
-                                    toolset_resources or []
-                                ),
-                            },
+                            metadata=tool_call_metadata(
+                                iteration=iteration_index + 1
+                            ),
                             pipeline=pipeline,
                             middleware_context=middleware_context,
                             middleware_specs=middleware_specs,
@@ -4764,9 +5134,16 @@ async def _run_workflow_response(
                             "decision": dict(decision),
                             "tool_name": tool_name,
                             "arguments": dict(arguments),
+                            "tool_calls_used": tool_calls_used,
                         }
                         raise
+                    tool_calls_used += 1
                     tool_result_text = runtime_tool_result_text(call_result)
+                    await remember_tool_result(
+                        matched_tool,
+                        arguments,
+                        tool_result_text,
+                    )
                     if tool_name.startswith("sandbox_"):
                         sandbox_event = {
                             "event": (
@@ -4845,8 +5222,42 @@ async def _run_workflow_response(
                                 "iteration": iteration_index + 1,
                                 "tool_name": tool_name,
                                 "result_length": len(tool_result_text),
+                                "tool_calls_used": tool_calls_used,
+                                "max_tool_calls": max_tool_calls,
+                                "semantics": tool_semantics(matched_tool),
                             },
                         )
+                    if matched_tool.terminal:
+                        output_text = tool_result_text
+                        terminal_event = {
+                            "event": "node_delta",
+                            "node_id": node.id,
+                            "node_title": title,
+                            "node_type": kind,
+                            "output": (
+                                f"Terminal tool {tool_name} completed; "
+                                "the Agent stopped without another model call."
+                            ),
+                            "variable": output_variable,
+                        }
+                        if run_id:
+                            terminal_event["run_id"] = run_id
+                            await run_registry.record_checkpoint(
+                                run_id,
+                                event_type="workflow_agent.terminal_tool",
+                                title="Terminal tool completed",
+                                summary=(
+                                    f"{tool_name} result_length="
+                                    f"{len(tool_result_text)}"
+                                ),
+                                metadata={
+                                    "tool_name": tool_name,
+                                    "tool_calls_used": tool_calls_used,
+                                    "max_tool_calls": max_tool_calls,
+                                },
+                            )
+                        events.append(terminal_event)
+                        break
                 event = {
                     "event": "node_delta",
                     "node_id": node.id,
@@ -4862,11 +5273,13 @@ async def _run_workflow_response(
                     event["run_id"] = run_id
                     await run_registry.record_checkpoint(
                         run_id,
-                        event_type="workflow_agent.iteration_limit",
-                        title="Iteration limit reached",
-                        summary=f"max_iterations={max_iterations}",
-                        severity="warning",
-                        metadata={"max_iterations": max_iterations},
+                        event_type="workflow_agent.tool_budget",
+                        title="Tool call budget updated",
+                        summary=f"{tool_calls_used}/{max_tool_calls}",
+                        metadata={
+                            "tool_calls_used": tool_calls_used,
+                            "max_tool_calls": max_tool_calls,
+                        },
                     )
                 events.append(event)
                 messages.append(
@@ -6580,6 +6993,35 @@ async def _run_workflow_response(
                         except ValueError:
                             max_iterations = WORKFLOW_AGENT_MAX_ITERATIONS_DEFAULT
                         max_iterations = min(max(max_iterations, 1), 20)
+                        parallel_tool_calls = workflow_truthy(
+                            node.data.get("parallelToolCalls")
+                        )
+                        try:
+                            max_tool_concurrency = int(
+                                str(node.data.get("maxToolConcurrency") or 2)
+                            )
+                            max_tool_calls = int(
+                                str(node.data.get("maxToolCalls") or 12)
+                            )
+                            max_tool_depth = int(
+                                str(node.data.get("maxToolDepth") or 4)
+                            )
+                        except ValueError as exc:
+                            raise ValueError(
+                                "workflow_agent tool budgets must be integers."
+                            ) from exc
+                        if not 1 <= max_tool_concurrency <= 8:
+                            raise ValueError(
+                                "workflow_agent maxToolConcurrency must be between 1 and 8."
+                            )
+                        if not 1 <= max_tool_calls <= 50:
+                            raise ValueError(
+                                "workflow_agent maxToolCalls must be between 1 and 50."
+                            )
+                        if not 1 <= max_tool_depth <= 4:
+                            raise ValueError(
+                                "workflow_agent maxToolDepth must be between 1 and 4."
+                            )
                         if not role_prompt:
                             raise ValueError("workflow_agent 缺少角色提示词。")
                         if not task_input:
@@ -7104,6 +7546,10 @@ async def _run_workflow_response(
                                         max_iterations=max_iterations,
                                         temperature=0.7,
                                         output_variable=output_variable,
+                                        parallel_tool_calls=parallel_tool_calls,
+                                        max_tool_concurrency=max_tool_concurrency,
+                                        max_tool_calls=max_tool_calls,
+                                        max_tool_depth=max_tool_depth,
                                         run_id=workflow_agent_run.run_id,
                                         include_mcp=(tool_mode == "mcp_tools"),
                                         include_memory_read=memory_read_enabled,
@@ -7202,6 +7648,10 @@ async def _run_workflow_response(
                                             max_iterations=max_iterations,
                                             temperature=0.4,
                                             output_variable=output_variable,
+                                            parallel_tool_calls=parallel_tool_calls,
+                                            max_tool_concurrency=max_tool_concurrency,
+                                            max_tool_calls=max_tool_calls,
+                                            max_tool_depth=max_tool_depth,
                                             run_id=workflow_agent_run.run_id,
                                             include_mcp=(tool_mode == "mcp_tools"),
                                             include_memory_read=memory_read_enabled,
@@ -8820,18 +9270,19 @@ async def consume_workflow_stream(response: Any) -> dict[str, Any]:
     return final_event
 
 
-EXTERNAL_XPERT_MAX_DEPTH = 4
-
-
 async def execute_external_xpert_resource(
     resource: dict[str, Any],
     task: str,
     call: RuntimeToolCall,
 ) -> RuntimeToolResult:
     depth = int(call.metadata.get("external_xpert_depth") or 0)
-    if depth >= EXTERNAL_XPERT_MAX_DEPTH:
+    max_depth = min(
+        max(int(call.metadata.get("max_tool_depth") or 4), 1),
+        4,
+    )
+    if depth >= max_depth:
         raise ValueError(
-            f"External Xpert nesting depth exceeds {EXTERNAL_XPERT_MAX_DEPTH}."
+            f"External Xpert nesting depth exceeds {max_depth}."
         )
     target_xpert_id = str(resource.get("xpert_id") or "").strip()
     target_version = int(resource.get("pinned_version") or 0)

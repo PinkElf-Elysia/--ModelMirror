@@ -30,6 +30,9 @@ class TodoToolsetProvider:
                     "additionalProperties": False,
                 },
                 provider="todo",
+                read_only=True,
+                memory_mode="run",
+                parallel_safe=True,
             ),
             RuntimeTool(
                 name="todo_create",
@@ -45,6 +48,9 @@ class TodoToolsetProvider:
                     "additionalProperties": False,
                 },
                 provider="todo",
+                read_only=False,
+                memory_mode="run",
+                parallel_safe=False,
             ),
             RuntimeTool(
                 name="todo_update",
@@ -67,6 +73,9 @@ class TodoToolsetProvider:
                     "additionalProperties": False,
                 },
                 provider="todo",
+                read_only=False,
+                memory_mode="run",
+                parallel_safe=False,
             ),
         ]
 

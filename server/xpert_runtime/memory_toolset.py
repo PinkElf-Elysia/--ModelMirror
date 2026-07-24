@@ -31,6 +31,9 @@ class MemoryToolsetProvider:
                     "required": ["query"],
                 },
                 provider="memory",
+                read_only=True,
+                memory_mode="run",
+                parallel_safe=True,
             ),
             RuntimeTool(
                 name="memory_get",
@@ -41,6 +44,9 @@ class MemoryToolsetProvider:
                     "required": ["memory_id"],
                 },
                 provider="memory",
+                read_only=True,
+                memory_mode="run",
+                parallel_safe=True,
             ),
             RuntimeTool(
                 name="memory_propose_write",
@@ -72,6 +78,9 @@ class MemoryToolsetProvider:
                     "required": ["content", "scope"],
                 },
                 provider="memory",
+                read_only=False,
+                memory_mode="run",
+                parallel_safe=False,
             ),
         ]
 

@@ -108,7 +108,7 @@ def test_toolset_resource_cannot_mix_control_and_binding_edges() -> None:
     assert "resource_node_in_control_flow" in codes
 
 
-def test_xpert_app_preflight_blocks_bound_toolsets() -> None:
+def test_xpert_app_preflight_requires_explicit_tool_access_for_bound_toolsets() -> None:
     preflight = _deployment_preflight(
         XpertVersion(
             version=1,
@@ -122,6 +122,6 @@ def test_xpert_app_preflight_blocks_bound_toolsets() -> None:
         ),
         XpertAppPolicy(),
     )
-    assert "app_toolset_resource_forbidden" in {
+    assert "app_tools_not_allowed" in {
         str(item.get("code")) for item in preflight["issues"]
     }
