@@ -42,6 +42,41 @@ def _service(
 
 
 @pytest.mark.asyncio
+async def test_builtin_providers_are_stable_default_toolsets(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path / "toolsets")
+
+    warnings = await service.ensure_builtin_toolsets()
+    assert warnings == []
+    first = service.store.list_toolsets(limit=20)
+    todos = next(
+        item for item in first if item.connection.provider_id == "todos"
+    )
+    tavily = next(
+        item for item in first if item.connection.provider_id == "tavily"
+    )
+    assert todos.status == "published"
+    assert todos.published_version == 1
+    assert all(tool.enabled for tool in todos.tools)
+    assert tavily.status == "draft"
+    assert tavily.tools == []
+
+    await service.ensure_builtin_toolsets()
+    second = service.store.list_toolsets(limit=20)
+    assert len(second) == len(first) == 2
+    assert {item.id for item in second} == {item.id for item in first}
+
+    catalog = await service.builtin_provider_catalog()
+    todo_provider = next(item for item in catalog if item["id"] == "todos")
+    tavily_provider = next(item for item in catalog if item["id"] == "tavily")
+    assert todo_provider["default_toolset_id"] == todos.id
+    assert todo_provider["configuration_status"] == "ready"
+    assert tavily_provider["default_toolset_id"] == tavily.id
+    assert tavily_provider["configuration_status"] == "credential_required"
+
+
+@pytest.mark.asyncio
 async def test_builtin_tavily_provider_uses_encrypted_credential_and_safe_limits(
     tmp_path: Path,
 ) -> None:

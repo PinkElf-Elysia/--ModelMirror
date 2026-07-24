@@ -58,6 +58,7 @@ class XpertConversationMessage:
     role: Literal["user", "assistant"]
     content: str
     version: int | None = None
+    suggestions: list[str] = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
 
 
@@ -221,6 +222,7 @@ class XpertContextStore:
         role: Literal["user", "assistant"],
         content: str,
         version: int | None = None,
+        suggestions: list[str] | None = None,
     ) -> XpertConversationMessage:
         clean_content = self._required_text(content, "content", 100_000)
         message = XpertConversationMessage(
@@ -228,6 +230,11 @@ class XpertContextStore:
             role=role,
             content=clean_content,
             version=version,
+            suggestions=self._clean_values(
+                suggestions,
+                limit=6,
+                max_length=500,
+            ),
         )
         with self._lock:
             conversation = self._require_conversation_unlocked(xpert_id, conversation_id)
@@ -239,6 +246,21 @@ class XpertContextStore:
             conversation.updated_at = time.time()
             self._persist_unlocked()
         return message
+
+    def update_conversation_title(
+        self,
+        xpert_id: str,
+        conversation_id: str,
+        *,
+        title: str,
+    ) -> XpertConversation:
+        clean_title = self._required_text(title, "title", 120)
+        with self._lock:
+            conversation = self._require_conversation_unlocked(xpert_id, conversation_id)
+            conversation.title = clean_title
+            conversation.updated_at = time.time()
+            self._persist_unlocked()
+            return conversation
 
     def update_conversation_summary(
         self,

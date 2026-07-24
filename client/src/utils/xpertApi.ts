@@ -244,6 +244,58 @@ export function archiveXpertFile(
   );
 }
 
+export interface XpertAudioCapabilities {
+  version: number;
+  text_to_speech: {
+    enabled: boolean;
+    model_id: string;
+    voice: string;
+    max_text_chars: number;
+  };
+  speech_to_text: {
+    enabled: boolean;
+    model_id: string;
+    max_file_bytes: number;
+  };
+  gateway_configured: boolean;
+}
+
+export function getXpertAudioCapabilities(
+  xpertId: string,
+  version?: number,
+) {
+  const query = version ? `?version=${version}` : "";
+  return requestJson<XpertAudioCapabilities>(
+    `/api/xperts/${xpertId}/audio-capabilities${query}`,
+  );
+}
+
+export async function transcribeXpertAudio(
+  xpertId: string,
+  version: number,
+  file: File,
+) {
+  const body = new FormData();
+  body.append("version", String(version));
+  body.append("file", file);
+  return requestJson<{ text: string; model_id: string; xpert_version: number }>(
+    `/api/xperts/${xpertId}/audio/transcriptions`,
+    { method: "POST", body },
+  );
+}
+
+export async function synthesizeXpertSpeech(
+  xpertId: string,
+  version: number,
+  text: string,
+) {
+  const response = await fetch(`/api/xperts/${xpertId}/audio/speech`, {
+    ...jsonRequest("POST", { text, version }),
+  });
+  if (!response.ok) throw new Error(await readResponseError(response));
+  return response.blob();
+}
+
 export function listXpertMemories(
   xpertId: string,
   conversationId?: string,

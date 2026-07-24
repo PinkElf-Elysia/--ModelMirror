@@ -89,7 +89,162 @@ class ToolsetService:
     def set_tool_test_runner(self, runner: ToolTestRunner) -> None:
         self._tool_test_runner = runner
 
-    async def connect(self, toolset_id: str) -> ToolsetDefinition:
+    async def ensure_builtin_toolsets(self) -> list[str]:
+        """Materialize each builtin Provider as one stable default Toolset."""
+
+        warnings: list[str] = []
+        existing = self.store.list_toolsets(limit=500)
+        for provider in self.builtin_providers.list_providers():
+            provider_id = str(provider["id"])
+            matches = sorted(
+                (
+                    item
+                    for item in existing
+                    if item.kind == "builtin"
+                    and item.connection.provider_id == provider_id
+                    and item.status != "archived"
+                ),
+                key=lambda item: (item.created_at, item.id),
+            )
+            if matches:
+                item = matches[0]
+            else:
+                item = self.store.create_toolset(
+                    name=str(provider["title"]),
+                    kind="builtin",
+                    description=str(provider["description"]),
+                    tags=["builtin", "default-provider"],
+                    connection={
+                        "provider_id": provider_id,
+                        "timeout_seconds": 30,
+                        "response_limit_bytes": 2 * 1024 * 1024,
+                    },
+                )
+                existing.append(item)
+            try:
+                if (
+                    provider.get("credential_required")
+                    and not item.connection.provider_credential_id
+                ):
+                    continue
+                expected_tools = self.builtin_providers.provider_tools(provider_id)
+                current_by_name = {
+                    tool.original_name: tool for tool in item.tools
+                }
+                needs_refresh = item.runtime_status != "ready" or {
+                    tool.original_name for tool in expected_tools
+                } != set(current_by_name)
+                if not needs_refresh:
+                    needs_refresh = any(
+                        current_by_name[tool.original_name].schema_hash
+                        != _schema_hash(tool.input_schema)
+                        for tool in expected_tools
+                    )
+                if needs_refresh:
+                    item = await self.connect(item.id, enable_new_tools=True)
+                if provider_id == "todos" and item.published_version is None:
+                    await self.publish(
+                        item.id,
+                        expected_revision=item.revision,
+                        release_notes="Default builtin Provider",
+                    )
+            except Exception as exc:
+                warnings.append(f"{provider_id}: {str(exc)[:300]}")
+        return warnings
+
+    async def builtin_provider_catalog(self) -> list[dict[str, Any]]:
+        await self.ensure_builtin_toolsets()
+        items = self.store.list_toolsets(limit=500)
+        result: list[dict[str, Any]] = []
+        for provider in self.builtin_providers.list_providers():
+            provider_id = str(provider["id"])
+            matches = sorted(
+                (
+                    item
+                    for item in items
+                    if item.kind == "builtin"
+                    and item.connection.provider_id == provider_id
+                    and item.status != "archived"
+                ),
+                key=lambda item: (item.created_at, item.id),
+            )
+            default = matches[0] if matches else None
+            result.append(
+                {
+                    **provider,
+                    "singleton": True,
+                    "default_toolset_id": default.id if default else None,
+                    "configuration_status": (
+                        "ready"
+                        if default is not None
+                        and default.runtime_status == "ready"
+                        and (
+                            not provider.get("credential_required")
+                            or bool(default.connection.provider_credential_id)
+                        )
+                        else "credential_required"
+                        if provider.get("credential_required")
+                        else "unavailable"
+                    ),
+                    "published_version": (
+                        default.published_version if default is not None else None
+                    ),
+                }
+            )
+        return result
+
+    async def configure_builtin_provider(
+        self,
+        provider_id: str,
+        *,
+        name: str,
+        description: str,
+        credential_id: str,
+        tags: list[str],
+    ) -> ToolsetDefinition:
+        provider = self.builtin_providers.get_provider(provider_id)
+        await self.ensure_builtin_toolsets()
+        matches = sorted(
+            (
+                item
+                for item in self.store.list_toolsets(limit=500)
+                if item.kind == "builtin"
+                and item.connection.provider_id == provider_id
+                and item.status != "archived"
+            ),
+            key=lambda item: (item.created_at, item.id),
+        )
+        if not matches:
+            raise ToolsetValidationError(
+                f"Default builtin Provider Toolset is unavailable: {provider_id}."
+            )
+        item = matches[0]
+        resolved_credential = (
+            str(credential_id or "").strip()
+            or item.connection.provider_credential_id
+        )
+        if provider.get("credential_required") and not resolved_credential:
+            raise ToolsetValidationError("A Provider credential is required.")
+        connection = item.connection.model_copy(deep=True)
+        connection.provider_credential_id = resolved_credential
+        item = self.store.update_toolset(
+            item.id,
+            revision=item.revision,
+            patch={
+                "name": str(name or provider["title"]),
+                "description": str(description or provider["description"]),
+                "tags": list(tags or item.tags),
+                "connection": connection.model_dump(mode="json"),
+            },
+        )
+        return await self.connect(item.id, enable_new_tools=True)
+
+    async def connect(
+        self,
+        toolset_id: str,
+        *,
+        enable_new_tools: bool = False,
+    ) -> ToolsetDefinition:
         lock = self._locks.setdefault(toolset_id, asyncio.Lock())
         async with lock:
             item = self.store.get_toolset(toolset_id)
@@ -101,6 +256,7 @@ class ToolsetService:
                     toolset_id,
                     tools=tools,
                     runtime_status="ready",
+                    enable_new_tools=enable_new_tools,
                 )
             if item.kind != "mcp":
                 if not item.tools or not item.connection.api_base_url:

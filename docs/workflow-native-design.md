@@ -1,5 +1,7 @@
 # workflow-native 自研工作流设计
 
+> 2026-07-23 Agent Features：Xpert 草稿和不可变版本已固定开场白、建议问题、会话标题/摘要、记忆回复、文件策略和 TTS/STT。会话摘要编译为输出 `workflow_agent` 的隐式 `context_compression`，文件关闭时附件不会进入运行或 Goal。`XpertAgentConfig` 的最大并发与递归限制约束整棵执行树；节点级工具预算仍是更窄的局部限制。Classic Workflow SSE 不新增事件类型。
+
 > 2026-07-23 Toolset Semantics：`workflow_agent` 已支持单工具或有界并行 `tools` 决策。并行批次只接受只读、`parallel_safe`、非敏感、非终点工具，并受并发、总调用数、决策轮次和嵌套深度预算约束。固定 Toolset 版本同时保存敏感、终点、Tool Memory 与公共 App 语义；敏感工具必须有 HITL，terminal 成功后直接成为最终输出。SSE 事件类型保持兼容。
 
 > 2026-07-23 Toolset Runtime：`toolset_resource` 已成为真实资源节点，通过 `toolset-binding -> toolset` 绑定单个 `workflow_agent`。节点引用可发布的 MCP、OpenAPI、OData 或内置 Provider Toolset；Xpert 发布时固定具体版本，运行时只暴露版本中启用的工具，并复用 Tool Policy、HITL、Audit 与 checkpoint。绑定边不进入控制流和变量可达性；公开 App 仅允许逐工具显式确认的固定版本安全只读能力。

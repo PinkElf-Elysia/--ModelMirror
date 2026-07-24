@@ -18,9 +18,9 @@ from typing import Any, Literal
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 try:
@@ -61,13 +61,19 @@ try:
         XpertAppAccessGrant,
         XpertAppDefinition,
         XpertDefinition,
+        XpertFeatureConfig,
         XpertContextError,
         XpertContextNotFoundError,
         XpertContextValidationError,
         XpertNotFoundError,
         XpertRunRequest,
+        XpertSpeechRequest,
         XpertStoreError,
         XpertVersion,
+        deterministic_memory_reply,
+        gateway_audio_endpoint,
+        parse_conversation_enrichment,
+        validate_selected_files,
         configure_memory_writeback_runner,
         configure_xpert_app_runtime,
         get_xpert_context_store,
@@ -80,13 +86,19 @@ except ModuleNotFoundError:
         XpertAppAccessGrant,
         XpertAppDefinition,
         XpertDefinition,
+        XpertFeatureConfig,
         XpertContextError,
         XpertContextNotFoundError,
         XpertContextValidationError,
         XpertNotFoundError,
         XpertRunRequest,
+        XpertSpeechRequest,
         XpertStoreError,
         XpertVersion,
+        deterministic_memory_reply,
+        gateway_audio_endpoint,
+        parse_conversation_enrichment,
+        validate_selected_files,
         configure_memory_writeback_runner,
         configure_xpert_app_runtime,
         get_xpert_context_store,
@@ -420,6 +432,21 @@ except ModuleNotFoundError:
         create_final_output_approval,
         human_in_the_loop_final_confirmation,
         workflow_node_registry,
+    )
+
+try:
+    from server.xpert_runtime.execution_budget import (
+        XpertExecutionBudget,
+        charge_execution_step,
+        execution_operation,
+        use_execution_budget,
+    )
+except ModuleNotFoundError:
+    from xpert_runtime.execution_budget import (
+        XpertExecutionBudget,
+        charge_execution_step,
+        execution_operation,
+        use_execution_budget,
     )
 
 load_dotenv()
@@ -1588,7 +1615,9 @@ async def collect_chat_completion_text(
         max_tokens=max_tokens,
     )
 
-    async with httpx.AsyncClient(**llm_client_kwargs()) as client:
+    async with execution_operation("model_call"), httpx.AsyncClient(
+        **llm_client_kwargs()
+    ) as client:
         response = await client.post(
             url,
             headers=llm_gateway_headers(key),
@@ -2565,7 +2594,9 @@ async def stream_workflow_llm_messages(
     )
     current_model_id = model_id
 
-    async with httpx.AsyncClient(**llm_client_kwargs()) as client:
+    async with execution_operation("model_call"), httpx.AsyncClient(
+        **llm_client_kwargs()
+    ) as client:
         async def open_stream(candidate_model_id: str) -> httpx.Response:
             return await client.send(
                 client.build_request(
@@ -2707,6 +2738,11 @@ async def prepare_published_xpert_run(
     if require_published and xpert.status != "published":
         raise ValueError("Xpert must be published before it can run.")
     version = await asyncio.to_thread(store.get_version, xpert.id, payload.version)
+    features = (
+        version.features.model_copy(deep=True)
+        if version.features is not None
+        else XpertFeatureConfig()
+    )
 
     history: list[dict[str, str]] = []
     history_size = 0
@@ -2726,6 +2762,15 @@ async def prepare_published_xpert_run(
     file_owner_xpert_id = shared_file_owner_xpert_id or xpert.id
     file_conversation_id = shared_file_conversation_id or conversation_id
     file_asset_ids = list(shared_file_asset_ids or payload.file_asset_ids)
+    if file_asset_ids and not features.file_upload.enabled:
+        raise XpertContextValidationError(
+            "This Xpert version does not allow file input."
+        )
+    if len(file_asset_ids) > features.file_upload.max_files_per_run:
+        raise XpertContextValidationError(
+            "This Xpert version accepts at most "
+            f"{features.file_upload.max_files_per_run} files per run."
+        )
     if conversation_id:
         conversation = await asyncio.to_thread(
             xpert_context_store.get_conversation,
@@ -2746,6 +2791,15 @@ async def prepare_published_xpert_run(
             conversation_id=file_conversation_id,
             include_archived=bool(shared_file_asset_ids),
         )
+        try:
+            validate_selected_files(
+                selected_files,
+                enabled=features.file_upload.enabled,
+                max_files=features.file_upload.max_files_per_run,
+                allowed_extensions=features.file_upload.allowed_extensions,
+            )
+        except ValueError as exc:
+            raise XpertContextValidationError(str(exc)) from exc
 
     def render_memory_context(items: list[Any]) -> str:
         sections: list[str] = []
@@ -2782,6 +2836,14 @@ async def prepare_published_xpert_run(
             scope="conversation",
             conversation_id=conversation_id,
             limit=10,
+        )
+
+    memory_reply: tuple[str, str, float] | None = None
+    if features.memory_reply.enabled:
+        memory_reply = deterministic_memory_reply(
+            payload.message,
+            [*conversation_memories, *xpert_memories],
+            min_confidence=features.memory_reply.min_confidence,
         )
 
     workflow_payload = version.workflow.model_dump(mode="json")
@@ -2867,8 +2929,30 @@ async def prepare_published_xpert_run(
             "xpert_version": version.version,
             "xpert_draft_revision": version.draft_revision,
             "xpert_checksum": version.checksum,
+            "xpert_agent_config": (
+                version.agent_config.model_dump(mode="json")
+                if version.agent_config is not None
+                else None
+            ),
+            "xpert_features": features.model_dump(mode="json"),
+            "xpert_output_agent_node_id": output_agent_node_id,
+            "memory_reply": (
+                {
+                    "memory_id": memory_reply[0],
+                    "answer": memory_reply[1],
+                    "confidence": memory_reply[2],
+                }
+                if memory_reply is not None
+                else None
+            ),
             "handoff_depth": handoff_depth,
             "conversation_id": conversation_id,
+            "conversation_title": (
+                conversation.title if conversation is not None else None
+            ),
+            "conversation_message_count": (
+                len(conversation.messages) if conversation is not None else 0
+            ),
             "conversation_messages": (
                 [
                     {
@@ -2919,8 +3003,70 @@ async def prepare_published_xpert_run(
                     3,
                 ),
             ),
+            "feature_model_id": str(
+                (output_agent_data or {}).get("modelId")
+                or TEXT_FALLBACK_MODEL
+            ).strip(),
         },
     )
+
+
+async def generate_xpert_conversation_enrichment(
+    *,
+    model_id: str,
+    conversation_messages: list[dict[str, Any]],
+    user_message: str,
+    final_output: str,
+    generate_title: bool,
+    generate_suggestions: bool,
+    suggestion_count: int,
+) -> tuple[str, list[str]]:
+    if not generate_title and not generate_suggestions:
+        return "", []
+    bounded_messages: list[dict[str, str]] = []
+    used = 0
+    for item in conversation_messages[-12:]:
+        content = str(item.get("content") or "").strip()
+        if not content:
+            continue
+        remaining = 12_000 - used
+        if remaining <= 0:
+            break
+        bounded = content[:remaining]
+        bounded_messages.append(
+            {
+                "role": str(item.get("role") or "user"),
+                "content": bounded,
+            }
+        )
+        used += len(bounded)
+    prompt = (
+        "Return one strict JSON object for conversation UI metadata. "
+        "Do not include markdown. The title must be concise and factual. "
+        "Suggestions must be useful next user questions, not answers.\n"
+        f"Generate title: {str(generate_title).lower()}\n"
+        f"Generate suggestions: {str(generate_suggestions).lower()}\n"
+        f"Suggestion count: {max(1, min(suggestion_count, 6))}\n"
+        'Schema: {"title":"string","suggestions":["string"]}\n\n'
+        f"Recent conversation:\n{json.dumps(bounded_messages, ensure_ascii=False)}\n\n"
+        f"Current user message:\n{user_message[:4_000]}\n\n"
+        f"Assistant answer:\n{final_output[:8_000]}"
+    )
+    raw = await collect_chat_completion_text(
+        model_id,
+        [ChatMessage(role="user", content=prompt)],
+        temperature=0.2,
+        max_tokens=600,
+    )
+    title, suggestions = parse_conversation_enrichment(
+        raw,
+        suggestion_limit=suggestion_count,
+    )
+    if not generate_title:
+        title = ""
+    if not generate_suggestions:
+        suggestions = []
+    return title, suggestions
 
 
 async def generate_xpert_memory_candidates(
@@ -3213,6 +3359,22 @@ async def _run_workflow_response(
         if resume_execution is not None
         else sorted(start_node_ids, key=lambda node_id: order_index[node_id])
     )
+    execution_budget: XpertExecutionBudget | None = None
+    raw_agent_config = run_metadata.get("xpert_agent_config")
+    if runtime_run_type in {"xpert", "xpert_app"} and isinstance(
+        raw_agent_config, dict
+    ):
+        restored_budget = resume_state.get("execution_budget")
+        restored_steps = (
+            int(restored_budget.get("steps_used") or 0)
+            if isinstance(restored_budget, dict)
+            else 0
+        )
+        execution_budget = XpertExecutionBudget(
+            max_concurrency=int(raw_agent_config.get("max_concurrency") or 4),
+            recursion_limit=int(raw_agent_config.get("recursion_limit") or 1000),
+            steps_used=restored_steps,
+        )
     task_state: dict[str, Any] = {
         "task_id": task_id,
         "run_id": workflow_run.run_id,
@@ -3237,6 +3399,7 @@ async def _run_workflow_response(
         "runtime_event_store": RuntimeEventStore(),
         "tool_audit_store": InMemoryToolAuditStore(),
         "runtime_metadata": run_metadata,
+        "execution_budget": execution_budget,
         "middleware_binding_edges": [
             edge
             for edge in payload.workflow.edges
@@ -3273,7 +3436,7 @@ async def _run_workflow_response(
             runtime_metadata=run_metadata,
         )
 
-    async def workflow_stream():
+    async def workflow_stream_body():
         variables: dict[str, str] = task_state["variables"]
         queue: deque[str] = task_state["queue"]
         queued: set[str] = task_state["queued"]
@@ -3410,6 +3573,64 @@ async def _run_workflow_response(
                                 node_data.get("modelId") or ""
                             ).strip(),
                             "max_candidates": 3,
+                        },
+                    )
+                )
+            runtime_metadata = task_state.get("runtime_metadata") or {}
+            feature_config = runtime_metadata.get("xpert_features") or {}
+            summary_config = (
+                feature_config.get("conversation_summary")
+                if isinstance(feature_config, dict)
+                else None
+            )
+            is_output_agent = str(
+                runtime_metadata.get("xpert_output_agent_node_id") or ""
+            ) == node_id
+            if (
+                middleware_spec(specs, "context_compression") is None
+                and is_output_agent
+                and isinstance(summary_config, dict)
+                and workflow_truthy(summary_config.get("enabled"))
+            ):
+                specs.append(
+                    RuntimeMiddlewareSpec(
+                        node_id=f"{node_id}:implicit-conversation-summary",
+                        middleware_id="context_compression",
+                        priority=90,
+                        binding="implicit",
+                        config={
+                            "max_context_tokens": max(
+                                2_048,
+                                min(
+                                    int(
+                                        summary_config.get("max_context_chars")
+                                        or 48_000
+                                    )
+                                    // 2,
+                                    200_000,
+                                ),
+                            ),
+                            "trigger_ratio": float(
+                                summary_config.get("trigger_ratio") or 0.75
+                            ),
+                            "keep_recent_messages": int(
+                                summary_config.get("keep_recent_messages") or 8
+                            ),
+                            "summary_model_id": str(
+                                summary_config.get("model_id") or ""
+                            ).strip(),
+                            "summary_max_tokens": max(
+                                256,
+                                min(
+                                    int(
+                                        summary_config.get("max_summary_chars")
+                                        or 4_000
+                                    )
+                                    // 2,
+                                    4_000,
+                                ),
+                            ),
+                            "max_tool_output_chars": 4_000,
                         },
                     )
                 )
@@ -5354,6 +5575,7 @@ async def _run_workflow_response(
 
                 if node_id in executed:
                     continue
+                await charge_execution_step("workflow_node")
 
                 yield sse_payload(
                     {
@@ -7407,6 +7629,55 @@ async def _run_workflow_response(
                                     },
                                 )
                             success = True
+                        memory_reply = run_context.get("memory_reply")
+                        if (
+                            not success
+                            and node.id
+                            == str(
+                                run_context.get("xpert_output_agent_node_id") or ""
+                            )
+                            and isinstance(memory_reply, dict)
+                            and str(memory_reply.get("answer") or "").strip()
+                            and structured_spec is None
+                            and ralph_spec is None
+                            and not (
+                                hitl_spec is not None
+                                and human_in_the_loop_final_confirmation(hitl_spec)
+                            )
+                        ):
+                            output = str(memory_reply.get("answer") or "").strip()
+                            success = True
+                            await run_registry.record_checkpoint(
+                                workflow_agent_run.run_id,
+                                event_type="xpert.memory.reply",
+                                title="High-confidence memory reply used",
+                                summary=(
+                                    "memory_id="
+                                    f"{str(memory_reply.get('memory_id') or '')[:80]}, "
+                                    f"output_length={len(output)}"
+                                ),
+                                metadata={
+                                    "node_id": node.id,
+                                    "memory_id": str(
+                                        memory_reply.get("memory_id") or ""
+                                    ),
+                                    "confidence": float(
+                                        memory_reply.get("confidence") or 0
+                                    ),
+                                    "output_length": len(output),
+                                },
+                            )
+                            yield sse_payload(
+                                {
+                                    "event": "node_delta",
+                                    "node_id": node.id,
+                                    "node_title": title,
+                                    "node_type": kind,
+                                    "output": output,
+                                    "variable": output_variable,
+                                    "run_id": workflow_agent_run.run_id,
+                                }
+                            )
                         fallback_checkpoint_recorded = False
                         for attempt_index, (attempt_model_id, fallback_used) in enumerate(
                             [] if success else attempt_models,
@@ -8971,6 +9242,85 @@ async def _run_workflow_response(
                     "variables_count": len(variables),
                 },
             )
+            conversation_suggestions: list[str] = []
+            generated_conversation_title = ""
+            if (
+                runtime_run_type == "xpert"
+                and run_metadata.get("conversation_id")
+                and final_output
+            ):
+                feature_config = run_metadata.get("xpert_features") or {}
+                question_config = (
+                    feature_config.get("generated_questions")
+                    if isinstance(feature_config, dict)
+                    else {}
+                ) or {}
+                title_config = (
+                    feature_config.get("conversation_title")
+                    if isinstance(feature_config, dict)
+                    else {}
+                ) or {}
+                generate_suggestions = workflow_truthy(
+                    question_config.get("enabled")
+                )
+                generate_title = (
+                    workflow_truthy(title_config.get("enabled"))
+                    and str(
+                        run_metadata.get("conversation_title") or ""
+                    ).strip()
+                    in {"", "New conversation"}
+                    and int(
+                        run_metadata.get("conversation_message_count") or 0
+                    )
+                    == 0
+                )
+                if generate_title or generate_suggestions:
+                    enrichment_model_id = str(
+                        question_config.get("model_id")
+                        or title_config.get("model_id")
+                        or run_metadata.get("feature_model_id")
+                        or TEXT_FALLBACK_MODEL
+                    ).strip()
+                    try:
+                        (
+                            generated_conversation_title,
+                            conversation_suggestions,
+                        ) = await generate_xpert_conversation_enrichment(
+                            model_id=enrichment_model_id,
+                            conversation_messages=list(
+                                run_metadata.get("conversation_messages") or []
+                            ),
+                            user_message=str(variables.get("user_input") or ""),
+                            final_output=final_output,
+                            generate_title=generate_title,
+                            generate_suggestions=generate_suggestions,
+                            suggestion_count=int(
+                                question_config.get("count") or 3
+                            ),
+                        )
+                        await run_registry.record_checkpoint(
+                            workflow_run.run_id,
+                            event_type="xpert.conversation.enriched",
+                            title="Conversation metadata generated",
+                            summary=(
+                                f"title_generated={bool(generated_conversation_title)}, "
+                                f"suggestion_count={len(conversation_suggestions)}"
+                            ),
+                            metadata={
+                                "title_generated": bool(
+                                    generated_conversation_title
+                                ),
+                                "suggestion_count": len(
+                                    conversation_suggestions
+                                ),
+                                "model_id": enrichment_model_id,
+                            },
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "Failed to generate Xpert conversation metadata: %s",
+                            exc,
+                        )
             if runtime_run_type == "xpert" and run_metadata.get("conversation_id"):
                 try:
                     await asyncio.to_thread(
@@ -8980,7 +9330,15 @@ async def _run_workflow_response(
                         role="assistant",
                         content=final_output or "Run completed without text output.",
                         version=int(run_metadata.get("xpert_version") or 1),
+                        suggestions=conversation_suggestions,
                     )
+                    if generated_conversation_title:
+                        await asyncio.to_thread(
+                            xpert_context_store.update_conversation_title,
+                            str(run_metadata.get("xpert_id") or ""),
+                            str(run_metadata.get("conversation_id") or ""),
+                            title=generated_conversation_title,
+                        )
                 except XpertContextError as exc:
                     logger.warning("Failed to persist Xpert assistant message: %s", exc)
             if (
@@ -9017,6 +9375,8 @@ async def _run_workflow_response(
                     "run_id": workflow_run.run_id,
                     "final_output": final_output,
                     "variables": variables,
+                    "suggestions": conversation_suggestions,
+                    "conversation_title": generated_conversation_title or None,
                 }
             )
             workflow_execution_store.complete(task_id, result=final_output)
@@ -9027,6 +9387,8 @@ async def _run_workflow_response(
                     "task_id": task_id,
                     "run_id": workflow_run.run_id,
                     "final_output": final_output,
+                    "suggestions": conversation_suggestions,
+                    "conversation_title": generated_conversation_title or None,
                 },
             )
         except RuntimeInterrupt as interrupt:
@@ -9054,6 +9416,16 @@ async def _run_workflow_response(
                         if isinstance(spec, RuntimeMiddlewareSpec)
                     ],
                 },
+                "execution_budget": (
+                    {
+                        "steps_used": task_state["execution_budget"].steps_used,
+                    }
+                    if isinstance(
+                        task_state.get("execution_budget"),
+                        XpertExecutionBudget,
+                    )
+                    else None
+                ),
             }
             if interrupt.wait_kind == "client_tool":
                 client_request = client_tool_store.require_request(interrupt.wait_id)
@@ -9206,6 +9578,11 @@ async def _run_workflow_response(
             durable_execution = workflow_execution_store.get(task_id)
             if durable_execution is None or durable_execution.status != "waiting":
                 task_state["completed_at"] = time.monotonic()
+
+    async def workflow_stream():
+        with use_execution_budget(task_state.get("execution_budget")):
+            async for event in workflow_stream_body():
+                yield event
 
     return StreamingResponse(
         workflow_stream(),
@@ -10126,6 +10503,193 @@ def get_goal_coordinator() -> GoalCoordinator:
     return goal_coordinator
 
 
+async def resolve_xpert_audio_version(
+    xpert_id: str,
+    version_number: int | None,
+) -> tuple[XpertDefinition, XpertVersion, XpertFeatureConfig]:
+    store = get_xpert_store()
+    xpert = await asyncio.to_thread(store.get_xpert, xpert_id)
+    if xpert.status != "published":
+        raise XpertNotFoundError("Xpert must be published before audio features can run.")
+    version = await asyncio.to_thread(
+        store.get_version,
+        xpert.id,
+        version_number,
+    )
+    features = (
+        version.features.model_copy(deep=True)
+        if version.features is not None
+        else XpertFeatureConfig()
+    )
+    return xpert, version, features
+
+
+@app.get("/api/xperts/{xpert_id}/audio-capabilities")
+async def get_xpert_audio_capabilities(
+    xpert_id: str,
+    version: int | None = None,
+):
+    try:
+        _, snapshot, features = await resolve_xpert_audio_version(
+            xpert_id,
+            version,
+        )
+    except XpertNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {
+        "version": snapshot.version,
+        "text_to_speech": {
+            "enabled": features.text_to_speech.enabled,
+            "model_id": features.text_to_speech.model_id,
+            "voice": features.text_to_speech.voice,
+            "max_text_chars": features.text_to_speech.max_text_chars,
+        },
+        "speech_to_text": {
+            "enabled": features.speech_to_text.enabled,
+            "model_id": features.speech_to_text.model_id,
+            "max_file_bytes": 10 * 1024 * 1024,
+        },
+        "gateway_configured": bool(get_llm_gateway_config()[0]),
+    }
+
+
+@app.post("/api/xperts/{xpert_id}/audio/transcriptions")
+async def transcribe_xpert_audio(
+    xpert_id: str,
+    file: UploadFile = File(...),
+    version: int | None = Form(default=None),
+):
+    try:
+        _, snapshot, features = await resolve_xpert_audio_version(
+            xpert_id,
+            version,
+        )
+        config = features.speech_to_text
+        if not config.enabled or not config.model_id.strip():
+            raise ValueError(
+                "Speech transcription is not enabled for this Xpert version."
+            )
+        filename = Path(file.filename or "audio").name
+        extension = Path(filename).suffix.lower()
+        if extension not in {
+            ".flac",
+            ".m4a",
+            ".mp3",
+            ".mp4",
+            ".mpeg",
+            ".mpga",
+            ".ogg",
+            ".wav",
+            ".webm",
+        }:
+            raise ValueError("Unsupported audio file type.")
+        content = await file.read(10 * 1024 * 1024 + 1)
+        if not content or len(content) > 10 * 1024 * 1024:
+            raise ValueError("Audio input must be between 1 byte and 10 MB.")
+        url, key = get_llm_gateway_config()
+        if not url:
+            raise RuntimeError(LLM_GATEWAY_NOT_CONFIGURED_MESSAGE)
+        headers = llm_gateway_headers(key)
+        headers.pop("Content-Type", None)
+        async with httpx.AsyncClient(**llm_client_kwargs()) as client:
+            response = await client.post(
+                gateway_audio_endpoint(url, "audio/transcriptions"),
+                headers=headers,
+                data={"model": config.model_id},
+                files={
+                    "file": (
+                        filename,
+                        content,
+                        file.content_type or "application/octet-stream",
+                    )
+                },
+            )
+        if response.status_code >= 400:
+            message, _ = parse_upstream_error(
+                response.status_code,
+                response.content,
+            )
+            raise RuntimeError(message)
+        payload = response.json()
+        text = (
+            str(payload.get("text") or "").strip()
+            if isinstance(payload, dict)
+            else ""
+        )
+        if not text:
+            raise RuntimeError("The transcription gateway returned no text.")
+        return {
+            "text": text[:20_000],
+            "model_id": config.model_id,
+            "xpert_version": snapshot.version,
+        }
+    except XpertNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    finally:
+        await file.close()
+
+
+@app.post("/api/xperts/{xpert_id}/audio/speech")
+async def synthesize_xpert_speech(
+    xpert_id: str,
+    payload: XpertSpeechRequest,
+):
+    try:
+        _, snapshot, features = await resolve_xpert_audio_version(
+            xpert_id,
+            payload.version,
+        )
+        config = features.text_to_speech
+        if not config.enabled or not config.model_id.strip():
+            raise ValueError(
+                "Text-to-speech is not enabled for this Xpert version."
+            )
+        if len(payload.text) > config.max_text_chars:
+            raise ValueError(
+                "Speech text exceeds this Xpert version's configured limit."
+            )
+        url, key = get_llm_gateway_config()
+        if not url:
+            raise RuntimeError(LLM_GATEWAY_NOT_CONFIGURED_MESSAGE)
+        async with httpx.AsyncClient(**llm_client_kwargs()) as client:
+            response = await client.post(
+                gateway_audio_endpoint(url, "audio/speech"),
+                headers=llm_gateway_headers(key),
+                json={
+                    "model": config.model_id,
+                    "input": payload.text,
+                    "voice": config.voice,
+                    "response_format": "mp3",
+                },
+            )
+        if response.status_code >= 400:
+            message, _ = parse_upstream_error(
+                response.status_code,
+                response.content,
+            )
+            raise RuntimeError(message)
+        if not response.content:
+            raise RuntimeError("The speech gateway returned no audio.")
+        return Response(
+            content=response.content,
+            media_type=response.headers.get("content-type", "audio/mpeg"),
+            headers={
+                "X-ModelMirror-Xpert-Version": str(snapshot.version),
+                "Cache-Control": "no-store",
+            },
+        )
+    except XpertNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
 @app.post("/api/xperts/{xpert_id}/run")
 async def run_published_xpert(
     xpert_id: str,
@@ -11035,6 +11599,9 @@ async def team_chat(payload: TeamChatRequest, request: Request):
 async def start_mcp_ttl_cleanup() -> None:
     await asyncio.to_thread(datax_service.recover_import_jobs)
     mcp_manager.start_ttl_cleanup(on_cleanup=tool_registry.unregister_sessions)
+    builtin_warnings = await toolset_service.ensure_builtin_toolsets()
+    for warning in builtin_warnings:
+        logger.warning("Builtin Provider Toolset initialization failed: %s", warning)
     toolset_warnings = await toolset_service.autostart()
     for warning in toolset_warnings:
         logger.warning("Toolset auto-start failed: %s", warning)

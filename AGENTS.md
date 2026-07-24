@@ -74,6 +74,60 @@ Harness Engineering 的意思是：先搭护栏，再做功能。任何变更都
 6. 不泄密：不得提交 `.env`、API Key、token、日志中的敏感信息。
 7. 不破坏：不得重置、删除或回滚用户未授权的文件。
 
+### 2.1 证据等级
+
+仓库内的工程判断必须标注其证据等级，不得把推测写成事实：
+
+- **已证实事实**：能指向当前仓库中的代码、配置、测试、命令输出或已批准需求。
+- **合理推断**：由多个事实推导，但尚未获得产品或运行证据；必须写明推断依据。
+- **建议方案**：尚未实施的设计选择，不得写成已经存在的能力。
+- **待确认**：缺少负责人决定或可靠证据，必须保留给用户或产品负责人确认。
+
+目标客户、用户故事、商业目标、SLA、组织权限和合规承诺若没有明确输入，统一标记为“待确认”，禁止 AI 自行补写。
+
+### 2.2 任务开工契约
+
+开始修改前必须完成并记录：
+
+1. 当前分支、工作树状态和未跟踪文件。
+2. 与任务直接相关的入口、实现、数据结构和测试证据。
+3. 本次目标、允许修改路径、禁止修改路径、公共接口变化和数据迁移影响。
+4. 最小验收命令、完整回归命令和失败回退方式。
+5. 风险等级及是否涉及密钥、网络、文件、子进程、持久化或公开 API。
+
+默认单批最多修改 5 个文件。超过时必须说明为什么无法安全拆分，并保持单一可验收目标。任务卡模板见 `docs/templates/task-card.md`。
+
+### 2.3 停止条件
+
+出现以下任一情况时停止写入并先处理或请求确认：
+
+- 发现用户未说明的同文件冲突，且无法在不覆盖其改动的前提下继续。
+- 需求依赖未知产品规则、目标客户、权限模型、数据保留策略或外部契约。
+- 必须读取、打印或提交真实密钥才能继续。
+- 需要破坏性迁移、删除持久化数据、重写 Git 历史或扩大公共 API。
+- 关键测试失败且失败原因不属于本次改动，无法证明继续修改是安全的。
+- 实际变更范围显著超过任务卡，或回退路径不再成立。
+
+### 2.4 受保护路径
+
+| 路径或资源 | 保护原因 | 修改要求 |
+| --- | --- | --- |
+| `server/.env`、任何 token/key 文件 | 真实凭据 | 只允许本地配置，不得暂存、提交或输出原值。 |
+| `server/*/storage/`、`new-api-data/`、上传与索引目录 | 用户持久化数据 | 不纳入提交；删除、迁移或清空必须获得明确授权。 |
+| `client/package-lock.json`、`server/requirements.txt` | 依赖与供应链 | 只有任务确需依赖时修改，并记录许可证、版本和回退。 |
+| `docker-compose.yml`、Dockerfile、sidecar 配置 | 部署与隔离边界 | 必须运行 Compose 配置/构建与安全冒烟。 |
+| `/api/chat`、classic workflow runner、Xpert/App 执行链 | 稳定主路径 | 必须有针对性测试、全链路回归和兼容说明。 |
+| 已发布 Xpert/Toolset/Knowledge 版本 | 不可变线上快照 | 只创建新版本或显式回滚，不得原地修改。 |
+
+### 2.5 依赖和验证真实性
+
+- 优先使用现有依赖；新增依赖必须说明必要性、固定版本、许可证、镜像体积与安全影响。
+- 不得通过关闭类型检查、跳过校验、删除测试或降低断言来制造“通过”。
+- 验证结果只允许使用：`通过`、`失败`、`未运行`、`不适用`。
+- “通过”必须附实际执行命令和可核对摘要；不得把预计结果写成已运行结果。
+- 修改后必须检查 `git diff`、`git diff --check`、暂存文件清单和敏感信息扫描结果。
+- 仓库当前没有 GitHub Actions 工作流；在 CI 建立前，本地验证是强制交付证据，不能表述为“CI 已通过”。
+
 ## 3. 红线
 
 严禁：
@@ -411,6 +465,17 @@ Office 自动化是高风险客户端副作用路径。修改 `server/xpert_runt
 - 内置 Provider 必须复用现有 Store 与执行器。Todo 不得创建第二套 Todo Store；Knowledge、Memory 和 Data X 不得复制已有 Provider 逻辑。
 - 公共 App Toolset 必须固定已发布版本，要求 `allow_tools`、Tool Policy，以及全部工具显式 `public_app_allowed`、只读、非敏感、非 conversation memory。凭据只在服务端解析。
 - 修改 Toolset Runtime 至少运行 `test_toolset_semantics.py`、`test_toolset_store.py`、`test_toolset_service.py`、`test_toolset_api.py`、`test_toolset_api_compiler.py`、`test_toolset_api_runtime.py`、`test_workflow_toolset_resource.py`、MCP/Toolset/Workflow/Xpert/App 回归和前端生产构建。
+
+### Xpert 版本化会话功能
+
+- 开场白、问题建议、会话标题/摘要、记忆回复、文件策略和 TTS/STT 必须固定进不可变 `XpertVersion.features`。草稿更新不得改变已发布版本的聊天行为。
+- 会话摘要必须复用 `context_compression`，保留原消息，并只持久化派生摘要、revision 和覆盖边界；不得把完整消息正文写入 checkpoint。
+- 文件能力关闭时，历史附件仍可查看，但不得注入 Xpert、Goal 或知识候选。扩展名和每轮文件数必须在前后端双重校验。
+- TTS/STT 只能使用模型注册表中显式选择的 speech/transcription 模型和既有 LLM Gateway/OpenRouter 兼容配置；不得在前端或源码硬编码供应商密钥。
+- 记忆直答必须满足明确的高置信阈值和作用域检查；不确定时继续走原模型执行，不得静默返回模糊记忆。
+- `XpertAgentConfig.max_concurrency` 与 `recursion_limit` 约束整个 Xpert 执行树。节点级 `maxToolConcurrency`、`maxToolCalls`、`maxToolDepth` 和 `maxIterations` 只能收紧局部工具循环。
+- 修改这些能力至少运行 `test_xpert_agent_features.py`、`test_xpert_publish.py`、`test_xpert_context.py`、`test_xpert_file_memory.py`、workflow agent、Toolset/App 回归和前端生产构建。
+
 - EvoAgentX 只允许选择性移植已锁定 commit 且许可证审计通过的 MIT 文件；必须保留版权和 NOTICE，并在 `docs/EVOAGENTX_ALIGNMENT.md` 记录来源。
 - EvoAgentX optimizer 或 planner 只能产生候选 Xpert 草稿与评估报告，不得静默发布、覆盖人工草稿或修改不可变线上版本。
 

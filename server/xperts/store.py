@@ -249,12 +249,22 @@ class XpertStore:
             workflow.id = f"xpert-{item.id}-v{next_version}"
             workflow.title = item.name
             workflow.version = f"xpert-v{next_version}"
+            published_features = item.draft.features.model_copy(deep=True)
+            if (
+                item.starters
+                and not published_features.opening.questions
+                and not published_features.opening.message.strip()
+            ):
+                published_features.opening.enabled = True
+                published_features.opening.questions = list(item.starters)
             canonical = json.dumps(
                 {
                     "workflow": workflow.model_dump(mode="json"),
                     "input_variable": item.draft.input_variable,
                     "history_variable": item.draft.history_variable,
                     "output_variable": item.draft.output_variable,
+                    "agent_config": item.draft.agent_config.model_dump(mode="json"),
+                    "features": published_features.model_dump(mode="json"),
                 },
                 ensure_ascii=False,
                 sort_keys=True,
@@ -267,6 +277,8 @@ class XpertStore:
                 input_variable=item.draft.input_variable,
                 history_variable=item.draft.history_variable,
                 output_variable=item.draft.output_variable,
+                agent_config=item.draft.agent_config.model_copy(deep=True),
+                features=published_features,
                 release_notes=release_notes.strip()[:2000],
                 checksum=hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
                 published_at=time.time(),

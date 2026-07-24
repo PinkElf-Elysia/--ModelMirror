@@ -121,7 +121,7 @@ async def list_toolsets(status: str | None = None) -> dict[str, Any]:
 async def list_builtin_toolset_providers() -> dict[str, Any]:
     return {
         "version": "modelmirror-builtin-tool-providers-v1",
-        "providers": get_toolset_service().builtin_providers.list_providers(),
+        "providers": await get_toolset_service().builtin_provider_catalog(),
     }
 
 
@@ -140,21 +140,13 @@ async def create_builtin_provider_instance(
             raise ToolsetValidationError(
                 "This builtin Provider is available through its existing Runtime binding."
             )
-        if provider.get("credential_required") and not request.credential_id:
-            raise ToolsetValidationError("A Provider credential is required.")
-        item = service.store.create_toolset(
+        item = await service.configure_builtin_provider(
+            provider_id,
             name=request.name,
-            kind="builtin",
             description=request.description,
+            credential_id=request.credential_id,
             tags=request.tags,
-            connection={
-                "provider_id": provider_id,
-                "provider_credential_id": request.credential_id,
-                "timeout_seconds": 30,
-                "response_limit_bytes": 2 * 1024 * 1024,
-            },
         )
-        item = await service.connect(item.id)
         return item.model_dump(mode="json")
     except Exception as exc:
         raise _error(exc) from exc

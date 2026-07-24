@@ -4,8 +4,10 @@ import PageContainer from "../components/PageContainer";
 import WorkflowEditor from "../components/workflow/WorkflowEditor";
 import XpertAppDeploymentPanel from "../components/xpert/XpertAppDeploymentPanel";
 import AuthoringProposalPanel from "../components/authoring/AuthoringProposalPanel";
+import XpertFeatureSettings from "../components/xpert/XpertFeatureSettings";
 import {
   type XpertDefinition,
+  type XpertFeatureConfig,
   type XpertValidationResult,
 } from "../types/xpert";
 import { type WorkflowDefinition } from "../types/workflow";
@@ -39,6 +41,9 @@ export default function XpertStudioPage() {
   const [description, setDescription] = useState("");
   const [tags, setTags] = useState("");
   const [starters, setStarters] = useState("");
+  const [maxConcurrency, setMaxConcurrency] = useState(4);
+  const [recursionLimit, setRecursionLimit] = useState(1000);
+  const [features, setFeatures] = useState<XpertFeatureConfig | null>(null);
   const [releaseNotes, setReleaseNotes] = useState("");
   const [validation, setValidation] = useState<XpertValidationResult | null>(null);
   const [loading, setLoading] = useState(true);
@@ -57,6 +62,9 @@ export default function XpertStudioPage() {
         setDescription(data.description);
         setTags(data.tags.join(", "));
         setStarters(data.starters.join("\n"));
+        setMaxConcurrency(data.draft.agent_config?.max_concurrency ?? 4);
+        setRecursionLimit(data.draft.agent_config?.recursion_limit ?? 1000);
+        setFeatures(data.draft.features);
         document.title = `模镜 - ${data.name} Studio`;
       })
       .catch((caught) => {
@@ -75,11 +83,28 @@ export default function XpertStudioPage() {
     setBusy("metadata");
     setError("");
     try {
+      const nextStarters = starters.split("\n").map((item) => item.trim()).filter(Boolean);
       const updated = await updateXpert(xpert.id, {
         name: name.trim(),
         description: description.trim(),
         tags: splitTags(tags),
-        starters: starters.split("\n").map((item) => item.trim()).filter(Boolean),
+        starters: nextStarters,
+        draft: {
+          ...xpert.draft,
+          agent_config: {
+            max_concurrency: maxConcurrency,
+            recursion_limit: recursionLimit,
+          },
+          features: features
+            ? {
+                ...features,
+                opening: {
+                  ...features.opening,
+                  questions: nextStarters,
+                },
+              }
+            : xpert.draft.features,
+        },
       });
       setXpert(updated);
       setNotice("基础信息已保存");
@@ -198,6 +223,36 @@ export default function XpertStudioPage() {
               <input className="h-10 rounded-lg border border-white/10 bg-white/[0.04] px-3 text-xs text-slate-300 outline-none focus:border-hire-300/60" onChange={(event) => setTags(event.target.value)} placeholder="标签，以逗号分隔" value={tags} />
               <textarea className="min-h-10 resize-y rounded-lg border border-white/10 bg-white/[0.04] px-3 py-2 text-xs text-slate-300 outline-none focus:border-hire-300/60" onChange={(event) => setStarters(event.target.value)} placeholder="开场问题，每行一个" rows={1} value={starters} />
             </div>
+            <div className="mt-3 grid gap-3 rounded-lg border border-white/10 bg-white/[0.025] p-3 lg:grid-cols-2">
+              <label className="text-xs font-semibold text-slate-300">
+                最大并发请求
+                <input
+                  className="mt-1 h-10 w-full rounded-md border border-white/10 bg-ink-950 px-3 text-sm text-white outline-none focus:border-hire-300/60"
+                  max={100}
+                  min={1}
+                  onChange={(event) => setMaxConcurrency(Number(event.target.value))}
+                  type="number"
+                  value={maxConcurrency}
+                />
+                <span className="mt-1 block font-normal leading-5 text-slate-500">
+                  作用于整个 Xpert 执行树中的模型、工具与子 Xpert。
+                </span>
+              </label>
+              <label className="text-xs font-semibold text-slate-300">
+                递归次数限制
+                <input
+                  className="mt-1 h-10 w-full rounded-md border border-white/10 bg-ink-950 px-3 text-sm text-white outline-none focus:border-hire-300/60"
+                  max={10000}
+                  min={100}
+                  onChange={(event) => setRecursionLimit(Number(event.target.value))}
+                  type="number"
+                  value={recursionLimit}
+                />
+                <span className="mt-1 block font-normal leading-5 text-slate-500">
+                  统计控制节点、模型决策、工具调用和外部专家调用。
+                </span>
+              </label>
+            </div>
           </div>
           <div className="flex shrink-0 flex-wrap gap-2">
             <button className="rounded-full border border-white/10 bg-white/[0.05] px-3 py-2 text-xs font-semibold text-slate-200 transition hover:border-hire-300/35" disabled={Boolean(busy)} onClick={() => void saveMetadata()} type="button">
@@ -222,6 +277,16 @@ export default function XpertStudioPage() {
           </p>
         ) : null}
       </header>
+
+      {features ? (
+        <XpertFeatureSettings
+          onChange={(next) => {
+            setFeatures(next);
+            setStarters(next.opening.questions.join("\n"));
+          }}
+          value={features}
+        />
+      ) : null}
 
       <section className="mb-5 grid gap-4 xl:grid-cols-[minmax(0,1fr)_380px]">
         <div className="rounded-lg border border-white/10 bg-white/[0.035] p-4">

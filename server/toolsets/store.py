@@ -180,6 +180,7 @@ class ToolsetStore:
         *,
         tools: list[dict[str, Any] | ToolDefinition],
         runtime_status: str = "connected",
+        enable_new_tools: bool = False,
         import_warnings: list[str] | None = None,
         drift_report: dict[str, Any] | None = None,
         connection: MCPConnectionProfile | None = None,
@@ -210,7 +211,9 @@ class ToolsetStore:
                 candidate.default_arguments = (
                     dict(previous.default_arguments) if previous else {}
                 )
-                candidate.enabled = previous.enabled if previous else False
+                candidate.enabled = (
+                    previous.enabled if previous else bool(enable_new_tools)
+                )
                 candidate.order = previous.order if previous else index
                 candidate.read_only = (
                     previous.read_only if previous else candidate.read_only

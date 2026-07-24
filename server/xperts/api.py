@@ -413,7 +413,52 @@ def _validate_xpert_for_publish(
         candidate,
         validate_xpert_definition(candidate),
     )
-    issues = [*validation.issues, *resource_issues]
+    feature_issues: list[ValidationIssue] = []
+    features = candidate.draft.features
+    if (
+        features.text_to_speech.enabled
+        and not features.text_to_speech.model_id.strip()
+    ):
+        feature_issues.append(
+            ValidationIssue(
+                code="xpert_tts_model_required",
+                message="Select a speech model before enabling text-to-speech.",
+            )
+        )
+    if (
+        features.speech_to_text.enabled
+        and not features.speech_to_text.model_id.strip()
+    ):
+        feature_issues.append(
+            ValidationIssue(
+                code="xpert_stt_model_required",
+                message="Select a transcription model before enabling speech-to-text.",
+            )
+        )
+    supported_file_extensions = {".txt", ".md", ".markdown", ".pdf"}
+    configured_extensions = {
+        (
+            value.strip().lower()
+            if value.strip().startswith(".")
+            else f".{value.strip().lower()}"
+        )
+        for value in features.file_upload.allowed_extensions
+        if value.strip()
+    }
+    unsupported_extensions = sorted(
+        configured_extensions - supported_file_extensions
+    )
+    if unsupported_extensions:
+        feature_issues.append(
+            ValidationIssue(
+                code="xpert_file_extension_unsupported",
+                message=(
+                    "Unsupported Xpert file extensions: "
+                    + ", ".join(unsupported_extensions)
+                ),
+            )
+        )
+    issues = [*validation.issues, *resource_issues, *feature_issues]
     return (
         validation.model_copy(
             update={

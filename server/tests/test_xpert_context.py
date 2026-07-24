@@ -158,15 +158,34 @@ def test_context_store_persists_derived_conversation_summary(stores) -> None:
         model_id="summary-model",
         through_message_id=boundary.message_id,
     )
+    assistant = context.append_message(
+        "xpert-summary",
+        conversation.conversation_id,
+        role="assistant",
+        content="Aurora is ready for the next planning step.",
+        suggestions=["Draft milestones", "List launch risks"],
+    )
+    context.update_conversation_title(
+        "xpert-summary",
+        conversation.conversation_id,
+        title="Project Aurora",
+    )
 
     restored = XpertContextStore(context.storage_dir).get_conversation(
         "xpert-summary",
         conversation.conversation_id,
     )
+    assert restored.title == "Project Aurora"
     assert restored.summary == "The conversation concerns project Aurora."
     assert restored.summary_revision == 1
     assert restored.summary_model_id == "summary-model"
     assert restored.summary_through_message_id == boundary.message_id
+    restored_assistant = next(
+        message
+        for message in restored.messages
+        if message.message_id == assistant.message_id
+    )
+    assert restored_assistant.suggestions == ["Draft milestones", "List launch risks"]
 
 
 @pytest.mark.asyncio

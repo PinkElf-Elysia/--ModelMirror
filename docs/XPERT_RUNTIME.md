@@ -1,5 +1,23 @@
 # Xpert Runtime Contract
 
+## Versioned Conversation Features
+
+`XpertDraft.features` and immutable `XpertVersion.features` define the conversation contract for each published Xpert. Opening copy and starter questions, generated follow-up questions, conversation titles, context summaries, memory replies, file policy, TTS, and STT are resolved from the selected published version. Editing a draft or publishing a later version never mutates an older deployment.
+
+Conversation title and follow-up generation use the existing OpenAI-compatible gateway and fail softly. Versioned summaries compile to an implicit `context_compression` middleware on the final output Agent. Character budgets are conservatively converted into estimated token budgets; original messages remain intact and only the derived summary state is updated.
+
+File policy controls whether selected conversation assets enter the run, their allowed extension, and the per-run maximum. A disabled file feature preserves stored conversation files but excludes their IDs from Xpert and Goal execution. High-confidence memory replies only use memories already visible to that Xpert/conversation and fall back to the normal model path when confidence is insufficient.
+
+Audio endpoints reuse `LLM_GATEWAY_URL` / `LLM_GATEWAY_KEY` or the OpenRouter-compatible fallback:
+
+- `GET /api/xperts/{xpert_id}/audio-capabilities`
+- `POST /api/xperts/{xpert_id}/audio/transcriptions`
+- `POST /api/xperts/{xpert_id}/audio/speech`
+
+The published feature config must explicitly enable audio and select a compatible registered model. Audio bytes, prompts, credentials, and unbounded message text never enter checkpoints.
+
+`XpertAgentConfig.max_concurrency` and `recursion_limit` govern the entire Xpert execution tree. Per-Agent tool settings (`maxToolConcurrency`, `maxToolCalls`, `maxToolDepth`, and `maxIterations`) remain narrower local budgets and cannot expand the global limits.
+
 ## Office Client Runtime
 
 Office Host 作为 `host_type=office` 复用 Client Tool V1 WebSocket、持久 request、operation ID 和 `wait_kind=client_tool`。宿主额外固定 `office_app`、随机 `document_binding_id`、Requirement Sets 与工具 schema hash；旧 Host 兼容迁移为 `host_type=chrome`。
